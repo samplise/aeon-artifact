@@ -1,0 +1,306 @@
+#include "HashUtil.h"
+#include "FileUtil.h"
+#include "MaceTime.h"
+
+using std::string;
+using mace::MaceTime;
+
+service FileSync;
+
+provides Null;
+
+trace=med;
+
+services {
+  Transport tcp = TcpTransport( TransportCryptoServiceClass::NONE, false, std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(), params::get<int32_t>("NUM_THREADS") );
+}
+
+auto_types {
+  FileData {
+    sha1 hash;
+    uint32_t mod_in_seconds;
+  }
+}
+
+typedefs {
+  typedef mace::map<string, FileData> FileDataMap;
+}
+
+state_variables {
+  timer scanner __attribute((recur(60000000)));
+  FileDataMap files;
+  FileDataMap master;
+  NodeSet ns;
+  string directory;
+  MaceKey me;
+  uint64_t startTime;
+}
+
+messages {
+  File {
+    string filename;
+    FileData meta;
+    string contents __attribute((dump(no)));
+  }
+  RequestFile {
+    string filename;
+  }
+  DeleteFile {
+    string filename;
+  }
+  RequestMasterFileList { }
+  MasterFileList {
+    FileDataMap files;
+  }
+}
+
+transitions {
+  downcall maceInit() [ locking=write] {
+    me = localAddress();
+    directory = params::get<string>("SYNC_DIR");
+    ns = params::get<NodeSet>("SYNC_NODES");
+
+    startTime = curtime;
+
+    //scan local directory
+    StringList dirlist;
+    FileUtil::readDir(directory, dirlist, true);
+    for (StringList::const_iterator i = dirlist.begin(); i != dirlist.end(); i++) {
+      if (i->at(0) != '.') {
+        async_getAndStoreHash(*i);
+      }
+    }
+
+    async_hashingComplete();
+  }
+
+  async getAndStoreHash(const std::string& name) [ locking=none ] {
+    string fname = directory + "/" + name;
+    if (FileUtil::fileIsReg(fname)) {
+      //           string contents = FileUtil::loadFile(fname);
+      struct stat sbuf;
+      sha1 hash;
+      HashUtil::computeFileSha1(fname, hash, sbuf);
+      
+      setFileData(name, FileData(hash, sbuf.st_mtime), true);
+    }
+  }
+
+  async hashingComplete() [ locking=write ] {
+    maceout << "Hash time: " << (curtime - startTime) << Log::endl;
+    //poll peers for missing files
+    for (NodeSet::const_iterator j = ns.begin(); j != ns.end(); j++) {
+      if (*j != me) {
+        downcall_route(*j, RequestMasterFileList());
+        downcall_route(*j, MasterFileList(master));
+      }
+    }
+
+    scanner.schedule(60000000);
+    //exit(0);
+  }
+  
+
+  //downcall maceInit() [ locking=write ] {
+  //  me = downcall_getLocalAddress();
+  //  directory = params::get<string>("SYNC_DIR");
+  //  ns = params::get<NodeSet>("SYNC_NODES");
+
+  //  //scan local directory
+  //  StringList dirlist;
+  //  FileUtil::readDir(directory, dirlist, true);
+  //  for (StringList::const_iterator i = dirlist.begin(); i != dirlist.end(); i++) {
+  //    if (i->at(0) != '.') {
+  //      string fname = directory + "/" + *i;
+  //      if (FileUtil::fileIsReg(fname)) {
+  //        //           string contents = FileUtil::loadFile(fname);
+  //        struct stat sbuf;
+  //        sha1 hash;
+  //        HashUtil::computeFileSha1(fname, hash, sbuf);
+  //        const string& s = *i;
+  //        files[s] = FileData(hash, sbuf.st_mtime);
+  //        if (getMaster(s) == me) {
+  //          master[s] = files[s];
+  //        }
+  //      }
+  //    }
+  //  }
+
+  //  //poll peers for missing files
+  //  for (NodeSet::const_iterator j = ns.begin(); j != ns.end(); j++) {
+  //    if (*j != me) {
+  //      downcall_route(*j, RequestMasterFileList());
+  //      downcall_route(*j, MasterFileList(master));
+  //    }
+  //  }
+
+  //  scanner.schedule(60000000);
+  //}
+
+  scheduler scanner() [ locking=write ] {
+    //scan local directory
+    StringList dirlist;
+    mace::set<string> dirset;
+    FileUtil::readDir(directory, dirlist, true);
+    for (StringList::const_iterator i = dirlist.begin(); i != dirlist.end(); i++) {
+      dirset.insert(*i);
+      if (i->at(0) != '.') {
+        async_scannerHash(*i);
+      }
+    }
+
+    for (FileDataMap::iterator i = files.begin(); i != files.end(); i++) {
+      if (dirset.find(i->first) == dirset.end()) {
+        downcall_route(getMaster(i->first), DeleteFile(i->first));
+      }
+    }
+
+  }
+
+  async scannerHash(const std::string& name) [ locking=read ] {
+    string fname = directory + "/" + name;
+    if (FileUtil::fileIsReg(fname)) {
+      FileDataMap::const_iterator j = files.find(name);
+      struct stat sbuf;
+      if (j != files.end()) {
+        FileUtil::stat(fname, sbuf);
+        if (static_cast<uint32_t> (sbuf.st_mtime) == j->second.mod_in_seconds) {
+          return;
+        }
+      }
+
+      sha1 hash;
+      HashUtil::computeFileSha1(fname, hash, sbuf);
+      string contents = FileUtil::loadFile(fname);
+      FileData fd = FileData(hash, sbuf.st_mtime);
+      async_setFileData(name, fd, false);
+      downcall_route(getMaster(name), File(name, fd, contents));
+    }
+  }
+
+  //CK - some concern about possible bug.  what if File message is handled faster than this async event.
+  // To support properly - should probably use a version ID to handle async latency.
+  async setFileData(const std::string& name, const FileData& fd, bool setMaster) [ locking=write ] {
+    files[name] = fd;
+    if (setMaster && getMaster(name) == me) {
+      master[name] = fd;
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const DeleteFile& m) [ locking=write ] {
+    FileDataMap::iterator i = files.find(m.filename);
+    if (i != files.end()) {
+      files.erase(i);
+    }
+    DOWNGRADE(READ_MODE);
+    //NOTE: assumes something about ordering and conflicts
+    if (FileUtil::fileExists(directory + "/" + m.filename)) {
+      FileUtil::unlink(directory + "/" + m.filename);
+    }
+    if (getMaster(m.filename) == me) {
+      for (NodeSet::const_iterator j = ns.begin(); j != ns.end(); j++) {
+        if (*j != me) {
+          downcall_route(*j, m);
+        }
+      }
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const File& m) [ locking=read ] {
+    FileData filedata(m.meta);
+    FileDataMap::const_iterator i = files.find(m.filename);
+    if (i == files.end() || i->second.hash != m.meta.hash) {
+      string tmp = directory + "/." + m.filename + ".XXXXXX";
+      int fd = FileUtil::mktemp(tmp);
+      FileUtil::write(fd, m.contents);
+      FileUtil::close(fd);
+      sha1 sha;
+      struct stat sbuf;
+      HashUtil::computeFileSha1(tmp, sha, sbuf);
+      if (sha == m.meta.hash) {
+        if (FileUtil::fileExists(directory + "/" + m.filename)) {
+          FileUtil::unlink(directory + "/" + m.filename);
+        }
+        FileUtil::rename(tmp, directory + "/" + m.filename);
+        std::cout << "Received file at " << curtime << " name " << m.filename << std::endl;
+      }
+      else {
+        ABORT("ERROR: Hash Did Not Match.  Hari Kari!");
+      }
+      filedata.mod_in_seconds = sbuf.st_mtime;
+    }
+    else {
+      filedata.mod_in_seconds = i->second.mod_in_seconds;
+    }
+    async_setFileData(m.filename, filedata, true);
+    if (getMaster(m.filename) == dest) {
+      for (NodeSet::const_iterator j = ns.begin(); j != ns.end(); j++) {
+        if (*j != src && *j != me) {
+          downcall_route(*j, m);
+        }
+      }
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequestMasterFileList& m) [locking=read] {
+    ASSERTMSG(src != dest, "Should not get request from self!");
+    downcall_route(src, MasterFileList(master));
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const MasterFileList& m) [locking=read] {
+    ASSERTMSG(src != dest, "Should not get request from self!");
+
+    //Step 1: Request files we don't have!
+    for (FileDataMap::const_iterator i = m.files.begin(); i != m.files.end(); i++) {
+      FileDataMap::const_iterator j = files.find(i->first);
+      if (j == files.end()) {
+        downcall_route(src, RequestFile(i->first));
+      }
+      else if (j->second.hash != i->second.hash) {
+        if (j->second.mod_in_seconds > i->second.mod_in_seconds) {
+          string contents = FileUtil::loadFile(directory + "/" + i->first);
+          //ASSUMES File Unchanged...
+          downcall_route(src, File(i->first, j->second, contents));
+        }
+        else {
+          downcall_route(src, RequestFile(i->first));
+        }
+      }
+    }
+
+    //Step 2: Send files they don't have!
+    for (FileDataMap::const_iterator k = files.begin(); k != files.end(); k++) {
+      if (getMaster(k->first) == src) {
+        if (m.files.find(k->first) == m.files.end()) {
+          string contents = FileUtil::loadFile(directory + "/" + k->first);
+          //ASSUMES File Unchanged...
+          downcall_route(src, File(k->first, k->second, contents));
+        }
+      }
+    }
+  }
+  
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequestFile& m) [locking=read] {
+    FileDataMap::const_iterator i = master.find(m.filename);
+    if (i == master.end()) { 
+      maceerr << "Requested non-existent file!" << Log::endl;
+      return;
+    }
+    string contents = FileUtil::loadFile(directory + "/" + m.filename);
+    downcall_route(src, File(m.filename, i->second, contents));
+  }
+
+  upcall error(nodeId, errorCode, message) [locking=read] {}
+  
+}
+
+routines {
+    // chuangw: returning const reference is not supported.
+  //const MaceKey& getMaster(const string& filename) const {
+  //const MaceKey getMaster(const string& filename) const {
+  const MaceKey getMaster(const string& filename)  {
+    ASSERT(!ns.empty());
+    uint32_t nodePosition = (HashUtil::compute32bit(filename))%ns.size();
+    return *ns.get(nodePosition);
+  }
+}

@@ -1,0 +1,67 @@
+//CK: Suggest putting comments in this file to indicate what each message is for, and who sends it.
+messages {
+  NewOrderTransactionMessage {
+    uint32_t client_id;
+
+    int32_t w_id;
+    int32_t d_id;
+    int32_t c_id;
+    uint32_t ol_cnt; 
+
+    mace::vector<int32_t> item_ids;
+    mace::vector<uint32_t> item_quantities;
+  }
+
+  PaymentTransactionMessage {
+    uint32_t client_id;
+
+    int32_t w_id;
+    int32_t d_id;
+    mace::string c_last;
+    int32_t c_id;
+    int32_t h_amount;
+  }
+
+  OrderStatusTransactionMessage {
+    uint32_t client_id;
+
+    int32_t w_id;
+    int32_t d_id;
+    mace::string c_last;
+    int32_t c_id;
+  }
+
+  DeliveryTransactionMessage {
+    uint32_t client_id;
+
+    int32_t w_id;
+    int32_t d_id;
+    int32_t o_carrier_id;
+  }
+
+  StockLevelTransactionMessage {
+    uint32_t client_id;
+
+    int32_t w_id;
+    int32_t d_id;
+
+    uint32_t threshold;
+  }
+
+  RequestReply {
+    uint32_t clientId;
+    bool orderNumberFlag;
+    int32_t w_id;
+    int32_t d_id;
+    uint32_t order_number;
+  }
+
+  ConnectionRequest {
+    uint32_t clientId;
+  }
+
+  ConnectionSetup {
+    MaceKey proxyAddr;
+    uint32_t clientId;
+  }
+}

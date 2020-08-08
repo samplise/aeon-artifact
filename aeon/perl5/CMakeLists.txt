@@ -1,0 +1,7 @@
+EXECUTE_PROCESS(COMMAND ${PERL_EXECUTABLE} -I ${Mace_BINARY_DIR}/perl5 -I ${Mace_SOURCE_DIR}/perl5 ${Mace_SOURCE_DIR}/perl5/makedep.pl 1 ${Mace_BINARY_DIR}/perl5
+                WORKING_DIRECTORY ${Mace_SOURCE_DIR}/perl5/
+                OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/PerlDeps.txt
+                ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/PerlErr.txt)
+INCLUDE(${CMAKE_CURRENT_BINARY_DIR}/PerlDeps.txt)
+ADD_SUBDIRECTORY(Mace/Compiler)
+ADD_SUBDIRECTORY(Mace/Dependency)

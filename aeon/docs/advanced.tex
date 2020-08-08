@@ -1,0 +1,391 @@
+% 
+% advanced.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\section{Advanced Features}
+\label{sec:advanced}
+
+% automatic failure detection, uses, provides, auto types, service
+% composition, registration ids, authentication....
+
+FUTURE NOTE: This section will eventually be in the context of building a
+larger service such as the DHT service.  For now it just describes many of the
+different topics which will be covered in context in the future.
+
+\subsection{Registration UIDs}
+\label{sec:reguid}
+
+Registration UIDs were seen in action in the detailed ping example.
+Registration UIDs represent the logical link between two services (or
+more specifically, a service and one or more handlers).  So when a
+tree service uses a routing service, the tree service should use a
+registration UID to refer to itself when requesting data be sent.
+This allows the routing service to know the destination
+\classname{ReceiveDataHandler}.  It also allows the hypothetical tree
+service receiving the data to know the source service variable, in
+case it uses more than one routing service.  The requirement for
+registration UIDs is that these registration UIDs be unique, but that
+they are the same across the nodes of the network.  The present
+implementation allows this by assuming parallel code and a fixed load
+order, where the UIDs are assigned.
+
+When registering handlers for a service variable, \literal{-1} may be
+passed in as the UID the first time, to which, the assigned
+registration UID will be returned.  This registration UID should be
+used in all future calls to the same service variable, both for
+registrations and normal API calls.  This is handled automatically for
+generated services; the service variable itself is a reference to the
+registration UID.  No assumptions should be made about the assignment
+of UIDs; in the future this may be used like a cookie, and
+presentation of the cookie will be a loose form of authentication.
+
+Note: Registration UIDs are also addressed in the FAQ~(\ref{sec:faq}).
+
+\subsection{Service Composition}
+\label{sec:servicecomposition}
+
+One of the powerful features of Mace is the ability to leverage services others
+have written and to add features to them.  For example, consider the
+implementation of a generic tree multicast service.  This service makes use of
+two separate services -- one which takes care of maintaining the tree
+structure, and the other which manages routing data over the network.  Since
+tree services provide a common API to give the tree structure, a single generic
+service can implement the algorithm to multicast data to parents and children.
+
+Constructing the services for a generic tree service might look like this:
+
+\begin{programlisting}
+services {
+  Route data = TcpTransport();
+  Tree tree = RandTree();
+}
+\end{programlisting}
+
+This indicates that the GenericTreeMulticast service will work over whatever
+router and tree are passed in, but that if either service is not passed in to
+the constructor, new services will be created according to the default listed.
+
+\subsection{Local Addresses}
+\label{sec:localaddrs}
+
+Each service exports a \emph{Local Address} to those which use it, in
+the form of a \typename{MaceKey}.  For many services and situations, 
+this will just be the IPV4 address the node is bound to.  However, 
+the network address could include a proxy address (where peers should
+send traffic destined for it), or it could be part of a different address
+family together.  Services like Chord and Pastry use addresses based on
+SHA1 hashes, and systems like SkipNet use free-form strings.
+
+Any service may be asked for its notion of the local address via the
+\function{getLocalAddress()} function in \filename{ServiceClass.h}.  Services
+should use this address from their lower-level services rather than make
+assumptions, so that they may more generically run over any service providing
+the right interface.  Note, however, that the addressing a service exposes to a
+higher layer may be different from the addressing of lower services (which may
+in fact differ from each other).  In this fashion Pastry reports a local
+address based on the SHA1 hash of the local IP address, but uses IP addressing
+for all internal communication.
+
+For those with a true need to know about the IPV4 address of the local machine,
+they may use the helper function \function{Util::getAddr()}.  A somewhat better
+helper function to use is \function{Util::getMaceAddr()}, which also returns
+the proxy address set.  By default, this does a lookup on the machine's
+hostname, and returns the address associated with that hostname and the default
+port.  However, for machines which do not have an address associated with their
+machine's name, for machines which have multiple addresses and you want to
+control which one is used, or if the default code just isn't working for you,
+you may set the parameter \variablename{MACE\_LOCAL\_ADDRESS} in the Params
+class, which should be in the format ``hoststring:port'' or
+``hoststring:port/hoststring:port'', where the first is the locally bound
+address and port, and the second appends to that the proxy address (which can
+be used in conjunction with port forwarding on firewalls, for example).
+
+\subsection{Auto Types}
+\label{sec:autotype}
+
+Auto types are really just inline data structures with compiler generated
+features.  These features include Serialization for Messages,
+XmlRpc-serialization for interfacing with remote processes, the ability to dump
+and print these in automated debugging, and to create ``nodes'' from them to
+store and use in \classname{NodeCollections}.  While it is true that you could
+define these data structures in external header files, and write your own
+\function{serialize}, \function{toString}, and other sundry functions, being
+able to include them in your service is a convenience.  Since it is common for
+services to have some private internal representation of its state, this
+represents a simple way to do so.
+
+To define an auto type, simply include it in the \symbolkw{auto\_types} block,
+and define it as you would any other data structure\footnote{Though without the
+trailing semicolon}.  If you want to use the type in a
+\typename{NodeCollection}, specify that it is a node type in its defaults.  The
+full set of options will be described in the technical manual.  For an example,
+however, consider the following example:
+
+\begin{programlisting}
+auto_types {
+  child __attribute((node(fail_detect=enabled; score=delay;))) {
+    double delay __attribute((serialize(no)));
+  }
+}
+\end{programlisting}
+
+This defines a child class which represents a node, has auto failure detection
+code generated automatically\footnote{Although failure detection is enabled for
+this type, no detection will take place unless an instance of a node type or
+node collection is specified to perform failure detection using a particular
+route service}, and which returns the value of the delay field for the default
+score function.  Then, by scoring the round-trip delay in the delay field, you
+can quickly query a node collection to find out who has the least score --
+therefore the smallest round-trip latency.  Furthermore, the delay field will
+not be serialized if a child is sent over the network in the message.  This can
+be useful if for example, the type cannot be easily serialized, or if you are
+trying to conserve bandwidth.
+
+\subsection{Message Defaults}
+\label{sec:msgdefs}
+
+When using messages for communication with other nodes\footnote{And really, what
+else are you going to use messages for?}, it may be desirable to utilize
+per-message defaults for each call you might make with a message.
+
+Consider this: when developing a new routing protocol, you may want to consider
+using multiple TCP services (\emph{i.e.} socket connections or application
+queues) for communication in your service.  The point of using multiple TCP
+services is that each service will maintain an independent queue of messages to
+send your peers.  Therefore, if one is expected to frequently be full due to
+congestion backup, it is commonly desirable to have another one on hand which
+you will use more sparingly for more important control messages.  You can even
+set the queue size independently for each TCP service when it is constructed.
+Alternately, you may have two routing services, one of which you expect will be
+encrypted, and the other in plain text.  In both of these cases, the chances
+are that although you have multiple ways to route messages, you will have one
+way that you "normally" send each type of message.  Specifying per-message
+defaults allows you to set default parameters for fields following the message.
+In the \classname{RouteServiceClass}, this includes the default
+\typename{registration\_uid\_t}\footnote{And remember that this is how you
+actually specify which lower-level service to route the message over}.  This
+way, when you actually send a message, unless you override the defaults, what
+you ``normally'' want to happen will.  Furthermore, if you later change your
+mind about what you ``normally'' want to do, you can change it in a single
+place.
+
+Now, as an example, consider the \function{RouteServiceClass::route()}
+call.  Without using defaults, in the transitions of the \mac file,
+you would write the following code to send a \typename{foo} message with no
+fields to peer ``dest'' over the ``control\_'' routing service:
+
+\begin{programlisting}
+downcall_route(dest, foo(), control_);
+\end{programlisting}
+But, if you specify the following message defaults when defining foo:
+
+\begin{programlisting}
+messages {
+  foo [downcall_route(const MaceKey&, const Message&, registration_uid_t regId = control_);] { }
+}
+\end{programlisting}
+Then when you actually want to send it you can just write:
+
+\begin{programlisting}
+downcall_route(dest, foo());
+\end{programlisting}
+
+Apart from being much shorter, if you later add an encrypted route service 
+to your service, you can change which service the \typename{foo} message is 
+sent over by just changing the message defaults.  And you can still, on 
+a case-by-case basis override the defaults.
+
+\subsection{Method Remapping Block}
+\label{sec:method_remapping}
+
+Earlier, when writing the Ping service, we glossed quickly over the
+\symbolkw{method\_remappings} block, indicating simply that it is
+important to make sure that messages are handled properly.  The basic
+issue is that since the Mace compiler generates code based on
+arbitrary interface header files, it does not know \emph{a priori} what
+strings mean to services.  For example, they could in fact be any of
+the messages defined in the messages block, or any serializable type,
+or just a plain old string.  By default, the compiler assumes a string
+is just a string, and relies on the annotations in this block by the
+service implementor to tell it otherwise.  An added effect of putting
+this annotation in the service description is that different services
+may interpret and use the strings differently.  However, in the
+future, we may also consider annotating the interface files to allow a
+different default behavior.
+
+A second issue is how to set default parameters for calls made from
+the service.  Calls made with Message parameters have the ability to
+set per-message defaults, as discussed in the previous section
+(\S~\ref{sec:msgdefs}).  But we need to provide a mechanism for
+setting defaults for non-messaging calls, and to provide defaults for 
+all messages.
+
+In the future, we will also be allowing more flexible remappings, which for
+example allow you to remap types using anonymous inline functions, and 
+which allow you to remap functions to other functions.
+
+The \symbolkw{method\_remappings} block is broken into two parts:
+\symbolkw{uses} calls and \symbolkw{implements} functions.
+
+\subsubsection*{Uses Calls}
+
+Uses calls are calls which a service writer will make from their service into
+either services which they use (downcalls), or to handlers which are registered
+with them (upcalls).  This declarations in the block should match the declarations
+in their respective header files, with the following differences.
+
+\begin{description}
+
+\item[function prefix] Each function should be prefixed either by
+\symbolkw{downcall\_} or \symbolkw{upcall\_}, appropriate to its kind.
+
+\item[optional string handling] Any string parameter may have a
+serialization instruction provided, which can be any type mace knows
+how to serialize and deserialize.  The type, and possibly
+\symbolkw{const} and/or reference (\symbolkw{\&}) should appear in the
+declaration where the string declaration would normally go.  Then, an
+arrow pointing to the right (\symbolkw{->}) is used to indicate that
+for this function you will pass in the type you specified, but it
+should be converted to the type from the original function declaration
+before performing the downcall.  The type modifiers will be applied to
+the object as it is passed around for serialization or
+deserialization, and do not necessarily have to match those from the
+actual function declaration.  \footnote{Note that the Mace compiler
+will [soon] correctly handle updating your data item if a non-constant
+string reference is used (and therefore possibly modified).  If you
+don't want to allow that to happen, you can add the constant modifier
+to your declaration of your type, which will prevent the Mace compiler
+from deserializing the string as the function call returns.}  This is
+why in the \function{downcall\_route} specification, the specification
+is \typename{[const Message\&]}.  Since in these calls, a temporary
+Message is constructed, the gcc compiler will complain if the Message
+parameter is non-const.  The Message is passed by reference, to avoid
+unnecessary memory copies before serialization, or to ensure the
+deserialized string fills in the provided message.  Note that
+``Message'' is a special string for serialization, since this will
+cause the compiler to both apply per-message defaults, and to handle
+determining the message type on deserialization and calling the
+appropriate transition with the message delivery specified.
+
+\item[default values] Default values may be specified.  These are done in the
+usual fashion by naming the variable and providing a default value for it.
+After doing so, the parameter can be left out of the call, and the default will
+be provided. 
+\end{description}
+
+\begin{programlisting}
+method_remappings {
+  uses {
+    downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t);
+    downcall_joinOverlay(const NodeSet&, const std::string& identity=std::string(), registration_uid_t regId = router_);
+    upcall_verifyJoinOverlay(const MaceKey&, const std::string&, registration_uid_t regId = activeAuthenticator);
+  }
+  //... service-implemented calls will be described next
+  implements {
+    //... be patient for this one
+  }
+}
+\end{programlisting}
+
+In the above example, we're specifying 3 different uses calls with
+different instructions.  In the first case, we're indicating that when
+we call \function{downcall\_route}, for the second parameter, instead
+of passing in a string, we will pass in a \typename{const Message\&},
+and that it should be automatically serialized to a string.  Since it
+is a constant reference, there will be no consideration for the
+deserialization of the string parameter after the call to
+\function{downcall\_route}.  The second call specifies that on the
+\function{downcall\_joinOverlay} call, the default identity is the
+empty string, and the default registration UID is the one assigned to
+the \variablename{router\_} service variable (assuming one exists).
+The third mainly differs in that it is specifying an upcall, and that
+the regId default should be activeAuthenticator, which may be a state
+variable rather than a service variable.
+
+
+\subsubsection*{Implements}
+
+The \symbolkw{implements} sub-block remaps calls which may be made on the
+service the writer is writing.  These include both functions of the API defined
+by service classes they provide (downcalls), and callback functions/upcalls for
+handlers they register with services they use (upcalls).  Their declaration
+also closely follows the original declaration from the header file, and in this
+case no qualification about the type of call is necessary since there are
+sub-blocks for the different types.  Unlike the uses block, the implements
+block does not support default values since these calls are incoming
+from elsewhere, they will already have the parameters filled in.  However, the
+syntax for specifying serialization instructions are the same, save for the
+direction of the arrow being reversed (\symbolkw{<-}) to indicate that the
+remote caller is passing in a string and it should be deserialized into your
+type before your transitions are called.  The same provisos are true about the
+\symbolkw{const} and \symbolkw{\&} modifiers on the type, and serialization
+after your transition is done.  This will typically be used to specify the
+handling of strings in upcalls either as messages or as other serializable
+types.
+
+\begin{programlisting}
+method_remappings {
+  uses {
+    //... see the prior section
+  }
+  implements {
+    upcalls {
+      deliver(const MaceKey&, const MaceKey&, const Message& <- const std::string&,
+              registration_uid_t);
+    }
+    downcalls {
+      //... the same syntax can be used here
+    }
+  }
+}
+\end{programlisting}
+
+In this example there is a single callback specification, and when deliver is
+called, the 3rd parameter will be handled like a message.
+
+\subsection{Automated Failure Detection}
+\label{sec:failure}
+
+Automated failure detection is presently disabled due to incompatible updates
+to the compiler, but will be fixed soon.  Synopsis: After enabling failure
+detection for a node-auto type, an instance of a state variable (node or node
+collection) may have failure detection active.  Liveness probing will
+automatically be done to the specified peers, and when failures are detected,
+they are signaled to the service via special transitions firing.
+
+\subsection{Authentication}
+\label{sec:authentication}
+
+Authentication will be covered when the DHT is included in the manual.
+Synopsis: A single authenticator per-group or per-overlay is registered or set
+at any given point in time (per-node).  Local authentication is handled by that
+active authenticator, and remote authentication goes locally to that
+authenticator.  We are adding identity strings to several of our calls to make
+this possible.
+

@@ -1,0 +1,87 @@
+mace:\
+        :pb=\p\d?\(:cf:np=\)\d?;:bb={:be=}:\
+        :cb=/*:ce=*/:ab=//:ae=$:sb=":se=\e":lb=':le=\e':\
+        :tl:id=_~\::\
+        :zb=@:ze=@:tb=%%:te=%%:mb=%\$:me=\$%:vb=%\|:ve=\|%:\
+        :kw=and and_eq asm auto bitand bitor bool break case catch char class\
+        compl const const_cast continue default delete do double dynamic_cast\
+        else enum explicit export extern false float for friend goto if inline\
+        int long mutable namespace new not not_eq operator or or_eq private\
+        private\: protected protected\: public public\: register\
+        reinterpret_cast return short signed sizeof static static_cast struct\
+        switch template this throw true try typedef typeid typename union\
+        unsigned using virtual void volatile wchar_t while xor xor_eq\
+        static_cast const_cast dynamic_cast reinterpret_cast\
+        #define #else #endif #if #ifdef #ifndef #include #undef #pragma #\
+        define else endif if ifdef ifndef include undef defined\
+	service provides trace constants services constructor_parameters\
+	states auto_types typedefs state_variables method_remappings messages\
+	transitions routines state upcall downcall scheduler\
+        handlers\
+        implements upcalls uses uint int32_t uint32_t int64_t uint64_t:
+
+EndOfLanguageDefinitions:
+#
+# The following entries are NOT language definitions,
+# but configuration specifications for the LGrind program
+#
+BeginOfConfigurationItems:
+
+# a list of extensions and the language that belongs to them
+# these can be wrong or too system specific
+# recommendations appreciated
+extensions:\
+        :c=c:\
+        :C=c++:cpp=c++:cc=c++:h=c++:\
+        :pas=pascal:\
+        :ads=ada:adb=ada:\
+        :tcl=tcl/tk:\
+        :y=yacc:\
+        :tex=latex:\
+        :java=java:\
+        :mod=modula2:\
+        :bas=visualbasic:\
+        :ps=postscript:eps=postscript:pfa=postscript:\
+        :pro=prolog:\
+        :scm=scheme:\
+        :m=matlab:\
+        :ml=sml/nj:\
+        :f=f77:F=f77:for=f77:\
+        :l=lex:\
+        :k=kimwitu++:\
+        :py=python:
+
+# character substitution table
+chartab:\
+:84="a:94="o:81="u:e1="s:8e="A:99="O:9a="U:e0=$\\alpha$:
+
+# preamble to put at the beginning of a stand-alone listing
+firstpreamble:\
+\\documentclass[a4paper,twoside]{article}\n\
+\\usepackage[procnames,noindent]{lgrind}\n\
+\\usepackage{fancyhdr,a4wide}\n\
+\\usepackage{german}\n\
+\\usepackage{makeidx}\n\
+\\pagestyle{fancy}\n\n\
+\\makeindex\n\n\
+\\begin{document}\n
+
+# postamble to put at the very end of a stand-alone listing
+postamble:\
+\\printindex\n\
+\\end{document}
+
+# preamble to put before each file in a stand-alone listing
+filepreamble:\
+\\renewcommand{\\footrulewidth}{0.4pt}\n\
+\\fancyhead[C]{\\lgrindhead}\n\
+\\fancyhead[LO,RE]{\\lgrindfilesize~Bytes\\\\\\lgrindmodtime}\n\
+\\fancyhead[RO,LE]{\\bfseries \\lgrindfilename\\\\\
+\\lgrindmodday.\\lgrindmodmonth.\\lgrindmodyear}\n\
+\\fancyfoot[C]{\\bfseries\\thepage}\n\
+\\setlength{\\headheight}{24pt}\n
+
+# preferences for line numbering, changing fonts etc.
+# (comes after "\begin{lgrind}")
+configuration:
+

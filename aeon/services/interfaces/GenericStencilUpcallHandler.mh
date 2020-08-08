@@ -1,0 +1,4 @@
+handler GenericStencilUpcall {
+	virtual void val_updated( const mace::deque<std::string>& required_vars,  const mace::deque<std::string>& required_vals,  const mace::deque<std::string>& vars,  
+			const mace::deque<int>& flags, const std::string& identifier);	
+}; // GenericStencilUpcall

@@ -1,0 +1,158 @@
+#include <functional>
+#define get16bits(d) ((((uint32_t)(((const uint8_t *)(d))[1])) << 8)\
+                       +(uint32_t)(((const uint8_t *)(d))[0]) )
+
+service KeyValueServer;
+
+provides Null, MigrationTest;
+
+time = MaceTime;
+
+constructor_parameters {
+  uint32_t NUM_GROUPS = 0;
+  uint64_t MEMORY_ROUNDS = 1000;
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  Get __attribute((number(0))){
+    mace::string key;
+  }
+  GetReply {
+    bool exists;
+    mace::string key;
+    mace::string value;
+  }
+  Put {
+    mace::string key;
+    mace::string value;
+  }
+  
+  PutReply {
+    mace::string key;  
+  }
+  
+}
+
+state_variables {
+  uint32_t num_groups;
+  context Bucket<uint32_t bucket_id> {
+    uint32_t id;
+    double memory_size;
+    uint64_t req_num;
+    mace::map<mace::string, mace::string> kvmap;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("BS_KeyValueServer");
+    for(uint32_t i=0; i<NUM_GROUPS; i++){
+      async_initialize_bucket(i);  
+    }
+    
+  }
+
+  async [ Bucket<key> ] initialize_bucket(uint32_t key){
+    memory_size = 0;
+    req_num = 0;
+    id = key;
+  }
+
+  // chuangw: more efficient
+  upcall [ Bucket< hash(msg.key) > ] deliver(const MaceKey& src, const MaceKey& dest, const Get& msg) {
+    ADD_SELECTORS("BS_KeyValueServer");
+    maceout<<"Recv GET with key "<<msg.key<<" in Bucket "<<id<< " hash = " << hash(msg.key) << " length = " << msg.key.length() << Log::endl;
+    if( kvmap.find(msg.key) != kvmap.end() ) {
+      downcall_route(src, GetReply(true, msg.key, kvmap[msg.key]));
+    } else {
+      downcall_route(src, GetReply(false, msg.key, "NULL"));
+    }
+  }
+  
+
+  upcall [Bucket<hash(msg.key)>] deliver(const MaceKey& src, const MaceKey& dest, const Put& msg) {
+    ADD_SELECTORS("BS_KeyValueServer");
+    maceout<<"Recv PUT with key "<<msg.key<<" in Bucket "<<id<< " hash = " << hash(msg.key) << " length = " << msg.key.length() << Log::endl;
+    kvmap[ msg.key ] = msg.value;
+    downcall_route( src, PutReply(msg.key) );
+  }
+}
+
+
+routines {
+  /*
+   * Refer to http://www.azillionmonkeys.com/qed/hash.html */
+  [__null] uint32_t get_bucket(const mace::string& key) {
+    uint32_t len = key.length();
+    char * cstr = new char [key.length()+1];
+    char * data = cstr;
+    uint32_t hash = len, tmp;
+    int rem;
+
+    if (len == 0) {
+      delete[] cstr;
+      return 0;
+    }
+
+    rem = len & 3;
+    len >>= 2;
+
+    /* Main loop */
+    for (; len > 0; len--) {
+      hash  += get16bits (data);
+      tmp    = (get16bits (data+2) << 11) ^ hash;
+      hash   = (hash << 16) ^ tmp;
+      data  += 2*sizeof (uint16_t);
+      hash  += hash >> 11;
+    }
+
+    /* Handle end cases */
+    switch (rem) {
+      case 3: hash += get16bits (data);
+              hash ^= hash << 16;
+              hash ^= ((signed char)data[sizeof (uint16_t)]) << 18;
+              hash += hash >> 11;
+              break;
+      case 2: hash += get16bits (data);
+              hash ^= hash << 11;
+              hash += hash >> 17;
+              break;
+      case 1: hash += (signed char)*data;
+              hash ^= hash << 10;
+              hash += hash >> 1;
+    }
+
+    /* Force "avalanching" of final 127 bits */
+    hash ^= hash << 3;
+    hash += hash >> 5;
+    hash ^= hash << 4;
+    hash += hash >> 17;
+    hash ^= hash << 25;
+    hash += hash >> 6;
+
+    delete[] cstr;
+    return hash % (NUM_GROUPS);
+
+    //std::hash<const char*> H;
+    //return ((uint32_t) H(key.c_str())) % (NUM_GROUPS);
+  }
+
+  [__null] uint32_t hash(const mace::string& s) {
+    uint32_t h = 0;
+    for( uint32_t i = 0; i < s.length(); i++) {
+      h = h << 1 ^ s[i];
+    }
+    return h % NUM_GROUPS;
+  }
+}
+
+

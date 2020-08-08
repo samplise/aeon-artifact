@@ -1,0 +1,301 @@
+#include <unistd.h>
+#include "mace.h"
+
+service SimGroupMulticastApp;
+
+provides SimApplication;
+
+//trace=med;
+//trace=low;
+//trace=off;
+
+states {
+  postInit;
+  joiningOverlay;
+  waitUntilJoinOverlay;
+  joinedOverlay;
+  waitUntilJoinGroup;
+  joiningGroup;
+  waitUntilReady;
+  sendReceiveMessages;
+  sendMessages;
+  doneMessages;
+}
+
+services {
+  Overlay o;
+  Group g;
+  Multicast m;
+}
+
+typedefs {
+  typedef mace::map<MaceKey, uint32_t> GroupCountMap;      // first = ip, second = num of received messages.
+}
+
+state_variables {
+  uint32_t messageCount;
+  GroupCountMap gcm;
+  uint32_t total_msg_exchange = 0;
+  timer join;
+}
+
+constructor_parameters {
+  uint32_t numMessages = 10;
+  MaceKey mygroup = MaceKey::null; //sha160
+  MaceKey myip = MaceKey::null;
+  int num_transport = 1;
+  uint64_t join_delay = 1*1000*1000;
+  NodeSet allGroups = NodeSet(); //sha160
+  NodeSet bootstrap = NodeSet();
+}
+
+messages {
+  Data {
+    uint32_t seqNum;
+    MaceKey src;
+    uint64_t timestamp;
+  }
+}
+
+transitions {
+  downcall (state == init) maceInit() {
+    // me = downcall_getLocalAddress(m);
+    state = postInit;
+//    ASSERT(!allGroups.empty());
+//    for (NodeSet::const_iterator i = allGroups.begin(); i != allGroups.end(); i++) {
+//      gcm[*i] = 0;
+//    }
+  }
+
+  downcall (state == init) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent");
+    maceInit();
+    return "maceInit()";
+  }
+
+  downcall (state == postInit) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent");
+//    NodeSet ns;
+//    ns.insert(upcall_getMaceKey(0));
+//    downcall_joinOverlay(ns);
+//    maceout << "joiningOverlay() - node 0" << Log::endl;
+//
+//    ASSERT(!allGroups.empty());
+//    downcall_joinOverlay(allGroups);
+//    maceout << "joiningOverlay() - all other node" << Log::endl;
+
+    ASSERT(!bootstrap.empty());
+    downcall_joinOverlay(bootstrap);
+    maceout << "joiningOverlay() : joining to the " << bootstrap << " nodes overlay." << Log::endl;
+
+    state = joiningOverlay;
+    return "joinOverlay()";
+  }
+
+  downcall (state == joiningOverlay) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent");
+    if( downcall_isJoinedOverlay() )
+    {
+      maceout << "isJoinedOverlay() = TRUE" << Log::endl;
+      state = waitUntilJoinOverlay;
+      join.schedule(join_delay);
+
+      //state = joinedOverlay;
+    }
+    else
+    {
+      //maceout << "isJoinedOverlay() = FALSE" << Log::endl;
+    }
+
+    return "joiningOverlay()";
+  }
+
+//  upcall joinResultOverlay(const MaceKey& source, join_status_t status) {
+//    ADD_SELECTORS("SimGroupMulticastApp::joinResultOverlay");
+//
+//    maceout << "node " << source << " has joined to overlay." << Log::endl;
+//  }
+
+
+  /*
+   * Scheduler design
+   */
+
+  scheduler (state == waitUntilJoinOverlay) join() {
+    ADD_SELECTORS("SimGroupMulticastApp::join");
+    state = joinedOverlay;
+  }
+
+  scheduler (state == joiningOverlay || state == postInit || state == init) join() {
+    ADD_SELECTORS("SimGroupMulticastApp::join");
+    join.reschedule(join_delay); 
+  }
+
+  downcall (state == waitUntilJoinOverlay) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent");
+    return "waitUntilJoinOverlay()";
+  }
+
+  downcall (state == joinedOverlay) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent");
+
+    downcall_createGroup(mygroup);
+
+    for (NodeSet::const_iterator i = allGroups.begin(); i != allGroups.end(); i++) {
+      downcall_joinGroup(MaceKey(sha160,(*i).toString()));
+      gcm[MaceKey(sha160,(*i).toString())] = 0;
+    }
+
+    maceout << "JoinGroup()" << Log::endl;
+    //state = joiningGroup;
+    state = waitUntilJoinGroup;  
+    join.reschedule(join_delay);
+    return "joinGroup(s)";
+  }
+
+  /*
+   * Scheduler for timing synchronization
+   */
+
+  scheduler (state == waitUntilJoinGroup) join() {
+    ADD_SELECTORS("SimGroupMulticastApp::join");
+    state = joiningGroup;
+  }
+
+  scheduler (state == joinedOverlay) join() {
+    ADD_SELECTORS("SimGroupMulticastApp::join");
+    join.reschedule(join_delay); // my request could get lost
+  }
+
+  downcall (state == waitUntilJoinGroup) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent::waitUntilJoinGroup");
+    return "waitUntilJoinGroup()";
+  }
+
+  downcall (state == joiningGroup) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent::joiningGroup");
+    for (NodeSet::const_iterator i = allGroups.begin(); i != allGroups.end(); i++) {
+      if( !downcall_isJoinedGroup(MaceKey(sha160,(*i).toString())) ) {
+        return "joiningGroup(s)";
+      }
+    }
+
+    maceout << "All joined. Now multicasting..." << Log::endl;
+
+    //state = sendReceiveMessages;
+    state = waitUntilReady;
+    join.reschedule(join_delay);
+    return "sendReceiveMessages(s)";
+  }
+
+  scheduler (state == waitUntilReady) join() {
+    ADD_SELECTORS("SimGroupMulticastApp::join::waitUntilReady");
+    state = sendReceiveMessages;
+  }
+
+  downcall (state == waitUntilReady) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent::waitUntilReady");
+    return "waitUntilReady()";
+  }
+
+  downcall (state == sendReceiveMessages || state == sendMessages) simulateEvent(){  /* [locking=off] */   // broadcast messages here
+    ADD_SELECTORS("SimGroupMulticastApp::simulateEvent::broadcast");
+    if( messageCount == 0 || isMsgAllReceived(gcm, messageCount) )
+    {
+      messageCount++;
+      uint64_t delay = curtime;
+      downcall_multicast(mygroup, Data(messageCount, myip, delay));
+      maceout << "Send to " << mygroup << "  " << messageCount << " at " << delay << Log::endl;
+    }
+    else
+    {
+      //maceout << "no multicast" << Log::endl;
+    }
+
+    std::ostringstream os;
+    os << "multicast(" << mygroup << "," << messageCount << ")";
+    return os.str();
+  }
+
+  upcall (state == sendMessages) deliver(src, dest, msg) [locking=read] { /* [locking=off] */
+    ADD_SELECTORS("SimGroupMulticastApp::deliver");
+    // does whatever application stuffs are
+    uint64_t delay = curtime - msg.timestamp;
+    maceout << "Recv from " << msg.src << " " << msg.seqNum << " " << delay << " [extra]" << Log::endl;
+  }
+
+  upcall (state == sendReceiveMessages) deliver(src, dest, msg) [locking=read] { /* [locking=off] */
+    ADD_SELECTORS("SimGroupMulticastApp::deliver");
+    // does whatever application stuffs are
+    //state = doneMessages;
+//    total_msg_exchange++;
+//    if( total_msg_exchange > numMessages )
+//      state = doneMessages;
+
+    maceout << "delivered message." << Log::endl;
+
+    uint64_t delay = curtime - msg.timestamp;
+
+    GroupCountMap::iterator i = gcm.find(dest);
+    if (i != gcm.end()) {
+      // update count.
+      if( msg.seqNum > i->second )
+      {
+        i->second = msg.seqNum;
+      }
+//      i->second++;
+//      if (i->second >= numMessages) {
+//        gcm.erase(i);
+//        state = doneMessages;
+//      }
+//      if (gcm.empty()) {
+//        //state = sendMessages;
+//        state = doneMessages;
+//      }
+      maceout << "Recv from " << msg.src << " " << msg.seqNum << " " << delay << Log::endl;
+    }
+    else {
+      maceout << "Recv from " << msg.src << " " << msg.seqNum << " " << delay << " [not found]" << Log::endl;
+    }
+
+    if( isMsgAllReceived(gcm, numMessages) )
+      state = doneMessages;
+
+  }
+
+  downcall (state == doneMessages) simulateEvent() {
+    ADD_SELECTORS("SimGroupMulticastApp::deliver::done");
+    return "doneMessages";
+  }
+
+  downcall eventsWaiting(weight) {
+    ADD_SELECTORS("SimGroupMulticastApp::eventsWaiting");
+    if (state == sendMessages || state == sendReceiveMessages) {
+      weight = 1;
+    }
+    return true;
+  }
+
+}
+
+routines {
+  bool isMsgAllReceived( GroupCountMap gcm, uint32_t msg_id )
+  {
+    for( GroupCountMap::iterator i = gcm.begin(); i != gcm.end(); i++ )
+    {
+      if( i->second < msg_id )
+        return false;
+    }
+    return true;
+  }
+}
+
+
+properties {
+  safety {
+    //     stateTransition : \forall n \in \nodes: (n.state \neq init \and n.gcm.empty()) \implies n.state = sendMessages;
+  }
+  liveness {
+    allDone : \forall n \in \nodes: n.state = doneMessages;
+  }
+}

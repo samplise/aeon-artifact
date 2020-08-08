@@ -1,0 +1,278 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+#print "execute macec\n";
+#use lib $ENV{HOME} . "/mace/perl5";
+
+use Getopt::Long;
+use File::Basename;
+use File::Spec;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+
+use Mace::Util qw{:all};
+use Mace::Compiler::MaceCompiler;
+use Mace::Compiler::ClassCache;
+use Mace::Compiler::MInclude;
+use Carp;
+use Cwd;
+
+my @includes;
+my $traceflag = "";
+my $snapshotflag = "";
+Getopt::Long::Configure("bundling");
+GetOptions("I=s" => \@includes,
+           "trace=s" => \$traceflag,
+           "USE_SNAPSHOT=s" => \$snapshotflag);
+
+unless (scalar(@ARGV)) {
+    die "usage: $0 [-I path [-I path ...]] [--trace=(off|low|med|high)] [--USE_SNAPSHOT=(off|on)] file\n";
+}
+
+my %tracemap = ( "" => -2, "off" => -1, "manual" => 0, "low" => 1, "med" => 2, "medium" => 2, "high" => 3);
+unless (defined($tracemap{$traceflag})) {
+    die "Unrecognized trace level -- use off | low | med | high\n";
+}
+$Mace::Compiler::Globals::traceOverride = $tracemap{$traceflag};
+
+
+my %snapshotmap = ( "" => 0, "OFF" => 0, "off" => 0, "ON" => 1, "on" => 1);
+unless (defined($snapshotmap{$snapshotflag})) {
+    die "Unrecognized snapshot mode -- use off | on\n";
+}
+$Mace::Compiler::Globals::useSnapshot = $snapshotmap{$snapshotflag};
+# print STDERR "SNAPSHOT level = ".$Mace::Compiler::Globals::useSnapshot."\n";
+
+
+$Mace::Compiler::Globals::useParseVariables = 0;
+$Mace::Compiler::Globals::useFullContext = 1;
+$Mace::Compiler::Globals::supportFailureRecovery = 1;
+
+
+$SIG{__DIE__} = sub{ confess $_[0]; };
+$SIG{__WARN__} = sub{ confess $_[0]; die; };
+
+my $Werror = 0;
+if ($ENV{MACEC_WARNINGS_AS_ERRORS}) {
+  $Werror = 1;
+}
+
+$Mace::Compiler::Globals::suppressWarnings{unusual} = 0;
+$Mace::Compiler::Globals::suppressWarnings{undefined} = 0;
+$Mace::Compiler::Globals::suppressWarnings{deprecated} = 0; 
+$Mace::Compiler::Globals::suppressWarnings{unimplemented} = 0; 
+
+#$::RD_HINT=1;
+#$::RD_TRACE=1;
+
+if ($ENV{MACEC_SUPPRESS_UNDEFINED}) {
+  $Mace::Compiler::Globals::suppressWarnings{undefined} = 1;
+}
+if ($ENV{MACEC_SUPPRESS_DEPRECATED}) {
+  $Mace::Compiler::Globals::suppressWarnings{deprecated} = 1;
+}
+if ($ENV{MACEC_SUPPRESS_UNIMPLEMENTED}) {
+  $Mace::Compiler::Globals::suppressWarnings{unimplemented} = 1;
+}
+if ($ENV{MACEC_SUPPRESS_UNUSUAL}) {
+  $Mace::Compiler::Globals::suppressWarnings{unusual} = 1;
+}
+if ($ENV{MACEC_SUPPRESS_WARNINGS}) {
+  $Mace::Compiler::Globals::suppressWarnings{unusual} = 1;
+  $Mace::Compiler::Globals::suppressWarnings{undefined} = 1;
+  $Mace::Compiler::Globals::suppressWarnings{deprecated} = 1; 
+  $Mace::Compiler::Globals::suppressWarnings{unimplemented} = 1;
+}
+
+#if ($ENV{MACEC_TRACE_OVERRIDE} and scalar(grep($ENV{MACEC_TRACE_OVERRIDE}, keys(%tracemap))) ) {
+#  print "Overriding trace level to be ".$ENV{MACEC_TRACE_OVERRIDE}."\n";
+#  $Mace::Compiler::Globals::traceOverride = $tracemap{$ENV{MACEC_TRACE_OVERRIDE}};
+#}
+
+use Mace::Compiler::Globals;
+push(@Mace::Compiler::Globals::INCLUDE_PATH, @includes, cwd(), dirname($0)."/../services/interfaces");
+$Mace::Compiler::Globals::NUM_WARN = 0;
+$Mace::Compiler::Globals::NUM_ERROR = 0;
+
+my $file = shift(@ARGV);
+
+# $Mace::Compiler::Globals::filename = $file;
+
+my @in;
+
+Mace::Compiler::MInclude::expandFile($file, \@in);
+
+# my @linemap;
+# my @filemap;
+# my @offsetmap;
+# 
+# Mace::Compiler::MInclude::getLines($file, \@in, \@linemap, \@filemap, \@offsetmap);
+# 
+# my $in = join("", @in);
+
+my $parser = Mace::Compiler::MaceCompiler->new();
+my $sc = $parser->parse(\@in, $file);
+
+if($Mace::Compiler::Globals::NUM_ERROR) {
+  exit(1);
+}
+
+
+my $hfile;
+my $hfilehandle;
+open($hfilehandle, ">", \$hfile) or die;
+$sc->printHFile($hfilehandle);
+close($hfilehandle);
+
+my $hfileindent = indentFileStr(\$hfile);
+
+my $ccfile;
+my $ccfilehandle;
+open($ccfilehandle, ">", \$ccfile) or die;
+$sc->printCCFile($ccfilehandle);
+#$sc->printCCFileDummy($ccfilehandle);
+close($ccfilehandle);
+
+my $ccfileindent = indentFileStr(\$ccfile);
+
+#my $dummyinitccfile;
+#my $dummyinitccfilehandle;
+#open($dummyinitccfilehandle, ">", \$dummyinitccfile) or die;
+#$sc->printDummyInitCCFile($dummyinitccfilehandle);
+#close($dummyinitccfilehandle);
+
+#my $dummyinitccfileindent = indentFileStr(\$dummyinitccfile);
+
+my $inithfile;
+my $inithfilehandle;
+open($inithfilehandle, ">", \$inithfile) or die;
+$sc->printInitHFile($inithfilehandle);
+close($inithfilehandle);
+
+my $inithfileindent = indentFileStr(\$inithfile);
+
+my $initccfile;
+my $initccfilehandle;
+open($initccfilehandle, ">", \$initccfile) or die;
+$sc->printInitCCFile($initccfilehandle);
+close($initccfilehandle);
+
+my $initccfileindent = indentFileStr(\$initccfile);
+
+my $constantsfile;
+my $constantsfilehandle;
+open($constantsfilehandle, ">", \$constantsfile) or die;
+$sc->printConstantsFile($constantsfilehandle);
+close($constantsfilehandle);
+
+my $constantsfileindent = indentFileStr(\$constantsfile);
+
+my $macrosfile;
+my $macrosfilehandle;
+open($macrosfilehandle, ">", \$macrosfile) or die;
+$sc->printMacrosFile($macrosfilehandle);
+close($macrosfilehandle);
+
+my $macrosfileindent = indentFileStr(\$macrosfile);
+
+Mace::Compiler::Globals::msg("PARSE", " ", " ", "Parse Completed With $Mace::Compiler::Globals::NUM_WARN Warnings and $Mace::Compiler::Globals::NUM_ERROR Errors");
+
+if($Mace::Compiler::Globals::NUM_ERROR) {
+  exit(1);
+}
+if($Mace::Compiler::Globals::NUM_WARN && $Werror ) {
+  Mace::Compiler::Globals::msg("ERROR", " ", " ", "Treating warnings as errors!");
+  exit(2);
+}
+
+my $basefile = basename($file,".m",".mac",".mace");
+$basefile = File::Spec->catfile(getcwd(),$basefile);
+#$basefile =~ s/\..*//;
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned header file!");
+open (HFILE, ">", "$basefile.h") or die;
+insertLine(\$hfileindent, "$basefile.h");
+print HFILE $hfileindent;
+close(HFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned cc file!");
+open(CCFILE, ">", "$basefile.cc") or die;
+insertLine(\$ccfileindent, "$basefile.cc");
+print CCFILE $ccfileindent;
+close(CCFILE);
+
+#Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned dummy init file!");
+#open(DUMMYINITCCFILE, ">", "$basefile-dummy-init.cc") or die;
+#insertLine(\$dummyinitccfileindent, "$basefile-dummy-init.cc");
+#print DUMMYINITCCFILE $dummyinitccfileindent;
+#close(DUMMYINITCCFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned init header file!");
+open(INITHFILE, ">", "$basefile-init.h") or die;
+insertLine(\$inithfileindent, "$basefile-init.h");
+print INITHFILE $inithfileindent;
+close(INITHFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned init cc file!");
+open(INITCCFILE, ">", "$basefile-init.cc") or die;
+insertLine(\$initccfileindent, "$basefile-init.cc");
+print INITCCFILE $initccfileindent;
+close(INITCCFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned constants file!");
+open(CONSTANTSFILE, ">", "$basefile-constants.h") or die;
+insertLine(\$constantsfileindent, "$basefile-constants.h");
+print CONSTANTSFILE $constantsfileindent;
+close(CONSTANTSFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing returned macros file!");
+open(MACROSFILE, ">", "$basefile-macros.h") or die;
+insertLine(\$macrosfileindent, "$basefile-macros.h");
+print MACROSFILE $macrosfileindent;
+close(MACROSFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing depfile!");
+my $depfiles = join(" ", @Mace::Compiler::ClassCache::readFiles, values(%{$parser->parser()->{'local'}->{'mincludes'}}));
+open(DEPFILE, ">", "$basefile.macdep") or die;
+print DEPFILE <<END;
+$basefile.h $basefile.cc $basefile-init.h $basefile-init.cc $basefile-constants.h $basefile-macros.h $basefile.macdep $basefile.mac.annotated : $depfiles
+END
+close(DEPFILE);
+
+Mace::Compiler::Globals::msg("GENERATE", " ", " ", "Printing annotated file!");
+open(ANNOFILE, ">", "$basefile.mac.annotated") or die;
+print ANNOFILE $sc->annotatedMacFile();
+close(ANNOFILE);
+
+sub indentFileStr {
+  my $infile = shift;
+  my $outfile = '';
+  my $infilehandle;
+  my $outfilehandle;
+
+  open($infilehandle, "<", $infile) or die;
+  open($outfilehandle, ">", \$outfile) or die;
+
+  indentFile($infilehandle, $outfilehandle);
+
+  close($infilehandle);
+  close($outfilehandle);
+
+  return $outfile;
+}
+
+sub insertLine {
+  my $file = shift;
+  my $filename = shift;
+
+  my @lines = split /\n/, $$file;
+  my $nextlineno = 2;
+  for my $l (@lines) {
+    if($l =~ m|^\s*// __INSERT_LINE_HERE__\s*$|) {
+      $l = qq{#line $nextlineno "$filename"};
+    }
+    $nextlineno++;
+  }
+  $$file = join("\n", @lines)."\n";
+}
+

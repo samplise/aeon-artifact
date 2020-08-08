@@ -1,0 +1,154 @@
+//#include <random>
+
+service SerializeTest;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  uint32_t CLIENT_NUMBER = 4;
+  uint32_t SERVER_NUMBER = 4;
+  uint64_t MAX_KEY = 1000;
+  uint32_t OUTPUT_COUNT = 1000;
+}
+
+typedefs {
+  
+}
+
+services {
+  Transport t;
+}
+
+messages {
+
+}
+
+auto_types {
+  
+}
+
+state_variables {
+  context Client<uint32_t clientId> {
+    uint64_t last_send_timestamp;
+    uint64_t acc_time_period;
+    uint64_t request_number;
+  }
+
+  context Server<uint32_t serverId> {
+    mace::map<mace::string, mace::string> table;
+  }
+
+  
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    srand( mace::getmtime() );
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;  
+    for( uint32_t i=0; i<CLIENT_NUMBER; i++) {
+      std::ostringstream oss;
+      oss<< "Client[" << i << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initClient(i);
+    }
+
+    for( uint32_t i=0; i<SERVER_NUMBER; i++) {
+      std::ostringstream oss;
+      oss<< "Server[" << i << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initServer(i);
+    }
+    
+    addNewOwnerships(ownerships);    
+  }
+
+  async [Client<clientId>] initClient( uint32_t const& clientId) {
+    ADD_SELECTORS("SerializeTest");
+    maceout<< "Initialize client " << clientId << Log::endl;
+    last_send_timestamp = 0;
+    acc_time_period = 0;
+    request_number = 0;
+
+    last_send_timestamp = mace::getmtime();
+    
+    const mace::string key_str = generateRandomKey();
+    const uint32_t serverId = generateRandomServerID();
+    const mace::string value_str = getDefaultValue();
+
+    async_setRequest(serverId, clientId, key_str, value_str);
+  }
+
+  async [Client<clientId>] replyRequest( uint32_t const& clientId, mace::string const& key ) {
+    ADD_SELECTORS("SerializeTest");
+    uint64_t cur_timestamp = mace::getmtime();
+    uint64_t period = cur_timestamp - last_send_timestamp;
+    request_number ++;
+    acc_time_period += period;
+    if( request_number % OUTPUT_COUNT == 0 ) {
+      uint64_t avg = (uint64_t) (acc_time_period / OUTPUT_COUNT);
+      maceout << "Request Count=" << request_number << " avg_latency=" << avg << Log::endl;
+      acc_time_period = 0;
+    }
+
+
+    last_send_timestamp = mace::getmtime();
+    
+    const mace::string key_str = generateRandomKey();
+    const uint32_t serverId = generateRandomServerID();
+    const mace::string value_str = getDefaultValue();
+
+    async_setRequest(serverId, clientId, key_str, value_str);
+  }
+
+  async [Server<serverId>] initServer(const uint32_t serverId) {
+    ADD_SELECTORS("SerializeTest");
+    maceout << "Initialize Server " << serverId << Log::endl;
+    table.clear();
+  }
+
+  async [Server<serverId>] setRequest(const uint32_t serverId, const uint32_t clientId, mace::string const& key, mace::string const& value) {
+    ADD_SELECTORS("SerializeTest");
+    //maceout << "Receive request from client("<< clientId <<") with key: " << key << Log::endl;
+    table[key] = value;
+    async_replyRequest(clientId, key);
+  }
+}
+
+
+routines {
+  [__null] mace::string generateRandomKey( ) {
+    uint64_t uint_key = (uint64_t) rand() % MAX_KEY;
+    std::ostringstream oss;
+    oss<< uint_key;
+    return oss.str();
+  }
+
+  [__null] uint32_t generateRandomServerID() {
+    uint32_t sId = (uint32_t) rand( )% SERVER_NUMBER;
+    return sId;
+  }
+
+  [__null] mace::string getDefaultValue() {
+    mace::string str_value = "";
+    mace::string seed_str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for(uint32_t i=0; i<19; i++) {
+      str_value += seed_str;
+    }
+    return str_value;
+  }
+
+}
+
+
+

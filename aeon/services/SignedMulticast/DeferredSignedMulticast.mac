@@ -1,0 +1,104 @@
+// #include <boost/algorithm/string.hpp>
+#include "SysUtil.h"
+#include "GlobalCommit.h"
+#include "ThreadStructure.h"
+
+// This service is to support deferred_upcall on top of SignedMulticast.
+
+service DeferredSignedMulticast;
+
+provides Multicast;
+
+trace=med;
+
+services {
+  Multicast m = SignedMulticast();
+}
+
+//Note - for locking data, would like to have message filtering.
+messages {
+  Data {
+    mace::string data;
+    mace::string signature;
+    registration_uid_t rid;
+  }
+}
+
+// shyoo : deferred upcall support
+auto_types {
+  DeferredPacket {
+    MaceKey src;
+    MaceKey groupId;
+    mace::string data;
+    registration_uid_t regId;
+  }
+}
+
+// shyoo : deferred upcall support
+typedefs {
+  typedef mace::multimap<uint64_t, DeferredPacket> MessageQueue;
+}
+
+state_variables {
+  // shyoo : deferred upcall support
+  MessageQueue queued;
+
+  pthread_mutex_t deliverMutex __attribute((serialize(no)));
+}
+
+transitions {
+  downcall maceInit() {
+    // added DeferredOutput support
+    mace::SpecificCommitWrapper<DeferredSignedMulticastService>* executor = new mace::SpecificCommitWrapper<DeferredSignedMulticastService>(this, &DeferredSignedMulticastService::commitCallBack);
+    mace::GlobalCommit::registerCommitExecutor(executor);
+    pthread_mutex_init(&deliverMutex, 0);
+  }
+
+  downcall multicast(const MaceKey& groupId, const mace::string& s, registration_uid_t rid) [locking=read] {
+    return downcall_multicast(groupId, Data(s,"", rid));
+  }
+
+  upcall forward(const MaceKey& src, const MaceKey& groupId, MaceKey& nexthop, const Data& msg) [locking=read] {
+    return true;
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& groupId, const Data& msg) [locking=none] {
+    maceout << "Testing upcall from " << src << "  msg = " << msg << Log::endl;
+    deferred_upcall_deliver(src, groupId, msg.data, msg.rid);
+  }
+
+}
+
+
+routines {
+  // shyoo : deferred upcall support
+  void commitCallBack(uint64_t myTicket) {
+    maceout << "commitCallback called. Processing outstanding " << queued.size() << " messages." << Log::endl;
+    MessageQueue::iterator i;
+    for (i=queued.begin(); i!= queued.end(); i++) {
+      DeferredPacket m = i->second;
+      maceout << "performing deferred upcall." << Log::endl;
+      upcall_deliver(m.src, m.groupId, m.data, m.regId);
+    }
+    queued.clear();
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_deliver(const MaceKey& src, const MaceKey& groupId, const mace::string& data, const registration_uid_t& rid) 
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      maceout << "performing immediate upcall now." << Log::endl;
+      upcall_deliver(src, groupId, data, rid);    // deliver immediately
+    } else {
+      maceout << "enqueueing messages..." << Log::endl;
+
+      ScopedLock sl(deliverMutex);
+
+      queued.insert(mace::pair<uint64_t, DeferredPacket>(ThreadStructure::myTicket(), DeferredPacket(src, groupId, data, rid)));    // queue else
+    }
+  }
+}
+

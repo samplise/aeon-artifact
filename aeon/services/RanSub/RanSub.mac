@@ -1,0 +1,321 @@
+/* 
+ * RanSub.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, Adolfo Rodriguez, Dejan Kostic, James W. Anderson, John Fisher-Ogden, Ryan Braud
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+/**
+ *  Implementation of the RanSub protocol
+ *
+ *  Adolfo Rodriguez
+ *  Dejan Kostic
+ *  Charles Killian
+ */
+
+#include "lib/CandidateMap.h"
+// #include "GossipServiceClass.h"
+// #include "AggregateServiceClass.h"
+#include "lib/mhash_map.h"
+#include "lib/mstring.h"
+
+using mace::hash_set;
+
+service RanSub;
+
+provides Gossip;
+
+// trace=med;
+// trace=low;
+trace=high;
+
+constants {
+  // this value should be RANDTREE_MAX_CHILDREN
+  //   int RANSUB_MAX_CHILDREN = 12;
+  int CANDIDATE_SET_SIZE = 10;
+  uint64_t RANSUB_PRINTER_INTERVAL = 1*1000*1000;
+  //   int RANSUB_DELAYED_START = 15;
+  //   int RANSUB_INTERVAL = 5;
+  int RANSUB_MESSAGE_GROUP = 123;
+  int RANSUB_MODE_ALL = 1;
+  int RANSUB_MODE_NONDESC = 2;
+  int mode = RANSUB_MODE_ALL;
+}
+
+services {
+  Aggregate ag_ = auto(shared, [ransubaggregator], []); //RanSubAggregator(); 
+}
+
+states {
+  joined;
+}
+
+typedefs {
+  typedef mace::CandidateMap<MaceKey, std::string> RealCandidateMap;
+  typedef mace::map<registration_uid_t, RealCandidateMap> HandlerCollectMap;
+  typedef mace::map<MaceKey, HandlerCollectMap> ChildCollectMap;
+  typedef mace::map<channel_id_t, ChildCollectMap> ChannelCollectMap;
+  typedef RealCandidateMap DistributeMap;
+  typedef mace::map<registration_uid_t, DistributeMap> HandlerDistributeMap; //NB: HandlerCollectMap == HandlerDistributeMap
+  typedef mace::map<MaceKey, HandlerDistributeMap> ChildDistributeMap;
+  typedef mace::map<channel_id_t, HandlerDistributeMap> ChannelDistributeMap;
+  typedef mace::map<registration_uid_t, std::string> HandlerLocalMap;
+  typedef mace::set<registration_uid_t> HandlerLocalSet;
+  typedef mace::map<channel_id_t, HandlerLocalMap> ChannelLocalMap;
+  typedef mace::map<channel_id_t, HandlerLocalSet> ChannelSubscriptionMap;
+  typedef mace::map<channel_id_t, MaceKey> ChannelNodeMap;
+}
+
+state_variables {	 
+  ChannelCollectMap lastCollect __attribute((dump(no)));
+  ChannelDistributeMap lastDistribute __attribute((dump(no)));
+  ChannelDistributeMap currentGossipMap __attribute((dump(no)));
+  ChannelNodeMap lastDistributors;
+  ChannelLocalMap currentGossip __attribute((dump(no)));
+  ChannelSubscriptionMap subscribedGossip;
+  //   int curkey;
+  timer printer __attribute((recur(RANSUB_PRINTER_INTERVAL)));
+  //   ransub_children mychildren;
+  //   int sequence;
+  //   int total_received;
+  //   int total_expected;
+  //   int population;
+  //   int descendants;
+  //   int collect_expired;
+  //   int collect_missing;
+  //   candidate_set<monitor_data> curset;
+  //   monitor_data current_state;
+  //   timer ransub;
+}	  
+
+transitions 
+{
+
+  downcall (state == init) maceInit() {
+    state_change(joined);
+  } // init API init
+
+  scheduler (state == joined) printer() {
+//     maceLog("Have state for:\n");
+//     for(int i = 0; i < curset.number_candidates; i++) {
+//       maceLog("Node %.8x -- %s -- %s\n", curset.candidates[i].id, curset.candidates[i].key, curset.candidates[i].value);
+//     }
+  } // joined timer printer
+
+  upcall (state == joined) 
+    collectAggregateData(channel_id_t channelId, 
+			 const AggregateNodeBlobMap& nmap,
+			 std::string& aggregate_data,
+			 const AggregateNodeCountMap& cmap,
+			 int& count, bool subscribed) {
+    
+    lastCollect[channelId].clear();
+    for(AggregateNodeBlobMap::const_iterator i = nmap.begin(); 
+	i != nmap.end(); i++) {
+      if(i->second.size() != 0) {
+	istringstream in(i->second);
+	mace::deserialize(in, &lastCollect[channelId][i->first]);
+      }
+      else {
+	lastCollect[channelId][i->first].clear();
+      }
+    }
+    HandlerCollectMap tosend;
+
+    //First get the set of handler ids over all children or subscribed
+    hash_set<registration_uid_t> handlerIds = getHandlerIds(channelId);
+
+    for(hash_set<registration_uid_t>::iterator hid = handlerIds.begin(); 
+	hid != handlerIds.end(); hid++) {
+      tosend[*hid].setMaxSize(CANDIDATE_SET_SIZE);
+      if(subscribed) {
+        if(currentGossip[channelId].find(*hid) != 
+	   currentGossip[channelId].end()) {
+          upcall_setGossipData(channelId, 
+			       currentGossip[channelId][*hid], *hid);
+          maceout << "including me( " << localAddress() << " ) in the compact set for "
+		  << "channel " << channelId << " and registration id "
+		  << *hid << Log::endl;
+          tosend[*hid][localAddress()] = currentGossip[channelId][*hid];
+        }
+      }
+      for(ChildCollectMap::iterator i = lastCollect[channelId].begin(); 
+	  i != lastCollect[channelId].end(); i++) {
+        maceout << "including " << i->first << " in the compact set for "
+		<< "channel " << channelId << " and registration id " 
+		<< *hid << Log::endl;
+        tosend[*hid].compact(lastCollect[channelId][i->first][*hid]);
+      }
+    }
+    aggregate_data.clear();
+    tosend.serialize(aggregate_data);
+  }
+
+  upcall (state == joined) 
+    distributeAggregateData(channel_id_t channelId, 
+			    const std::string& distribute_data,
+			    AggregateNodeBlobMap& child_map,
+			    const int count,
+			    AggregateNodeCountMap& cmap, 
+			    const MaceKey& distributor) {
+    //Deliver the aggregate data -- note we do this at the "root" too!
+    maceout << "dumping distribute data for channelId " << channelId << Log::endl;
+    //     dump_hex(distribute_data.data(), distribute_data.size());
+    if(distributor != localAddress() && distribute_data.size() != 0) {
+      istringstream in(distribute_data);
+      lastDistribute[channelId].deserialize(in);
+    } else {
+      lastDistribute[channelId].clear();
+    }
+    lastDistributors[channelId] = distributor;
+    //Update and deliver the current node's gossip map
+    for(HandlerLocalSet::const_iterator i = subscribedGossip[channelId].begin(); 
+	i != subscribedGossip[channelId].end(); i++) {
+
+      //This function supports NONDESC vs. ALL (and later others)
+      updateCurrentGossip(*i, channelId);
+      //Deliver the gossip data.
+      maceout << "upcall_deliverGossip channel " << channelId << " registration id " << (*i) << Log::endl;
+      upcall_deliverGossip(channelId, currentGossipMap[channelId][*i], *i);
+
+    }
+    maceout << "In distributeAggregateData channel " << channelId << " numHandlers " << lastDistribute[channelId].size() << Log::endl;
+    ChildDistributeMap tosend;
+    hash_set<registration_uid_t> handlerIds = getHandlerIds(channelId);
+    for(hash_set<registration_uid_t>::iterator i = handlerIds.begin(); 
+	i != handlerIds.end(); i++) {
+      if(currentGossip[channelId].find(*i) != currentGossip[channelId].end()) {
+        //Allow them the chance to change their data just before sending it.
+        maceLog("upcall_setGossipData\n");
+        upcall_setGossipData(channelId, currentGossip[channelId][*i], *i);
+      }
+
+      maceout << "number of kids " << child_map.size() << Log::endl;
+      for(AggregateNodeBlobMap::iterator iter = child_map.begin(); 
+	  iter != child_map.end(); iter++) {
+        tosend[iter->first][*i] = RealCandidateMap(CANDIDATE_SET_SIZE);
+        //If handler is publishing gossip
+        if(currentGossip[channelId].find(*i) != 
+	   currentGossip[channelId].end()) {
+          maceLog("adding self to tosend\n");
+          tosend[iter->first][*i][localAddress()]= currentGossip[channelId][*i];
+        }
+        if(lastDistributors[channelId] != localAddress()) {
+          tosend[iter->first][*i].compact(lastDistribute[channelId][*i]);
+        }
+        for(ChildCollectMap::iterator lcIter = lastCollect[channelId].begin();
+	    lcIter != lastCollect[channelId].end(); lcIter++) {
+          if(lcIter->first != iter->first) {
+            tosend[iter->first][*i].compact(lcIter->second[*i]);
+          }
+        }
+        
+        maceout << "After compact -- handler " << *i << " has "
+		<< tosend[iter->first][*i].aggregateCount() << " elements to "
+		<< "gossip to child " << iter->first << Log::endl;
+      }
+    }
+    for(AggregateNodeBlobMap::iterator iter = child_map.begin(); 
+	iter != child_map.end(); iter++) {
+      iter->second.clear();
+      tosend[iter->first].serialize(iter->second);
+      maceLog("Serialized data\n");
+      //       dump_hex(iter->second.data(), iter->second.size());
+    }
+  }
+
+  downcall (true) publishGossip(channel_id_t channelId, 
+				const std::string& data,
+				registration_uid_t rid) {
+    downcall_aggregateSubscribe(channelId, ag_);
+    currentGossip[channelId][rid] = data;
+    maceout << "publishing gossip for channel " << channelId << " of size " << data.size() << " for registration id " << rid << Log::endl;
+  }
+
+  downcall (true) subscribeGossip(channel_id_t channelId, 
+				registration_uid_t rid) {
+    downcall_aggregateSubscribe(channelId, ag_);
+    subscribedGossip[channelId].insert(rid);
+    maceout << "subscribe for channel " << channelId << " for registration id " << rid << Log::endl;
+  }
+
+  downcall (true) getGossip(channel_id_t channelId, registration_uid_t rid) {
+    return currentGossipMap[channelId][rid];
+  }
+
+  downcall (true) revokeGossip(channel_id_t channelId, registration_uid_t rid) {
+    if(currentGossip.find(channelId) != currentGossip.end()) {
+      currentGossip[channelId].erase(rid);
+      if(currentGossip[channelId].empty()) {
+        currentGossip.erase(channelId);
+	if (!subscribedGossip.containsKey(channelId) ||
+	    subscribedGossip[channelId].empty()) {
+	  downcall_aggregateUnsubscribe(channelId, ag_);
+	}
+      }
+    }
+  }
+
+  downcall (true) unsubscribeGossip(channel_id_t channelId, registration_uid_t rid) {
+    if(subscribedGossip.find(channelId) != subscribedGossip.end()) {
+      subscribedGossip[channelId].erase(rid);
+      if(subscribedGossip[channelId].empty()) {
+        subscribedGossip.erase(channelId);
+	if (!currentGossip.containsKey(channelId) || currentGossip[channelId].empty()) {
+	  downcall_aggregateUnsubscribe(channelId, ag_);
+	}
+      }
+    }
+  }
+
+} //transitions
+
+routines {
+
+  hash_set<registration_uid_t> getHandlerIds(channel_id_t channelId) {
+    hash_set<registration_uid_t> hIds;
+    //First check over lastCollect
+    for(ChildCollectMap::iterator i = lastCollect[channelId].begin(); i != lastCollect[channelId].end(); i++) {
+      for(HandlerCollectMap::iterator j = i->second.begin(); j != i->second.end(); j++) {
+        hIds.insert(j->first);
+      }
+    }
+    //Next check over published gossip
+    for(HandlerLocalMap::iterator i = currentGossip[channelId].begin(); i != currentGossip[channelId].end(); i++) {
+      hIds.insert(i->first);
+    }
+    return hIds;
+  }
+
+  void updateCurrentGossip(registration_uid_t rid, channel_id_t channelId) {
+    currentGossipMap[channelId][rid] = lastDistribute[channelId][rid]; 
+    if(mode == RANSUB_MODE_NONDESC) { return; } //NOTE, under this mode, root gets nothing!
+    for(ChildCollectMap::iterator i = lastCollect[channelId].begin(); i != lastCollect[channelId].end(); i++) {
+      currentGossipMap[channelId][rid].compact(i->second[rid]);
+    }
+  }
+
+} //routines

@@ -1,0 +1,263 @@
+//#include <random>
+
+#include "m_map.h"
+#include "marray.h"
+#include "MaceTypes.h" 
+#include "RandomUtil.h"
+
+service PiazzaAppServer;
+
+provides Null;
+
+services {
+  Transport t;
+}
+
+constants {
+  
+}
+
+
+constructor_parameters {
+    uint32_t N_DEPARTMENTS = 4;
+    uint32_t N_COURSES_PER_DEPARTMENT = 4;
+    uint32_t N_STUDENTS_PER_COURSE = 10;
+
+    uint32_t D_SHARE_S_ID = 5;
+    
+    double D_SHARED_PERCENT = 0.0;
+    double C_SHARED_PERCENT = 0.0;
+
+    uint64_t N_OUTPUT = 1000;
+}
+
+typedefs {
+
+}
+
+#minclude "PiazzaAppMessages.mi"
+
+auto_types {
+  
+}
+ 
+state_variables {
+  context University {
+    mace::set<uint32_t> d_ids;
+    uint64_t msg_count = 0;
+  }
+  
+  context Department<uint32_t x>{
+    uint32_t d_id;
+    
+    uint64_t msg_count;
+    mace::set<uint32_t> c_ids;
+  }
+
+  context Course<uint32_t x> {
+    uint32_t d_id;
+    uint32_t c_id;
+    uint64_t msg_count;
+    mace::set<uint32_t> s_ids;
+  }
+
+  context Student<uint32_t x> {
+    uint32_t s_id;
+    mace::set<uint32_t> register_cids;
+    uint64_t msg_count;
+  }
+
+  context Controller {
+
+  }
+}
+
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("PiazzaAppServer");
+    maceout << "Start PiazzaAppServer!" << Log::endl;
+    srand( mace::getmtime() );
+    
+    createNewOwnership("globalContext", "University");
+    async_initUniversity();
+  }
+
+  async [University] initUniversity() {
+    ADD_SELECTORS("PiazzaAppServer");
+    maceout << "To initialize University!" << Log::endl;
+    msg_count = 0;
+
+    uint32_t shared_max_did = (uint32_t)( N_DEPARTMENTS * D_SHARED_PERCENT );
+
+    for( uint32_t i=0; i<N_DEPARTMENTS; i++ ) {
+      uint32_t d_id = createNewContext("Department");
+      d_ids.insert(d_id);
+
+      mace::string d_name = generateContextName("Department", d_id);
+      createNewOwnership("University", d_name);
+
+      if( i<shared_max_did ) {
+        async_initDepartment(d_id, true);
+      } else {
+        async_initDepartment(d_id, false);
+      }
+    }
+  }
+
+  async [Department<did>] initDepartment(const uint32_t& did, const bool& d_share_student_flag ) {
+    ADD_SELECTORS("PiazzaAppServer");
+    maceout << "To initialize Department["<< did <<"] with shared_student_flag=" << (uint16_t)d_share_student_flag << Log::endl;
+    d_id = did;
+    msg_count = 0;
+
+
+    mace::string d_name = generateContextName("Department", d_id);
+    uint32_t shared_max_cid = (uint32_t)(N_COURSES_PER_DEPARTMENT * C_SHARED_PERCENT);
+    mace::set<uint32_t> share_cids;
+    uint32_t last_cid = 0;
+    ASSERT(N_COURSES_PER_DEPARTMENT > 1);
+    for( uint32_t i=0; i< N_COURSES_PER_DEPARTMENT; i++ ) {
+      uint32_t c_id = createNewContext("Course");
+      c_ids.insert(c_id);
+
+      mace::string c_name = generateContextName("Course", c_id);
+      createNewOwnership(d_name, c_name);
+
+      if( i< shared_max_cid ) {
+        share_cids.insert(c_id);
+      }
+
+      if( i == N_COURSES_PER_DEPARTMENT-1 ) {
+        last_cid = c_id;
+      }
+    }  
+
+    maceout << "Department["<< d_id <<"]: shared_cids=" << share_cids << Log::endl;
+
+    for( mace::set<uint32_t>::iterator iter = c_ids.begin(); iter!=c_ids.end(); iter++ ) {
+      if( last_cid == *iter ){
+        async_initCourse( *iter, d_id, share_cids, false, d_share_student_flag );
+      } else if( iter == c_ids.begin() ){
+        async_initCourse( *iter, d_id, share_cids, true, d_share_student_flag );
+      } else {
+        async_initCourse( *iter, d_id, share_cids, false, false );
+      }
+    }
+  }
+
+  async [Course<cid>] initCourse(const uint32_t& cid, const uint32_t& did, const mace::set<uint32_t>& share_cids, const bool& c_share_student_flag, const bool& d_share_student_flag){
+    ADD_SELECTORS("PiazzaAppServer");
+    d_id = did;
+    c_id = cid;
+    maceout << "To initialize Department["<< d_id <<"]Course["<< c_id <<"] with d_share_student_flag " << (uint16_t)d_share_student_flag << " share_cids="<< share_cids <<Log::endl;
+
+    msg_count = 0;
+    
+    mace::set<uint32_t> empty_cids;
+    mace::string c_name = generateContextName("Course", c_id);
+    for( uint32_t i=0; i< N_STUDENTS_PER_COURSE; i++ ) {
+      uint32_t s_id = createNewContext("Student");
+      s_ids.insert(s_id);
+
+      mace::string s_name = generateContextName("Student", s_id);
+      createNewOwnership(c_name, s_name);
+
+      if( i == 0 && share_cids.count(c_id) > 0 && c_share_student_flag ) {
+        async_initStudent(s_id, c_id, share_cids);
+      } else {
+        async_initStudent(s_id, c_id, empty_cids);
+      }
+    }
+
+    if( d_share_student_flag && s_ids.count(D_SHARE_S_ID) == 0 ) {
+      s_ids.insert(D_SHARE_S_ID);
+      mace::string s_name = generateContextName("Student", D_SHARE_S_ID);
+      createNewOwnership(c_name, s_name);
+      async_registerCourse(D_SHARE_S_ID, c_id);
+    }
+
+    maceout << "Department["<< d_id <<"]Course["<< c_id <<"] registerred s_ids=" << s_ids << Log::endl;
+  }
+
+  async [Course<cid>] registerStudent(const uint32_t& cid, const uint32_t& sid){
+    ADD_SELECTORS("PiazzaAppServer");
+    maceout << "Student["<< sid <<"] tries to register Course["<< cid <<"]!" << Log::endl;
+    if( s_ids.count(sid) == 0 ){
+      s_ids.insert(sid);
+      mace::string c_name = generateContextName("Course", cid);
+      mace::string s_name = generateContextName("Student", sid);
+      createNewOwnership(c_name, s_name);
+      maceout << "Course["<< cid <<"] register student " << sid << Log::endl;
+    }
+  }
+
+  async [Student<sid>] registerCourse(const uint32_t& sid, const uint32_t& cid) {
+    ADD_SELECTORS("PiazzaAppServer");
+    if( register_cids.count(cid) == 0 ) {
+      register_cids.insert(cid);
+      maceout << "Student["<< sid <<"] register course " << cid << Log::endl;
+    }
+  }
+
+  async [Student<sid>] initStudent(const uint32_t& sid, const uint32_t& cid, mace::set<uint32_t> const& to_register_cids) {
+    ADD_SELECTORS("PiazzaAppServer");
+    s_id = sid;
+    maceout << "To initialize Student["<< s_id <<"] cid="<< cid <<" to_register_cids=" << to_register_cids << Log::endl;
+    msg_count = 0;
+    
+    if( register_cids.count(cid) == 0 ) {
+      register_cids.insert(cid);
+    }
+
+    for( mace::set<uint32_t>::const_iterator iter=to_register_cids.begin(); iter!=to_register_cids.end(); iter++ ) {
+      if( register_cids.count(*iter) > 0 ) {
+        continue;
+      }
+      maceout << "Student["<< s_id <<"] will register Course["<< *iter <<"]!" << Log::endl;
+      async_registerStudent(*iter, s_id);
+    }
+    sleep(1);
+  } 
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("PiazzaAppServer");
+    std::ostringstream oss;
+    oss << src <<"["<<msg.clientId<<"]";
+
+    MaceAddr commAddr = getExternalCommContextAddr( src, oss.str() );
+    maceout << "commAddr=" << commAddr << Log::endl;
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(commKey, msg.clientId) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< msg.clientId <<") from " << src << Log::endl;
+  }
+
+  upcall [Department<msg.did>] deliver(const MaceKey& src, const MaceKey& dest, const DepartmentRequest& msg) {
+    ADD_SELECTORS("PiazzaAppServer");
+    msg_count ++;
+    downcall_route(src, Response(msg.clientId) );    
+  }
+
+  upcall [Course<msg.cid>] deliver(const MaceKey& src, const MaceKey& dest, const CourseRequest& msg) {
+    ADD_SELECTORS("PiazzaAppServer");
+    msg_count ++;
+    downcall_route(src, Response(msg.clientId) );    
+  }
+
+  upcall [Student<msg.sid>] deliver(const MaceKey& src, const MaceKey& dest, const StudentRequest& msg) {
+    ADD_SELECTORS("PiazzaAppServer");
+    msg_count ++;
+    downcall_route(src, Response(msg.clientId) );    
+  }
+}
+
+routines {
+
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+ 
+
+}
+

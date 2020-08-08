@@ -1,0 +1,15 @@
+SET(APPS appmacedon_test)
+#SET(LIBNAME AppMacedonTest)
+#SET(SERVICES ReplayTree RandTree GenericTreeMulticast Pastry ScribeMS SplitStreamMS CacheRecursiveOverlayRoute)
+SET(SERVICES ALL)
+#SET(EXTRALIBS)
+
+INCLUDE(${CMAKE_CURRENT_BINARY_DIR}/../application.cmake)
+
+#ADD_TEST("appm-RandTree" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 10 -mode RandTree)
+#ADD_TEST("appm-ScribeMS-Pastry" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 20 -join_time 10 -mode ScribeMS)
+#ADD_TEST("appm-ScribeMS-Bamboo" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 20 -join_time 10 -mode ScribeMS-Bamboo)
+#ADD_TEST("appm-ScribeMS-Chord" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 20 -join_time 10 -mode ScribeMS-Chord)
+#ADD_TEST("appm-SplitStreamMS-Pastry" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 20 -join_time 10 -mode SplitStreamMS)
+#ADD_TEST("appm-SplitStreamMS-Bamboo" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 20 -join_time 10 -mode SplitStreamMS-Bamboo)
+#ADD_TEST("appm-SplitStreamMS-Chord" ${EXECUTABLE_OUTPUT_PATH}/appmacedon_test -data_packet_size 1000 -num_clients 5 -run_length 30 -streaming_rate 100 -streaming_time 20 -join_time 10 -mode SplitStreamMS-Chord)

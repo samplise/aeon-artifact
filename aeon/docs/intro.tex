@@ -1,0 +1,197 @@
+% 
+% intro.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\section{Why are you reading this document?}
+\label{sec:intro}
+
+Perhaps you stumbled on this document on the web somewhere, perhaps
+you have already downloaded Mace and are trying to figure out how to
+use it, perhaps you are considering whether to use Mace, or perhaps
+you've been told to use Mace by a boss or instructor, and need to
+figure out what that means.
+
+This document will explain what Mace is, go through a simple example
+of how to use it, and discuss some of its advanced features as well as
+address common concerns and questions.
+
+\subsection{What is Mace?}
+\label{sec:what-is-mace}
+
+If you found this document looking for information on various forms of
+bludgeoning weapons or self-defense sprays, then this paragraph will
+be all that is in this document about your search.  None of these are
+the context in which Mace will be discussed in this document.  The
+name Mace is instead a derivative from the MACEDON parent project,
+abbreviated to suggest the broader scope to which it is applicable.
+
+Mace is a software package for building distributed systems.  It
+builds upon the ideas from its parent project, MACEDON, by broadening
+the scope of what can be designed with it, and by removing many
+limitations of the original system.
+
+Mace includes a compiler that translates service specifications into
+C++ code, libraries designed to be linked together with generated
+services, a distribution of existing services ready to be used by
+other services or applications, and a few basic applications to run
+the services contained within.
+
+Mace seeks to transform the way distributed systems are built by
+providing designers with a simple method for writing complex but
+correct and efficient implementations of distributed systems.  To that
+end, we are always considering new libraries and language features
+which could be used to make building, designing, debugging, or
+verifying distributed systems more powerful, flexible, simple, or
+natural.
+
+\subsection{Why would I want to use a domain-specific language and toolkit?}
+\label{sec:why-new-toolkit}
+
+Over the past few years, we have set out to evaluate a variety of
+techniques for building robust, high-performance distributed systems.
+One of our explicit goals has been to conduct head-to-head comparisons
+of algorithms proposed in the literature, including our own.  Target
+systems include application-layer multicast, distributed hash trees,
+peer-to-peer indexing systems, and overlay routing.  One of the
+primary lessons of this work thus far has been the difficulty of
+translating elegant and seemingly simple distributed algorithms into
+operational, high-performance, and robust systems.
+
+We found significant commonality among the various
+implementations---for instance, event handling, timer management,
+failure detection, asynchronous communication, node join/departure, and
+message serialization/deserialization.  However, differences in
+individual application structure and implementation forced us to
+repeatedly reimplement the same functionality, typically with a
+different set of errors and inefficiencies each time.  Even once the
+baseline system was operational, the resulting application often
+performed significantly slower than expected and bugs in corner cases
+would remain dormant or masked for long periods of time.
+
+We concluded that a significant impediment to rapid prototyping of our
+target applications was the lack of an appropriate development
+environment for distributed applications.  Based on our experience, we
+identified the following requirements to ease this development effort.
+
+%\begin{itemize}
+%\item Constructing distributed systems would be simplified by the
+%  ability to compose simple distributed computing primitives into more
+%  complex behavior.  
+\emph{Constructing distributed systems would be simplified by the
+ability to compose simple distributed computing primitives into more
+complex behavior.} For instance, many distributed applications would
+benefit from failure detection, consensus, multicast, barriers, and
+key-based routing.  However, without well-defined API's, it is
+difficult to reuse implementations or to leverage the benefits of an
+improved implementation of a given logical subsystem.  In this paper,
+we describe initial efforts to define required API's to support
+complex, multi-layer distributed systems.
+
+  %\item Current programming languages are not well suited to the
+  %  requirements of distributed systems.  
+
+\emph{Current programming languages are not well suited to the
+requirements of distributed systems.} While there are communication
+libraries and class hierarchies in languages such as C++, Java, and
+Python, they typically target client/server communications (e.g., HTTP
+or XMLRPC) and still provide relatively primitive support for failure
+detection and recovery.  Further, we observe that the higher-level
+structure of many distributed systems is logically event- and
+state-based.  Each node maintains some state that may be modified as a
+result of a series of events, typically message reception and timer
+expiration.  Individual nodes respond to events by modifying their
+state and perhaps transmitting their own message to one or more
+destinations.  While this high level structure is simple to describe,
+it is error prone to implement.  Further, managing asynchrony still
+remains a challenge.  Delivering high performance often requires
+careful consideration of appropriate locking primitives, ensuring that
+individual operations do not block, and assigning the appropriate
+number of threads to handle logically concurrent tasks.  Of course,
+all of this can be programmed in existing languages such as C++ and,
+to a lesser extent, Java. Providing the appropriate language
+primitives can both significantly simplify the code and reduce
+opportunities for errors.
+
+  %\item Debugging support for distributed systems remains primitive,
+  %  often reducing to custom scripts run over log files generated at
+  %  hundreds of individual sites.  
+
+\emph{Debugging support for distributed systems remains primitive,
+often reducing to custom scripts run over log files generated at
+hundreds of individual sites.}  Generating the necessary debugging
+information can make the underlying code less efficient, less
+readable, and more error prone.  With appropriate language support,
+the appropriate logging information can be generated
+semi-automatically.  Further, the information can be efficiently
+stored in a format amenable to inserting into a SQL database.  We have
+found this log of per-event system activity along with separate
+programmer annotations for their \emph{expectations} of how the
+distributed system should behave and \emph{assertions} about global
+correctness conditions (both of which must necessarily simultaneously
+apply to state stored at multiple nodes across at multiple time
+granularities) to be invaluable in debugging distributed system
+behavior.  These distributed expectations and assertions may apply to
+to both system performance and distributed system structure.
+%\end{itemize}
+ 
+We are building Mace to be just the support that a designers and developers
+need when building distributed systems.  It is a complete redesign and rewrite
+of its parent project, MACEDON, targeted at a broader range of distributed
+systems, and with better support for the programmer with fewer limitations.
+
+\subsection{Why shouldn't I just use other previously existing languages?}
+\label{sec:why-mace}
+
+Though there are a few existing languages with similar goals, most do
+not have the emphasis on building real systems as Mace does.  MACEDON
+of course is very close, but suffers from limitations such as fixed
+size message headers, restricted and monolithic API, non-portable 
+network communications, lack of support for connecting with external
+processes (such as XML-RPC or HTTP), lack of support for firewall
+traversal, more primitive logging, and a single linear protocol/service
+stack.
+
+(Ed. Note: Comments on other systems forthcoming).
+
+%Think of Mace as being for distributed systems what XSLT is
+%for web documents.  Of course, you can write your web pages directly
+%in the presentation language (HTML), but if you write them in a
+%language which allows you to give meaning to the document (XML), they
+%can be processed more effectively by automated tools, allowing them to
+%be presented in different ways, analyzed for semantic meaning, or
+%updated and modified.
+
+%% av:
+%% This is a great start at the answer to this question.
+
+%% However, I think that we need to think in terms of what a language
+%% provides to the programmer over an alternative language.  That is,
+%% while XML is great, I am not sure that by itself it provides
+%% compelling advantages over HTML.  I think that *by itself* Mace should
+%% (and does) provide benefits over C/C++, Java, etc.

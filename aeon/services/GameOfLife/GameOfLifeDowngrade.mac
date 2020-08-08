@@ -1,0 +1,140 @@
+
+service GameOfLifeDowngrade;
+trace = high;
+constructor_parameters {
+  uint32_t CONTEXT_ROWS = 32;   // number of row contexts
+  uint32_t BLOCK_ROWS   = 32;   // number of data rows in a context
+  uint32_t BLOCK_COLUMNS= 1024; // number of data columns per row
+  bool USE_DOWNGRADE  = true;
+}
+constants{
+  uint8_t CELL_DEAD   = 0;
+  uint8_t CELL_ALIVE  = 1;
+}
+typedefs {
+    typedef mace::vector< uint8_t > DataVector;		
+    typedef mace::vector< mace::vector< uint8_t > > DataBlock;		
+}
+state_variables {
+  uint32_t round;
+  context Row<uint32_t row>{
+    DataBlock data;
+    DataBlock nextdata;
+  }
+}
+transitions {
+  downcall (state == init) maceInit() {
+    round = 0;
+    for(uint32_t rown=0; rown < CONTEXT_ROWS; rown++ ){
+      async_initContext( rown );
+    }
+  }
+  async [Row<row>] initContext( uint32_t row ){
+    RandomUtil::seedRandom( row );
+    data.resize( BLOCK_ROWS );
+    nextdata.resize( BLOCK_ROWS );
+    for(uint32_t rown=0; rown < BLOCK_ROWS; rown++ ){
+      data[rown].resize( BLOCK_COLUMNS );
+      nextdata[rown].resize( BLOCK_COLUMNS );
+      for( uint32_t coln=0; coln < BLOCK_COLUMNS; coln++ ){
+        data[rown][coln] = RandomUtil::randInt( ) % 2; // assign either 0 or 1
+      }
+    }
+    if( row == CONTEXT_ROWS-1 ){
+      for( uint32_t r=0; r< CONTEXT_ROWS; r++ ){ // maintain several concurrent events
+        async_simulate( );
+      }
+    }
+  }
+  async simulate(){
+    round++;
+    if( USE_DOWNGRADE ){
+      downgradeCurrentContext();
+    }
+
+    DataVector firstDataRow; // this is used by the last row context
+
+    DataVector prevDataRow;// = getContextLastRow( CONTEXT_ROWS-1 );
+    DataVector nextDataRow;
+
+    prevDataRow.resize( BLOCK_COLUMNS );
+    for( uint32_t rown = 0; rown <= CONTEXT_ROWS-2; rown ++ ){
+      if( rown == 0 ){
+        firstDataRow = getContextFirstRow( 0 );
+      }
+      nextDataRow = getContextFirstRow( rown+1 ); // get the first data row of the next context row.
+      prevDataRow = computeContext( rown, prevDataRow, nextDataRow );
+      
+    }
+    // compute the last row
+    computeContext( CONTEXT_ROWS-1, prevDataRow, firstDataRow );
+
+    async_simulate(); // start the next round
+  }
+}
+routines {
+	[Row<row>] DataVector getContextLastRow(int row){
+    ASSERT( data.size() == BLOCK_ROWS );
+    ASSERT( data[ BLOCK_ROWS-1 ].size() == BLOCK_COLUMNS );
+
+    return data[ BLOCK_ROWS-1 ];
+  }
+	[Row<row>] DataVector getContextFirstRow(int row){
+    ASSERT( data.size() == BLOCK_ROWS );
+    ASSERT( data[ 0 ].size() == BLOCK_COLUMNS );
+
+    return data[ 0 ];
+  }
+  [Row<row>] DataVector computeContext( uint32_t row, const DataVector& prevDataRow, const DataVector& nextDataRow ){
+
+    DataVector lastRow  = data[ BLOCK_ROWS-1 ]; // = getContextLastRow( row );
+    DataVector firstRow = data[ 0 ]; // = getContextLastRow( row );
+
+    for(uint32_t datarow=1; datarow < BLOCK_ROWS-1; datarow++ ){
+      nextdata[ datarow ] = computeDataRow( data[ datarow ], data[datarow-1], data[ datarow+1 ] );
+    }
+    nextdata[ 0 ]            = computeDataRow( data[ 0 ], data[BLOCK_ROWS-1], data[ 1 ] );
+    nextdata[ BLOCK_ROWS-1 ] = computeDataRow( data[ BLOCK_ROWS-1 ], data[BLOCK_ROWS-2], data[ 0 ] );
+
+    data = nextdata;
+
+    if( USE_DOWNGRADE ){
+      downgradeCurrentContext( );
+    }
+    return lastRow;
+  }
+
+  [__null] DataVector computeDataRow( const DataVector& currentRow, const DataVector& prevRow, const DataVector& nextRow){
+    DataVector nextState;
+    nextState.resize( BLOCK_COLUMNS );
+
+    for(uint32_t celln=1; celln <= BLOCK_COLUMNS-2; celln++ ){
+      nextState[ celln ] = computeCell( currentRow[celln],
+          prevRow[celln-1] + prevRow[celln] + prevRow[celln+1] +
+          currentRow[celln-1]  + currentRow[celln+1] +
+          nextRow[celln-1] + nextRow[celln] + nextRow[celln+1] );
+    }
+    nextState[ 0 ] = computeCell( currentRow[ 0 ],
+        prevRow[BLOCK_COLUMNS-1] + prevRow[0] + prevRow[1] +
+        currentRow[BLOCK_COLUMNS-1]           + currentRow[1] +
+        nextRow[BLOCK_COLUMNS-1] + nextRow[0] + nextRow[1] );
+
+    nextState[ BLOCK_COLUMNS-1 ] = computeCell( currentRow[ BLOCK_COLUMNS-1 ],
+        prevRow[BLOCK_COLUMNS-2] + prevRow[ BLOCK_COLUMNS-1] + prevRow[0] +
+        currentRow[BLOCK_COLUMNS-2]                      + currentRow[0] +
+        nextRow[BLOCK_COLUMNS-2] + nextRow[ BLOCK_COLUMNS-1] + nextRow[0] );
+
+    return nextState;
+  }
+
+  [__null] uint8_t computeCell( const uint8_t cellv, const uint8_t neighborv ){
+    if( cellv == CELL_ALIVE ){
+      if( neighborv < 2 ) return CELL_DEAD;
+      if( neighborv == 2 || neighborv == 3 ) return CELL_ALIVE;
+      /*if( neighborv > 3 )*/ return CELL_DEAD;
+    }else{
+      if( neighborv == 3 ) return CELL_ALIVE;
+      else return CELL_DEAD;
+    }
+  }
+}

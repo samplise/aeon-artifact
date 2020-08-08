@@ -1,0 +1,85 @@
+// #include <boost/algorithm/string.hpp>
+#include "SysUtil.h"
+#include "GlobalCommit.h"
+#include "ThreadStructure.h"
+
+using mace::string;
+using mace::MonotoneTime;
+
+service SignedMulticast;
+
+provides Multicast;
+
+trace=high;
+//locking=none;
+
+services {
+  Multicast m = GenericTreeMulticast();
+}
+
+//Note - for locking data, would like to have message filtering.
+messages {
+  Data {
+    string data;
+    string signature;
+    registration_uid_t rid;
+  }
+}
+
+state_variables {
+  //locking<MaceKey groupId> {
+    //state for fns
+  //}
+}
+
+constructor_parameters {
+  uint64_t delay = 0;
+}
+
+
+transitions {
+  downcall maceInit() {
+    // read in group state
+  }
+
+  //locking<groupId> {
+    downcall multicast(const MaceKey& groupId, const string& s, registration_uid_t rid) [locking=read] {
+      string sig = createSignature(s);
+      return downcall_multicast(groupId, Data(s, sig, rid));
+    }
+
+    upcall forward(const MaceKey& src, const MaceKey& groupId, MaceKey& nexthop, const Data& msg) [locking=read] {
+      static const bool DOWNGRADE_TO_NONE = params::get("DOWNGRADE_TO_NONE", false);
+      if (DOWNGRADE_TO_NONE) {
+          DOWNGRADE(NONE_MODE);
+      } else {
+          DOWNGRADE(READ_MODE);
+      }
+      bool result = verifySignature(msg.data, msg.signature);
+      return result;
+    }
+
+    upcall deliver(const MaceKey& src, const MaceKey& groupId, const Data& msg) [locking=read] {
+      // shyoo: this is deferrable. (will be deferred in DeferredSignedMulticast)
+      upcall_deliver(src, groupId, msg.data, msg.rid);
+    }
+  //}
+}
+
+routines {
+  //these somehow inherit locking?
+  string createSignature(const string& data) const {
+    // for demonstration, we'll need something which takes time here.
+    //sleep(3);
+    SysUtil::sleepu(delay);
+    return data;
+  }
+
+  bool verifySignature(const string& data, const string& signature) const {
+    // for demonstration, we'll need something which takes time here.
+    SysUtil::sleepu(delay);
+    //sleep(3);
+    return true;
+  }
+}
+

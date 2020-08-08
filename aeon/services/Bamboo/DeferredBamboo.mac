@@ -1,0 +1,301 @@
+/* 
+ * DeferredBamboo.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2007, Charles Killian, James W. Anderson
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in
+ *      the documentation and/or other materials provided with the
+ *      distribution.
+ *    * Neither the names of Duke University nor The University of
+ *      California, San Diego, nor the names of the authors or contributors
+ *      may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+
+#include "GlobalCommit.h"
+#include "ThreadStructure.h"
+
+service DeferredBamboo;
+
+provides OverlayRouter, Overlay;
+
+trace=med;
+
+
+services 
+{
+  OverlayRouter bamboo = Bamboo();
+}
+
+auto_types
+{
+  // shyoo : deferred upcall support
+  Deferred_joinResultOverlay {
+    MaceKey source;
+    join_status_t status;
+  }
+
+  Deferred_notifySuccessors {
+    NodeSet successors;
+  }
+
+  Deferred_notifySuccessorAdded {
+    MaceKey id;
+  }
+
+  Deferred_notifySuccessorRemoved {
+    MaceKey id;
+  }
+
+  Deferred_notifyIdSpaceChanged {
+    KeyRange range;
+  }
+}
+
+
+typedefs {
+  // shyoo : deferred upcall support
+  typedef mace::multimap<uint64_t, Deferred_joinResultOverlay> DeferredQueue_joinResultOverlay;
+  typedef mace::multimap<uint64_t, Deferred_notifySuccessors> DeferredQueue_notifySuccessors;
+  typedef mace::multimap<uint64_t, Deferred_notifySuccessorAdded> DeferredQueue_notifySuccessorAdded;
+  typedef mace::multimap<uint64_t, Deferred_notifySuccessorRemoved> DeferredQueue_notifySuccessorRemoved;
+  typedef mace::multimap<uint64_t, Deferred_notifyIdSpaceChanged> DeferredQueue_notifyIdSpaceChanged;
+}
+
+state_variables 
+{
+  // shyoo : deferred upcall support
+  DeferredQueue_joinResultOverlay deferred_queue_joinResultOverlay;
+  DeferredQueue_notifySuccessors deferred_queue_notifySuccessors;
+  DeferredQueue_notifySuccessorAdded deferred_queue_notifySuccessorAdded;
+  DeferredQueue_notifySuccessorRemoved deferred_queue_notifySuccessorRemoved;
+  DeferredQueue_notifyIdSpaceChanged deferred_queue_notifyIdSpaceChanged;
+
+  pthread_mutex_t deliverMutex1 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex2 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex3 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex4 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex5 __attribute((serialize(no)));
+}
+
+//    downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t regId = control_);
+
+
+transitions 
+{
+  downcall (state == init) maceInit() {
+    // shyoo : deferred upcall support
+    mace::SpecificCommitWrapper<DeferredBambooService>* executor = new mace::SpecificCommitWrapper<DeferredBambooService>(this, &DeferredBambooService::commitCallBack);
+    mace::GlobalCommit::registerCommitExecutor(executor);
+    pthread_mutex_init(&deliverMutex1, 0);
+    pthread_mutex_init(&deliverMutex2, 0);
+    pthread_mutex_init(&deliverMutex3, 0);
+    pthread_mutex_init(&deliverMutex4, 0);
+    pthread_mutex_init(&deliverMutex5, 0);
+  }
+  downcall setAuthoritativeJoinHandler(registration_uid_t regId) [locking=none] {
+    downcall_setAuthoritativeJoinHandler(regId);
+  }
+  downcall getOverlayJoinStatus() [locking=none] {
+    return downcall_getOverlayJoinStatus();
+  }
+  downcall joinOverlay(const NodeSet& peerSet, registration_uid_t regId) [locking=none] {
+    downcall_joinOverlay(peerSet, regId);
+  }
+  downcall leaveOverlay(registration_uid_t regId) [locking=none] {
+    downcall_leaveOverlay(regId);
+  }
+  downcall getNextHop(const MaceKey& dest) [locking=none] { 
+    return downcall_getNextHop(dest);
+  }
+  downcall getNextHop(const MaceKey& dest, MaceKey& overlayId) [locking=none] {
+    return downcall_getNextHop(dest, overlayId);
+  }
+  downcall idSpaceContains(const MaceKey& id) [locking=none] {
+    return downcall_idSpaceContains(id);
+  }
+  downcall getSuccessors() [locking=off] {
+    return downcall_getSuccessors();
+  }
+  downcall getIdSpace() [locking=off] {
+    return downcall_getIdSpace();
+  }
+  downcall checkNode(const MaceKey& dest, const MaceKey& overlayId) [locking=none] {
+    downcall_checkNode(dest, overlayId);
+  }
+
+  /* non-deferrable upcalls */
+  upcall bool verifyJoinOverlay(const MaceKey& source) [locking=none] { 
+    return upcall_verifyJoinOverlay(source);
+  }
+  upcall void peerJoinedOverlay(const MaceKey& peer) [locking=none] { 
+    return upcall_peerJoinedOverlay(peer);
+  }
+
+  /* deferrable upcalls */
+  upcall void joinResultOverlay(const MaceKey& source, join_status_t status) [locking=none] { 
+    deferred_upcall_joinResultOverlay(source, status);
+  }
+  upcall void notifySuccessors(NodeSet successors) [locking=none] { 
+    deferred_upcall_notifySuccessors(successors);
+  }
+  upcall void notifySuccessorAdded(const MaceKey& id) [locking=none] { 
+    deferred_upcall_notifySuccessorAdded(id);
+  }
+  upcall void notifySuccessorRemoved(const MaceKey& id) [locking=none] { 
+    deferred_upcall_notifySuccessorRemoved(id);
+  }
+  upcall void notifyIdSpaceChanged(const KeyRange& range) [locking=none] { 
+    deferred_upcall_notifyIdSpaceChanged(range);
+  }
+}
+
+routines
+{
+
+  // shyoo : deferred upcall support
+  void commitCallBack(uint64_t myTicket) {
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_joinResultOverlay.size() << " messages." << Log::endl;
+      DeferredQueue_joinResultOverlay::iterator i;
+      for (i=deferred_queue_joinResultOverlay.begin(); i!= deferred_queue_joinResultOverlay.end(); i++) {
+        Deferred_joinResultOverlay m = i->second;
+        upcall_joinResultOverlay(m.source, m.status);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifySuccessors.size() << " messages." << Log::endl;
+      DeferredQueue_notifySuccessors::iterator i;
+      for (i=deferred_queue_notifySuccessors.begin(); i!= deferred_queue_notifySuccessors.end(); i++) {
+        Deferred_notifySuccessors m = i->second;
+        upcall_notifySuccessors(m.successors);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifySuccessorAdded.size() << " messages." << Log::endl;
+      DeferredQueue_notifySuccessorAdded::iterator i;
+      for (i=deferred_queue_notifySuccessorAdded.begin(); i!= deferred_queue_notifySuccessorAdded.end(); i++) {
+        Deferred_notifySuccessorAdded m = i->second;
+        upcall_notifySuccessorAdded (m.id);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifySuccessorRemoved.size() << " messages." << Log::endl;
+      DeferredQueue_notifySuccessorRemoved::iterator i;
+      for (i=deferred_queue_notifySuccessorRemoved.begin(); i!= deferred_queue_notifySuccessorRemoved.end(); i++) {
+        Deferred_notifySuccessorRemoved m = i->second;
+        upcall_notifySuccessorRemoved(m.id);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifyIdSpaceChanged.size() << " messages." << Log::endl;
+      DeferredQueue_notifyIdSpaceChanged::iterator i;
+      for (i=deferred_queue_notifyIdSpaceChanged.begin(); i!= deferred_queue_notifyIdSpaceChanged.end(); i++) {
+        Deferred_notifyIdSpaceChanged m = i->second;
+        upcall_notifyIdSpaceChanged(m.range);
+      }
+    }
+
+    deferred_queue_joinResultOverlay.clear();
+    deferred_queue_notifySuccessors.clear();
+    deferred_queue_notifySuccessorAdded.clear();
+    deferred_queue_notifySuccessorRemoved.clear();
+    deferred_queue_notifyIdSpaceChanged.clear();
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_joinResultOverlay(const MaceKey& source, join_status_t status)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_joinResultOverlay(source, status);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex1);
+      deferred_queue_joinResultOverlay.insert(mace::pair<uint64_t, Deferred_joinResultOverlay>(ThreadStructure::myTicket(), Deferred_joinResultOverlay(source, status)));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifySuccessors(NodeSet successors)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifySuccessors(successors);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex2);
+      deferred_queue_notifySuccessors.insert(mace::pair<uint64_t, Deferred_notifySuccessors>(ThreadStructure::myTicket(), Deferred_notifySuccessors(successors)));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifySuccessorAdded(const MaceKey& id)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifySuccessorAdded(id);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex3);
+      deferred_queue_notifySuccessorAdded.insert(mace::pair<uint64_t, Deferred_notifySuccessorAdded>(ThreadStructure::myTicket(), Deferred_notifySuccessorAdded(id)));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifySuccessorRemoved(const MaceKey& id)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifySuccessorRemoved(id);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex4);
+      deferred_queue_notifySuccessorRemoved.insert(mace::pair<uint64_t, Deferred_notifySuccessorRemoved>(ThreadStructure::myTicket(), Deferred_notifySuccessorRemoved(id)));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifyIdSpaceChanged(const KeyRange& range)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifyIdSpaceChanged(range);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex5);
+      deferred_queue_notifyIdSpaceChanged.insert(mace::pair<uint64_t, Deferred_notifyIdSpaceChanged>(ThreadStructure::myTicket(), Deferred_notifyIdSpaceChanged(range)));    // queue else
+    }
+  }
+
+}
+

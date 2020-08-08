@@ -1,0 +1,86 @@
+service TestCase4;
+provides Null;
+
+time = MaceTime;
+typedefs {
+}
+services {
+  
+}
+
+constants {
+}
+
+constructor_parameters {
+  uint32_t N_CLIENT_CONTEXTS = 8;
+  uint64_t N_CLIENT_OUTPUT = 100;
+  uint64_t N_SERVER_OUTPUT = 1000;
+}
+ 
+state_variables {
+  context Client<uint32_t n>{
+    uint64_t request_count;
+  }
+
+  context Server {
+    uint64_t request_count;
+  }
+}
+
+messages {
+
+}
+ 
+transitions {
+  downcall maceInit()  {
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;  
+    
+    for(uint32_t n =0; n< N_CLIENT_CONTEXTS; n++ ){
+      std::ostringstream oss;
+      oss<< "Client[" << n << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initClient(n);
+    }
+
+    mace::pair<mace::string, mace::string> ownership("globalContext", "Server" );
+    ownerships.insert(ownership);
+
+    addNewOwnerships(ownerships);
+    async_initServer();
+  }
+  
+  async [Client<n>] initClient(uint32_t n ){
+    ADD_SELECTORS("TestCase4");
+    maceout<< "Initialize Client " << n << Log::endl;
+    request_count = 0;
+    async_requestToServer(n);
+  }
+
+  async [Client<n>] requestReply(uint32_t n ){
+    ADD_SELECTORS("TestCase4");
+    request_count ++;
+    if( request_count % N_CLIENT_OUTPUT == 0 ) {
+      maceout<<"Client("<< n <<") request_count=" << request_count << Log::endl;
+    }
+
+    async_requestToServer( n );
+  }
+  
+  async [Server] initServer() {
+    ADD_SELECTORS("TestCase4");
+    request_count = 0;
+    maceout<< "Initialize Server!" << Log::endl;
+  }
+
+  async [Server] requestToServer(uint32_t n) {
+    ADD_SELECTORS("TestCase4");
+    request_count ++;
+    if( request_count % N_SERVER_OUTPUT == 0 ){
+      maceout<<"Server request_count=" << request_count << Log::endl;
+    }
+
+    async_requestReply(n);
+  }
+}

@@ -1,0 +1,85 @@
+This file is an experiment.  The idea is that if you add cool new features or
+make changes to Mace, you should list them here so others have an easy way to
+learn about them without reading your checkin log.  Please make an effort to
+add things to it, so it stays up to date.
+
+Thanks -
+Chip
+
+2013-04-12 (chuangw)
+  Milestone: The 1000th changeset in mace-fullcontext branch is in the repository!
+
+2011-06-29 (ckillian)
+  Some recent change highlights include:
+
+  1) Model checker and simulator code is both released to the public, and
+    merged to a great extent.  Scripts no longer require a symlink of the
+    modelchecker binary, they know how to search for the binary. (knagara)
+
+  2) No files are created by the build system within the checked out
+    directories.  This helps with multiple builds, etc.
+
+  3) New local address handling enables model checking of services built
+    on top of Chord/Pastry/etc.
+
+  4) Support for "make test", which tests some basic functionalities to
+    prevent or at least detect quickly broken commits.  I have a host which
+    does a nightly update and build which includes running these tests.
+
+
+2007-01-16
+  - The Mace Library has now been cleaned up a bit and documented in the source
+    in a format automatically recognized by the doxygen tool.  You can now use
+    doxygen to generate API documentation for the Mace Library.  See 
+    mace/docs/doxygen/README for details.
+
+2007-01-11
+  - Mace serialization has been updated to be explicit about the size of types
+    being serialized for portability.  Additionally, collections have been
+    updated to support optional serialization, so you explicitly specify
+    whether to serialize mace collections.
+
+2007-12-12
+  - Mace using CMake now supports building on Linux, MacOSX, and Win32 (using
+    Cygwin or MinGW).  The old Makefiles may still work, but are no longer
+    supported.  Note, MinGW build requires MinGW, Win32-PThreads, libregex,
+    Boost, and OpenSSL to be install, in addition to Perl.  Appmacedon and
+    filecopy have been tested to work across linux and win32 builds.  CGI does
+    not work on windows, and HTTP has not been tested.  It may still use some
+    file I/O calls on sockets, which doesn't work on Windows.
+
+2007-12-04
+  - Make Log::autoAdd take a regular expression rather than a fnmatch
+    expression (or a substring from before).
+
+2007-12-03
+  - Add 1st-cut support for binary logging and binary state dumps.  Makes logs
+    more efficient, but must use logreader to read the logs out.  Only takes
+    effect if you select logs using LOG_BINARY (instead of LOG_FPRINTF).
+
+2007-11-20
+  - Add EXPERIMENTAL support for cmake.  Don't use unless you're willing to
+    help fix bugs.  May not support building services outside of Mace yet.  
+    Not documented yet.
+
+2007-10-31
+  - Split time functions into TimeUtil.  Remove random stubs from util.  Now
+    random calls go to RandomUtil and time calls to TimeUtil.
+  - Fix XMLRPC-related bug in auto types.
+
+2007-10-12
+  - Add support for trace=high.  Prints service state after *outermost*
+    transition completes
+  - Remove more of MACEDON code from BaseMaceService
+
+2007-10-06 
+  - Auto types in mh files now support methods and constructors as their
+    service counterparts do.
+
+2007-10-05 
+  - Added generic support for C++ tests for model checking.  Create a
+    "TestProperties" class of the name ServiceTester in the namespace of the
+    service, and it will be a friend of the service.  Construct it in your
+    MCTest.
+  - Added Enum template class which provides printable and serializable
+    wrappers for enums.  Serializability across compilers suspect.

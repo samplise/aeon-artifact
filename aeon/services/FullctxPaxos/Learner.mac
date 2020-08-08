@@ -1,0 +1,84 @@
+#include "mmultimap.h"
+
+//service FullCtxPaxos;
+
+service Learner;
+//provides Consensus;
+
+trace=high;
+
+services {
+  //use the TCP protocal to sent the msg
+  Transport t = auto(shared,[reliable],[]);
+}
+
+constants {
+  
+}
+
+constructor_parameters {
+ 
+}
+
+states {
+  
+}
+
+typedefs {
+
+}
+
+messages {
+  
+}
+
+
+state_variables {
+		uint64_t local_logicalNodeID;
+		mace::map<uint64_t, MaceKey> logicalNodesMap;
+
+		context Learner {
+				mace::map<mace::string, mace::string> storedVal;
+		}
+
+}
+
+transitions {
+		downcall maceInit(){
+				downcall_route(masterKey, ReportMsg());
+				async_learnerInit();
+		}
+
+		async [Learner] learnerInit() {
+			
+		}
+
+		async [Learner] update(Value& value){
+				storedVal[value.key] = value.value;	
+		}
+
+		upcall void deliver(const MaceKey& src, const MaceKey& dest, const Learn& m){
+				async_update(m.value);	
+		}
+
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const LogicalNodesInfoMsg& m){
+			  logicalNodesMap = m.logicalNodesMap;
+				mace::map<uint64_t,  MaceKey>::iterator iter = logicalNodesMap.begin();
+				while( iter!=logicalNodesMap.end() ){
+						if(localAddress() == iter->second){
+								local_logicalNodeID = iter->first;
+								break;
+						}
+						iter++;
+				}
+				
+				iter = logicalNodesMap.begin();
+				while( iter!=logicalNodesMap.end() ){
+						downcall_route(iter->second,  RoleAnounceMsg(local_logicalNodeID,  "client"));
+				}
+		}
+																																																																																																																																																																																																																																																																																														
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const RoleAnounceMsg& m){
+		
+		}
+}

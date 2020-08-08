@@ -1,0 +1,768 @@
+#include "marray.h"
+#include "m_map.h"
+#include "mdeque.h"
+#include "RandomUtil.h"
+#include "mace-macros.h"
+
+service TagServer;
+
+provides Null;
+
+trace=low;
+ 
+services {
+  Transport t;
+}
+
+constants {
+
+  //indicates the location that the kid stays in
+  uint16_t LOCATION_IN_WORLD = 0;
+  uint16_t LOCATION_IN_HALLWAY = 1;
+  uint16_t LOCATION_IN_ROOM = 2;
+   
+  // The size of a standard world. It's a 50 * 50 grid.
+  uint16_t WORLD_SIZE = 50;
+  
+  //The size of a standard hallway. It's a 50 * 50 grid.
+  uint16_t HALLWAY_SIZE = 50;
+   
+  //The size of a standard room. It's a 50 * 50 grid.
+  uint16_t ROOM_SIZE = 50;
+   
+  //the kid direction constants
+  uint16_t DIRECTION_STATIONARY = 0;
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+   
+  //Indicates the role of a kid, I feel it's weird to represent a child's role
+  //by using true and false. So I just keep this temprorily.
+  uint16_t ROLE_NOTIT = 0;
+  uint16_t ROLE_IT = 1;
+  
+  //indicates the default location that the kid stays
+  uint16_t DEFAULT_BUILDING = 0;
+  uint16_t DEFAULT_ROOM = 0;
+  uint16_t DEFAULT_COORD = 0;
+   
+}
+ 
+constructor_parameters {
+  //the number for Kid, Building, Room context
+  //uint16_t NKID = 0;
+  uint16_t NUM_BUILDINGS = 1;
+  uint16_t NUM_ROOMS = 1;
+  // The timer for all the kids to move
+  uint64_t MOVEMENT_PERIOD = 1 * 1000 * 1000;     //5 sec in micros
+  // The timer to constantly add more kids
+  // uint64_t KID_INCREASE_PERIOD = 2 * 1000 * 1000;
+  // uint32_t KID_INCREASE_NUM = 10;
+  // The
+  uint64_t NUM_PRIMES = 0;
+  uint64_t HEAD_INITIAL_WAIT_TIME = 10*1000*1000;
+  uint64_t EXIT_TIME = 600 * 1000 * 1000;
+}
+
+typedefs {
+  typedef mace::map<coordinate, int> portalMap; 
+}
+
+states {
+  //After all the contexts have been initialized, the state change to ready
+  ready;
+}
+
+auto_types {
+  coordinate __attribute((comparable(equals=default; lessthan=default))) {
+    uint16_t x;
+    uint16_t y;
+  }
+}
+
+#minclude "TagMessage.mi"
+
+/*
+ * I use a two dimension array to represent the map.
+ * The initial number on each block is -1 which represent that the block is vacant.
+ * If the number in each block is positive, that means there is a kid with the 
+ * positive number as his kidID is standing on this block.
+ */
+
+state_variables {
+  timer moveAllKids __attribute((recur(MOVEMENT_PERIOD)));
+  //timer addMoreKids __attribute((recur(KID_INCREASE_PERIOD)));
+  timer exitTimer;
+  mace::deque<uint16_t> kidReuse; 
+
+  //This 2D map represent the world map
+  mace::array<mace::array<int, WORLD_SIZE>, WORLD_SIZE> worldMap;
+  mace::set<uint16_t> kidsInWorld;
+  // Map the building entrance coordinate to the building number
+  portalMap buildingEntrance;  
+
+  context Building <uint16_t nBuilding> {
+    uint16_t buildingID;
+    
+    context Room <uint16_t nRoom> {
+      uint16_t roomID;
+      //a set keeps track of the ID of the kids
+      mace::set<uint16_t> kidsInRoom;
+      mace::array<mace::array<int, ROOM_SIZE>, ROOM_SIZE> roomMap;
+      // Map the room exit to the hallway
+      // If the mapping is 0, that means this is a doorway to the hallway
+      portalMap doorway;  
+    }
+
+    //hallway is a special place for kid transtions
+    //"it" can't tag kids in hallway and kid can be teleport to other rooms
+    //through hallway
+    context Hallway {
+      // Since there is only one hall way in each building, we don't need to 
+      // explicitly assign an id to each hall way.
+      mace::array<mace::array<int, HALLWAY_SIZE>, HALLWAY_SIZE> hallwayMap;
+      //a set keeps track of the ID of the kids
+      mace::set<uint16_t> kidsInHallway;
+      // Map the room entrance to the room number
+      // If the mapping is to -1, that means this doorway is to the world
+      portalMap doorway;
+    }
+  }
+
+  // keep record of the number of kid
+  uint16_t nkid;
+  uint16_t curKidNum;
+
+  context Kid <uint16_t nKid> {
+    //indicates the ID of a kid
+    uint16_t kidID;
+    uint16_t kidRole;
+    uint16_t location;
+    //indicates the location of the kids
+    uint16_t currentBuilding;
+    uint16_t currentRoom;
+    coordinate coord;
+    //indicates the direction that a kid runs
+    uint16_t kidDirection;
+  }
+}
+
+transitions {
+  downcall (state == init) maceInit() {
+    usleep(HEAD_INITIAL_WAIT_TIME);
+
+    // Initialize the variables in the global context
+    //std::cout << "Calling maceInit" << std::endl;
+    // Initialize the world map to -1
+    for (uint16_t i = 0; i < WORLD_SIZE; i++) {
+      for (uint16_t j = 0; j < WORLD_SIZE; j++) {
+        worldMap[i][j] = -1;
+      }
+    }
+
+    // Initialize the building entrance
+    for (uint16_t i = 0; i < NUM_BUILDINGS; i++) {
+      // Randomly spread the entrance of the room through the map
+      coordinate coord;
+       
+      while (true) {
+        coord.x = RandomUtil::randInt(WORLD_SIZE);
+        coord.y = RandomUtil::randInt(WORLD_SIZE);
+        if (buildingEntrance.find(coord) != buildingEntrance.end()) {
+          continue;
+        }
+        else {
+          break;
+        }
+      }
+
+      ASSERT(coord.x < WORLD_SIZE && coord.y < WORLD_SIZE);
+      worldMap[coord.x][coord.y] = -2;
+      buildingEntrance.put(coord, i);
+    }
+
+    // Initialize buildings and rooms
+    for (uint16_t bCount = 0; bCount < NUM_BUILDINGS; bCount++) {
+      async_buildingInit(bCount);
+      async_hallwayInit(bCount);
+    }
+     
+    nkid = 0;
+    curKidNum = 0;
+    std::cout << curtime << " num_kids: " << curKidNum << std::endl;
+    moveAllKids.schedule(MOVEMENT_PERIOD);
+    exitTimer.schedule(EXIT_TIME);
+    state = ready;
+  }
+  
+  // Initial a single building
+  async [Building<nBuilding>] void buildingInit (int nBuilding) {
+    //std::cout << "Async call buildInit has been called" << std::endl;
+    ASSERT(nBuilding >= 0);
+    buildingID = nBuilding;  
+    for (uint16_t rCount = 0; rCount < NUM_ROOMS; rCount++) {
+      async_roomInit(nBuilding, rCount);
+    }
+  }
+
+  // Initial a single room
+  async [Building<nBuilding>::Room<nRoom>] void roomInit(int nBuilding, int nRoom) {
+    //std::cout << "Async call roomInit has been called" << std::endl;
+    ASSERT(nBuilding >= 0 && nRoom >= 0);
+    /* We can input the room map from a file in the later iteration */
+    // Initialize all the room map blocks to -1
+    for (uint16_t i = 0; i < ROOM_SIZE; i++) {
+      for (uint16_t j = 0; j < ROOM_SIZE; j++) {
+        roomMap[i][j] = -1;
+      }
+    }
+    roomID = nRoom;
+    // Initialize the doorway to hallway
+    coordinate coord;
+    coord.x = 0; coord.y = 0;
+    doorway.put(coord, -1); 
+    roomMap[coord.x][coord.y] = -2;
+  }
+
+  async [Building<nBuilding>::Hallway] void hallwayInit(int nBuilding) {
+    //std::cout << "Async call hallwayInit has been called" << std::endl;
+    // initialize all the blocks to -1
+    for (uint16_t i = 0; i < HALLWAY_SIZE; i++) {
+      for (uint16_t j = 0; j < HALLWAY_SIZE; j++)
+        hallwayMap[i][j] = -1;
+    }
+    /* Initialize the doorway to room and world */
+    // Initialize the doorway to world
+    coordinate coord;
+    coord.x = 0; coord.y = 0;
+    doorway.put(coord, -1); 
+    hallwayMap[coord.x][coord.y] = -2;
+
+    // Initialize the doorway to each room
+    for (uint16_t i = 0; i < NUM_ROOMS; i++) {
+      coordinate tempCoord;
+      //tempCoord.x = i + 1; tempCoord.y = i + 1;
+      while (true) {
+        tempCoord.x = RandomUtil::randInt(ROOM_SIZE);
+        tempCoord.y = RandomUtil::randInt(ROOM_SIZE);
+        if (doorway.find(tempCoord) != doorway.end()) {
+          continue;
+        }
+        else {
+          break;
+        }
+      }
+
+      ASSERT(tempCoord.x < HALLWAY_SIZE && tempCoord.y < HALLWAY_SIZE);
+      doorway.put(tempCoord, i);
+      hallwayMap[tempCoord.x][tempCoord.y] = -2;
+    }
+
+  }
+  // Initialize a single kid
+  async [Kid<nKid>] void kidInit(int nKid) {
+    //std::cout << "Async call kidInit has been called" << std::endl;
+    // Initialize all the attributes of the kid
+    ASSERT(nKid >= 0);
+
+    kidID = nKid;
+    kidRole = ROLE_NOTIT;
+    location = LOCATION_IN_WORLD;
+    currentBuilding = DEFAULT_BUILDING;
+    currentRoom = DEFAULT_ROOM;       
+    coord.x = DEFAULT_COORD;
+    coord.y = DEFAULT_COORD;
+    kidDirection = DIRECTION_STATIONARY;
+  }
+
+
+  async [Kid<nKid>] void updateKidLocation(uint16_t nKid, uint16_t newBuilding,
+      uint16_t newRoom, coordinate newCoord, uint16_t newLocation) {
+    //std::cout << "Async call updateKidLocation has been called" << std::endl;
+    location  = newLocation; 
+    ASSERT(newBuilding >= 0);
+    currentBuilding = newBuilding;
+    ASSERT(newRoom >= 0);
+    currentRoom = newRoom;
+
+    coord.x = newCoord.x;
+    coord.y = newCoord.y;
+    kidDirection = DIRECTION_STATIONARY;
+  }
+
+  async [Kid<nKid>] void setToIt(uint16_t nKid) {
+    ASSERT(kidRole != ROLE_IT);
+    kidRole = ROLE_IT;
+  }
+
+  async [Kid<nKid>] void setToNormal(uint16_t nKid) {
+    ASSERT(kidRole != ROLE_NOTIT);
+    kidRole = ROLE_NOTIT;
+  }
+
+  async [Building<nBuilding>::Hallway] void retriveHallwayMap(uint16_t nBuilding,
+      const MaceKey& src, uint64_t timeStamp) {
+    downcall_route(src, ReceiveMapInfo(LOCATION_IN_HALLWAY, hallwayMap, timeStamp)); 
+    //std::cout << "A ReceiveMapInfo message has been send" << std::endl;
+  }
+
+  async [Building<nBuilding>::Room<nRoom>] void retriveRoomMap(uint16_t nBuilding,
+      uint16_t nRoom, const MaceKey& src, uint64_t timeStamp) {
+    downcall_route(src, ReceiveMapInfo(LOCATION_IN_ROOM, roomMap, timeStamp)); 
+    //std::cout << "A ReceiveMapInfo message has been send" << std::endl;
+  }
+
+  upcall [Kid<msg.kidID>] deliver(const MaceKey& src, const MaceKey& dest, 
+      const SetDirection& msg) {
+    //std::cout << "A SetDirection message has been received" << std::endl;
+    kidDirection = msg.kidDirection;
+  }
+
+  //The client first send a RequireKidInit to get all the info from the designated kid
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequireKidInit& msg) {
+    //std::cout << "A RequireKidInit message has been received" << std::endl;
+    curKidNum++;
+    std::cout << curtime << " num_kids: " << curKidNum << std::endl;
+    uint16_t newKidID;
+    if (kidReuse.size() != 0) {
+      newKidID = kidReuse.front();
+      kidReuse.pop_front();
+    }
+    else {
+      newKidID = nkid;
+      nkid++;
+    }
+    async_kidInit(newKidID); 
+    moveToWorld(newKidID);
+    downcall_route(src, ResponseKidInit(newKidID, ROLE_NOTIT, LOCATION_IN_WORLD, 
+          DEFAULT_BUILDING, DEFAULT_ROOM,  DIRECTION_STATIONARY));
+    //std::cout << "A ResponseKidInit message has been sent" << std::endl;
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequireKidLeave& msg) {
+    curKidNum--;
+    std::cout << curtime << " num_kids: " << curKidNum << std::endl;
+    kidReuse.push_back(msg.kidID);
+    if (msg.kidLocation == LOCATION_IN_WORLD) {
+      kidsInWorld.erase(msg.kidID);
+      for (uint16_t i = 0; i < WORLD_SIZE; i++) {
+        for (uint16_t j = 0; j < WORLD_SIZE; j++ ) {
+          if (worldMap[i][j] == msg.kidID) {
+            worldMap[i][j] = -1;
+          }
+        }
+      }
+    }
+    else if (msg.kidLocation == LOCATION_IN_HALLWAY) {
+      kidQuitInHallway(msg.kidBuilding, msg.kidID);
+    }
+    else {
+      kidQuitInRoom(msg.kidBuilding, msg.kidRoom, msg.kidID);
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequireMapInfo& msg) {
+    //std::cout << "A RequireMapInfo message has been received" << std::endl;
+    if (msg.kidLocation == LOCATION_IN_WORLD) {
+      downcall_route(src, ReceiveMapInfo(msg.kidLocation, worldMap, msg.timeStamp)); 
+      //std::cout << "A ReceiveMapInfo message has been send" << std::endl;
+    }
+    else if (msg.kidLocation == LOCATION_IN_HALLWAY) {
+      async_retriveHallwayMap(msg.nBuilding, src, msg.timeStamp);
+    }
+    else {
+      async_retriveRoomMap(msg.nBuilding, msg.nRoom, src, msg.timeStamp);
+    }
+  }
+
+  scheduler moveAllKids() {
+    // 1. Print the world map
+    //std::cout << "------------------------------------------------------" << std::endl;
+    //std::cout << "                     World Map" << std::endl;
+    //std::cout << "------------------------------------------------------" << std::endl;
+    for (uint16_t i = 0; i < WORLD_SIZE / 2; i++) {
+      for (uint16_t j = 0; j < WORLD_SIZE / 2; j++) {
+        //std::cout << worldMap[i][j] << " ";
+      }
+      //std::cout << std::endl;
+    }
+
+    // 2. Move all the kids in the world
+    mace::set<uint16_t>::iterator it;
+    mace::set<uint16_t> removedKids;
+    for (it = kidsInWorld.begin(); it != kidsInWorld.end(); it++) {
+      removedKids = kidMove(*it, worldMap, buildingEntrance);
+    }
+
+    // Remove the kids from the container
+    for (it = removedKids.begin(); it != removedKids.end(); it++)
+      kidsInWorld.erase(*it);
+
+    // 3. Move all the kids in hallway and in rooms
+    for (uint16_t i = 0; i < NUM_BUILDINGS; i++) {
+      moveKidsInHallway(i);
+      for (uint16_t j = 0; j < NUM_ROOMS; j++) {
+        moveKidsInRoom(i, j);
+      }
+    }
+  }
+
+  /*scheduler addMoreKids() {
+  //std::cout << "Add " << KID_INCREASE_NUM << " more kids" << std::endl;
+  for (uint32_t i = nkid; i < nkid + KID_INCREASE_NUM; i++) {
+  async_kidInit(i);
+  moveToWorld(i);
+  }
+  nkid = nkid + KID_INCREASE_NUM;
+  }*/
+
+  scheduler exitTimer() {
+    std::cout << curtime << " exiting" << std::endl;
+    // Should we do graceful exit?
+    exit(0);
+  }
+}
+
+routines {
+
+  // Move the kid to World after it has been removed from the current container
+  bool moveToWorld(uint16_t kidID) {
+    kidsInWorld.insert(kidID); 
+    for (uint16_t i = 0; i < WORLD_SIZE; i++) {
+      for (uint16_t j = 0; j < WORLD_SIZE; j++) {
+        if (worldMap[i][j] == -1) {
+          coordinate newCoord;
+          newCoord.x = i; newCoord.y = j;
+          async_updateKidLocation(kidID, DEFAULT_BUILDING, DEFAULT_ROOM, 
+              newCoord, LOCATION_IN_WORLD);
+          worldMap[i][j] = kidID;
+          return true;
+        }
+      }
+    }
+    // No available space left, do something
+    //std::cout << "There is no space left in the world map." << std::endl;
+    return false;
+  }
+
+  // Remove the kid from the world
+  uint16_t removeFromWorld (uint16_t kidID, coordinate curCoord) {
+    //kidsInWorld.erase(kidID);
+    worldMap[curCoord.x][curCoord.y] = -1;
+    return kidID;
+  }
+
+  [Building<nBuilding>::Hallway] bool moveToHallway(uint16_t kidID, uint16_t nBuilding) {
+    kidsInHallway.insert(kidID);
+    for (uint16_t i = 0; i < WORLD_SIZE; i++) {
+      for (uint16_t j = 0; j < WORLD_SIZE; j++) {
+        if (hallwayMap[i][j] == -1) {
+          coordinate newCoord;
+          newCoord.x = i; newCoord.y =j;
+          async_updateKidLocation(kidID, DEFAULT_BUILDING, DEFAULT_ROOM, 
+              newCoord, LOCATION_IN_HALLWAY);
+          hallwayMap[i][j] = kidID;
+          return true;
+        }
+      }
+    }
+    // No available space left, do something
+    //std::cout << "There is no space in the hallway." << std::endl;
+    return false;
+  }
+
+  [Building<nBuilding>::Room<nRoom>] void updateKidsInRoom(uint16_t nBuilding, 
+      uint16_t nRoom, coordinate oldCoord, coordinate newCoord, uint16_t kidID) {
+    //std::cout << "Async updateKidsInRoom has been called" << std::endl;
+    roomMap[newCoord.x][newCoord.y] = kidID;
+    roomMap[oldCoord.x][oldCoord.y] = -1;
+
+    //std::cout << "The kid No." << kidID << " has moved successfully to (" <<
+    //newCoord.x << "," << newCoord.y << ")" << std::endl;
+  }
+
+  [Building<nBuilding>::Hallway] void updateKidsInHallway (uint16_t nBuilding,
+      coordinate oldCoord, coordinate newCoord, uint16_t kidID) {
+    //std::cout << "Async updateKidsInHallway has been called" << std::endl;
+    hallwayMap[newCoord.x][newCoord.y] = kidID;
+    hallwayMap[oldCoord.x][oldCoord.y] = -1;
+
+    //std::cout << "The kid No." << kidID << " has moved successfully to (" <<
+    //newCoord.x << "," << newCoord.y << ")" << std::endl;
+  }
+
+  void updateKidsInWorld (coordinate oldCoord, coordinate newCoord, uint16_t kidID) {
+    //std::cout << "Async updateKidsInRoom has been called" << std::endl;
+    worldMap[newCoord.x][newCoord.y] = kidID;
+    worldMap[oldCoord.x][oldCoord.y] = -1;
+
+    //std::cout << "The kid No." << kidID << " has moved successfully to (" <<
+    //newCoord.x << "," << newCoord.y << ")" << std::endl;
+  }
+
+  [Building<nBuilding>::Room<nRoom>] void moveKidsInRoom(uint16_t nBuilding, uint16_t nRoom) {
+    // 1. Print the room map
+    //std::cout << "------------------------------------------------------" << std::endl;
+    //std::cout << "Building " << nBuilding << " Room " << nRoom << " Map" << std::endl;
+    //std::cout << "------------------------------------------------------" << std::endl;
+    for (uint16_t i = 0; i < WORLD_SIZE / 2; i++) {
+      for (uint16_t j = 0; j < WORLD_SIZE / 2; j++) {
+        //std::cout << roomMap[i][j] << " ";
+      }
+      //std::cout << std::endl;
+    }
+    // Additional Computational cost
+    if (NUM_PRIMES > 0) { 
+      do_primes();
+    }
+
+    mace::set<uint16_t>::iterator it;
+    mace::set<uint16_t> removedKids;
+    for (it = kidsInRoom.begin(); it != kidsInRoom.end(); it++)
+      removedKids = kidMove(*it, roomMap, doorway);
+
+    // Remove the kids from the container
+    for (it = removedKids.begin(); it != removedKids.end(); it++)
+      kidsInRoom.erase(*it);
+
+    return;
+  }
+
+  [Building<nBuilding>::Hallway] void moveKidsInHallway(uint16_t nBuilding) {
+    // 1. Print the hallway map
+    //std::cout << "------------------------------------------------------" << std::endl;
+    //std::cout << "Building " << nBuilding << " Hallway Map" << std::endl;
+    //std::cout << "------------------------------------------------------" << std::endl;
+    for (uint16_t i = 0; i < WORLD_SIZE / 2; i++) {
+      for (uint16_t j = 0; j < WORLD_SIZE / 2; j++) {
+        //std::cout << hallwayMap[i][j] << " ";
+      }
+      //std::cout << std::endl;
+    }
+    if (NUM_PRIMES > 0) { 
+      do_primes();
+    }
+    mace::set<uint16_t>::iterator it;
+    mace::set<uint16_t> removedKids;
+    for (it = kidsInHallway.begin(); it != kidsInHallway.end(); it++) 
+      removedKids = kidMove(*it, hallwayMap, doorway);
+
+    // Remove the kids from the container
+    for (it = removedKids.begin(); it != removedKids.end(); it++)
+      kidsInHallway.erase(*it);
+
+    return; 
+  }
+
+  //remove the kid from the hallway
+  [Building<nBuilding>::Hallway] uint16_t removeFromHallway(uint16_t nBuilding, 
+      uint16_t kidID, coordinate curCoord) {
+    //remove the kid from the kid container in hallway 
+    //ASSERT(kidsInHallway.containsKey(kidID));
+    //kidsInHallway.erase(kidID);
+    hallwayMap[curCoord.x][curCoord.y] = -1; 
+    return kidID;
+  }
+
+  [Building<nBuilding>::Hallway] void kidQuitInHallway (uint16_t nBuilding, uint16_t kidID) {
+    kidsInHallway.erase(kidID);
+    for (uint16_t i = 0; i < HALLWAY_SIZE; i++) {
+      for (uint16_t j = 0; j < HALLWAY_SIZE; j++ ) {
+        if (hallwayMap[i][j] == kidID) {
+          hallwayMap[i][j] = -1;
+        }
+      }
+    }
+  }
+
+  //after remove the kid from the hallway, change the kid to the designated room
+  [Building<nBuilding>::Room<nRoom>] bool moveToRoom(uint16_t nBuilding, 
+      uint16_t nRoom, uint16_t kidID) {
+    //std::cout << "Routine moveToRoom has been called" << std::endl;
+    //add the kid to the kid container in the room
+    ASSERT(kidID >= 0);
+    kidsInRoom.insert(kidID);
+    //add the kid to the room map
+    for (uint16_t i = 0; i < ROOM_SIZE; i++) {
+      for (uint16_t j = 0; j < ROOM_SIZE; j++) {
+        if (roomMap[i][j] == -1) {
+          //if there is a space except the origin, then place the kid in the place
+          coordinate newCoord;
+          newCoord.x = i; newCoord.y = j;
+          async_updateKidLocation(kidID, nBuilding, nRoom, newCoord, LOCATION_IN_ROOM);
+          roomMap[i][j] = kidID;
+          //downcall_route(src, ChangeRoomResult(msg.kidID, true));
+          return true;
+        }
+      }
+    }
+    //if there is no space left in that room, then return false
+    //std::cout << "There is no space left in Building No." << nBuilding 
+    //<< "Room No." << nRoom << std::endl;
+    return false;
+  }
+
+  [Building<nBuilding>::Room<nRoom>] uint16_t removeFromRoom(uint16_t nBuilding, 
+      uint16_t nRoom, uint16_t kidID, coordinate curCoord) {
+    //std::cout << "Routine removeFromRoom has been called" << std::endl;
+    //ASSERT(kidsInRoom.containsKey(kidID));
+    //kidsInRoom.erase(kidID);
+    roomMap[curCoord.x][curCoord.y] = -1;
+    return kidID;
+  }
+
+  [Building<nBuilding>::Room<nRoom>] void kidQuitInRoom (uint16_t nBuilding, uint16_t nRoom,
+      uint16_t kidID) {
+    kidsInRoom.erase(kidID);
+    for (uint16_t i = 0; i < ROOM_SIZE; i++) {
+      for (uint16_t j = 0; j < ROOM_SIZE; j++ ) {
+        if (roomMap[i][j] == kidID) {
+          roomMap[i][j] = -1;
+        }
+      }
+    }
+  }
+
+  [Kid<nKid>] mace::set<uint16_t> kidMove(uint16_t nKid, 
+      const mace::array<mace::array<int, WORLD_SIZE>, WORLD_SIZE> & map,
+      const portalMap & portals) {
+
+    ASSERT(nKid >= 0); 
+    coordinate newCoord;
+    newCoord.x = coord.x;
+    newCoord.y = coord.y;
+    portalMap::const_iterator it;
+    mace::set<uint16_t> removedKids;
+
+    // Set the boundary
+    int xBoundary, yBoundary;
+    switch (location) {
+      case LOCATION_IN_WORLD:
+        xBoundary = WORLD_SIZE;
+        yBoundary = WORLD_SIZE;
+        break;
+      case LOCATION_IN_HALLWAY:
+        xBoundary = HALLWAY_SIZE;
+        yBoundary = HALLWAY_SIZE;
+        break;
+      case LOCATION_IN_ROOM:
+        xBoundary = ROOM_SIZE;
+        yBoundary = ROOM_SIZE;
+        break;
+      default:
+        ABORT("Kid location invalid!");
+    }
+
+    //keep the kid running, for test purpose only
+    if (kidDirection == DIRECTION_STATIONARY) {
+      kidDirection = 1 + RandomUtil::randInt(4);
+    }
+    switch (kidDirection) {
+      case DIRECTION_STATIONARY:
+        return removedKids;
+      case DIRECTION_UP:
+        newCoord.y++;
+        break;
+      case DIRECTION_DOWN:
+        newCoord.y--;
+        break;
+      case DIRECTION_LEFT:
+        newCoord.x--;
+        break;
+      case DIRECTION_RIGHT:
+        newCoord.x++;
+        break;
+      default:
+        ABORT("Kid direction invalid!");
+    }
+    // If the kid steps on a portal to other place
+    if ((it = portals.find(newCoord)) != portals.end()) {
+      if (location == LOCATION_IN_ROOM) {
+        // Teleport to hallway
+        //std::cout << "Move Kid No." << kidID << " to Hallway" << std::endl;
+        if (moveToHallway(kidID, currentBuilding))
+          removedKids.insert(removeFromRoom(currentBuilding, currentRoom, kidID, coord));
+      }
+      else if (location == LOCATION_IN_HALLWAY) {
+        // Teleport to world or room
+        if (portals.get(newCoord) == -1) {
+          // Teleport to world
+          //std::cout << "Move Kid No." << kidID << " to World" << std::endl;
+          if (moveToWorld(kidID))
+            removedKids.insert(removeFromHallway(currentBuilding, kidID, coord));
+        }
+        else {
+          // Teleport to other room
+          //std::cout << "Move Kid No." << kidID << " to Room" << std::endl;
+          if (moveToRoom(currentBuilding, (*it).second, kidID))
+            removedKids.insert(removeFromHallway(currentBuilding, kidID, coord));
+        }
+      }
+      else if (location == LOCATION_IN_WORLD) {
+        // Teleport to hallway
+        //std::cout << "Move Kid No." << kidID << " to Hallway" << std::endl;
+        if (moveToHallway(kidID, currentBuilding))
+          removedKids.insert(removeFromWorld(kidID, coord));
+      }
+    }
+
+    else if (newCoord.x >= xBoundary || newCoord.y >= yBoundary || 
+        newCoord.x < 0 || newCoord.y < 0) {
+      //std::cout << "The kid No." << nKid << " has been blocked by wall" << std::endl;
+      // Change direction when blocked by walls, for test purpose only
+      kidDirection = 1 + RandomUtil::randInt(4);
+    }
+
+    // If two players bump into each other
+    else if (map[newCoord.x][newCoord.y] >= 0) {
+      // If one of them is "it", then switch the roles
+      //std::cout << "Kid No." << map[newCoord.x][newCoord.y] <<
+      //" has been blocked by other kids" << std::endl;
+      if (kidRole == ROLE_IT) {
+        // 1. Set itself to not "it"
+        kidRole = ROLE_NOTIT;
+        // 2. Set the new player to "it"
+        async_setToIt(map[newCoord.x][newCoord.y]);
+        // 3. Teleport itself to hallway
+        if (moveToHallway(kidID, currentBuilding))
+          removedKids.insert(removeFromRoom(currentBuilding, currentRoom, kidID, coord));
+      }
+      // Change the direction of the kid
+      kidDirection = 1 + RandomUtil::randInt(4);
+    }
+
+    else {
+
+      // 1. Update the new location in other context
+      if (location == LOCATION_IN_ROOM) {
+        updateKidsInRoom(currentBuilding, currentRoom, coord, newCoord, nKid);
+      }
+      else if (location == LOCATION_IN_HALLWAY) {
+        updateKidsInHallway(currentBuilding, coord, newCoord, kidID);
+      }
+      else if (location == LOCATION_IN_WORLD) {
+        updateKidsInWorld(coord, newCoord, kidID);
+      }
+      // 2. Update the new location in KID context
+      coord.x = newCoord.x;
+      coord.y = newCoord.y;
+    }
+    return removedKids;
+  }
+
+  [__null] void do_primes() {
+    uint64_t i, num=1, primes = 0;
+    //std::cout << curtime << " do_primes()" << std::endl;
+    while(1) {
+      ++num;
+      for (i = 2; (i <= num) && (num % i != 0); ++i);
+      if (i == num)
+        ++primes;
+      if( primes > NUM_PRIMES ) {
+        return;
+      }
+    }
+    //printf("Calculated %d primes.\n", primes);
+  }
+}

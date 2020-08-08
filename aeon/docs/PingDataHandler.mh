@@ -1,0 +1,5 @@
+handler PingData {
+  virtual void hostResponseReceived(const MaceKey& host, uint64_t timeSent,
+				    uint64_t timeReceived, uint64_t remoteTime) { }
+  virtual void hostResponseMissed(const MaceKey& host, uint64_t timeSent) { }
+}; // PingDataHandler

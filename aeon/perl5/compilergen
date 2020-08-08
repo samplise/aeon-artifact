@@ -1,0 +1,43 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+#use lib $ENV{HOME} . "/mace/perl5";
+
+use File::Basename;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+use Parse::RecDescent;
+
+require Mace::Compiler::MaceGrammar;
+require Mace::Compiler::VariantGrammar;
+require Mace::Compiler::ClassGrammar;
+require Mace::Compiler::MHGrammar;
+require Mace::Dependency::MHGrammar;
+require Mace::Dependency::MaceGrammar;
+
+# $::RD_HINT = 1;
+
+if(scalar(grep(/MaceHeaderRecDescent.pm/, @ARGV))) {
+    Parse::RecDescent->Precompile(Mace::Compiler::MHGrammar::MH(),
+				  "Mace::Compiler::MaceHeaderRecDescent");
+}
+if(scalar(grep(/MaceRecDescent.pm/, @ARGV))) {
+    Parse::RecDescent->Precompile(Mace::Compiler::MaceGrammar::MACE(),
+				  "Mace::Compiler::MaceRecDescent");
+}
+if(scalar(grep(/VariantRecDescent.pm/, @ARGV))) {
+    Parse::RecDescent->Precompile(Mace::Compiler::VariantGrammar::VARIANT(),
+				  "Mace::Compiler::VariantRecDescent");
+}
+if(scalar(grep(/ClassParserRecDescent.pm/, @ARGV))) {
+    Parse::RecDescent->Precompile(Mace::Compiler::ClassGrammar::CLASS(),
+				  "Mace::Compiler::ClassParserRecDescent");
+}
+if(scalar(grep(/MaceHeaderDependencyRecDescent.pm/, @ARGV))) {
+    Parse::RecDescent->Precompile(Mace::Dependency::MHGrammar::MH(),
+				  "Mace::Dependency::MaceHeaderDependencyRecDescent");
+}
+if(scalar(grep(/MaceGrammarDependencyRecDescent.pm/, @ARGV))) {
+    Parse::RecDescent->Precompile(Mace::Dependency::MaceGrammar::MACE(),
+				  "Mace::Dependency::MaceGrammarDependencyRecDescent");
+}

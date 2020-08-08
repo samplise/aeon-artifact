@@ -1,0 +1,241 @@
+/* 
+ * CacheRecursiveOverlayRoute.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "mvector.h"
+
+service CacheRecursiveOverlayRoute;
+
+provides Transport,Route;
+attributes direct,sharedrouter;
+
+trace=med;
+
+services 
+{
+  OverlayRouter router_ = auto(shared,[],[]); //Bamboo();
+  Transport data_ = auto(shared,[],[reliable]); //TcpTransport(TransportCryptoServiceClass::NONE, false, 1024*1024*4);
+  //   Transport data_ [default=TCP(TRANSPORT_CRYPTO_NONE,20)];
+}
+
+state_variables 
+{
+  //These two are constants, though not known to compiler (set in maceInit)
+  MaceKey meRouter; // Address from the overlay router service
+  MaceKey meTransport; // Address from the route service
+
+  KeyRange mySpace;
+  uint virtualTime; // For LRU
+  Cache map;
+}
+
+constructor_parameters 
+{
+  uint cacheSize = 20;
+}
+
+typedefs {
+  typedef mace::vector<CacheEntry> Cache;
+}
+
+auto_types 
+{
+  CacheEntry {
+    MaceKey overlayId;
+    MaceKey routeId;
+    KeyRange overlayRange;
+    uint lastUsed;
+  }
+}
+
+messages 
+{
+  Data {
+    MaceKey srcOverlay; //source address for the overlay
+    MaceKey srcTransport; //source address for the transport
+    MaceKey dest;
+    KeyRange range;
+    int regId;
+    mace::string payload __attribute((dump(no)));
+  }
+  Mapping {
+    MaceKey id;
+    KeyRange range;
+  }
+}
+
+local_address {
+  return downcall_localAddress(router_);
+}
+
+transitions {
+  downcall (true) maceInit() {
+    meRouter = downcall_localAddress(router_);
+    meTransport = downcall_localAddress(data_);
+    mySpace = downcall_getIdSpace();
+    ASSERT(!meRouter.isNullAddress());
+    ASSERT(!meTransport.isNullAddress());
+    dumpState(maceout); //Show the initial state including MaceKey addresses
+  }
+
+  upcall notifyIdSpaceChanged(const KeyRange& range) {
+    mySpace = range;
+  }
+
+  downcall route(const MaceKey& dest, const std::string& message, registration_uid_t regId) [locking=read] {
+    MaceKey nextHop;
+    KeyRange destRange;
+    determineNextHop(dest, nextHop, NULL, &destRange);
+    return downcall_route(nextHop, Data(meRouter, meTransport, dest, destRange, regId, message));
+  }
+
+  upcall deliver(const MaceKey& from, const MaceKey& dest, const Data& msg) [locking=write]  {
+    downcall_checkNode(msg.srcTransport, msg.srcOverlay);
+
+    //If I'm the "first hop" and I don't manage the dest and the sender thought I did . . .
+    if(msg.srcTransport == from && !mySpace.containsKey(msg.dest) && !msg.range.first.isNullAddress()) {
+      //Straighten him out
+      downcall_route(from, Mapping(meRouter, mySpace));
+    }
+    MaceKey nextHop;
+    MaceKey nextHopRouter;
+    determineNextHop(msg.dest, nextHop, &nextHopRouter, NULL);
+    MaceKey savedNextHop = nextHopRouter;
+
+    //In our toy app, after this upcall_forward we are in READ_MODE (or NONE_MODE)
+    if(upcall_forward(msg.srcOverlay, msg.dest, nextHopRouter, msg.payload, msg.regId)) {
+      mace::AgentLock al(mace::AgentLock::READ_MODE); //The work after forward needs to be in the read mode.
+      if(nextHopRouter != savedNextHop) {
+        determineNextHop(nextHopRouter, nextHop, NULL, NULL);
+      }
+      // checkme: should read_meTransport() be used in locking=write??
+      if(nextHop == meTransport) {
+        //If I am not the "first hop" or the range doesn't match my range . . .
+        if(msg.srcTransport != from || msg.range != mySpace) {
+          downcall_route(msg.srcTransport, Mapping(meRouter, mySpace));
+        }
+        upcall_deliver(msg.srcOverlay, msg.dest, msg.payload, msg.regId);
+      } else {
+        downcall_route(nextHop, msg);
+      }
+    }
+  }
+
+  upcall deliver(const MaceKey& from, const MaceKey& dest, const Mapping& msg) {
+    //update map
+    if (from == meTransport) { return; } //Don't store mappings for self.
+    Cache::iterator earliest = map.begin();
+    for(Cache::iterator i = map.begin(); i != map.end(); i++) {
+      if(i->overlayId == msg.id) {
+        maceout << "Updating entry " << (*i) << Log::endl;
+        ASSERT(from == i->routeId);
+        i->overlayRange = msg.range;
+        i->lastUsed = virtualTime++; //XXX: What about overflow
+        return;
+      }
+      if(i->lastUsed < (*earliest).lastUsed) {
+        earliest = i;
+      }
+    }
+    //add new entry
+    if(map.size() < cacheSize) {
+      maceout << "Adding new entry." << Log::endl;
+      map.push_back(CacheEntry(msg.id, from, msg.range, virtualTime++));
+      return;
+    }
+    maceout << "Overwriting old entry " << (*earliest) << Log::endl;
+    //overwrite existing entry
+    earliest->overlayId = msg.id;
+    earliest->routeId = from;
+    earliest->overlayRange = msg.range;
+    earliest->lastUsed = virtualTime++;
+  }
+
+  upcall (true) error(const MaceKey& nodeId, TransportError::type error_code, const std::string& m, registration_uid_t registrationUid) {
+    for(Cache::iterator i = map.begin(); i != map.end(); i++) {
+      if((registrationUid == data_ && i->routeId == nodeId) || (registrationUid == router_ && i->overlayId == nodeId)) {
+        maceout << "Zeroing out entry " << (*i) << Log::endl;
+        upcallAllVoid(error, i->overlayId, error_code, "");
+        i->overlayId = MaceKey::null;
+        i->routeId = MaceKey::null;
+        i->overlayRange = KeyRange::null;
+        i->lastUsed = 0; //XXX: What about overflow
+      }
+    }
+    if (registrationUid == router_) {
+      upcallAllVoid(error, nodeId, error_code, "");
+    }
+  } // API error
+}
+
+routines 
+{
+
+  //locking = read!
+  // routine should also support locking=read annotation...
+  void determineNextHop(const MaceKey& dest, MaceKey& nextHop, MaceKey* overlayId, KeyRange* range) const [trace=off] {
+    //0: Is it me?
+    if(mySpace.containsKey(dest)) {
+      //CK - 2010-02-12 - problems when notification happens to Scribe BEFORE CROR...
+      maceout << "Believe Dest " << dest << " maps to me.  Calling getNextHop to verify" << Log::endl;
+      if(overlayId) {
+        nextHop = downcall_getNextHop(dest, *overlayId);
+        maceout << "Dest " << dest << " next hop is " << *overlayId << " at " << dest << Log::endl;
+      } else {
+        nextHop = downcall_getNextHop(dest);
+        maceout << "Dest " << dest << " next hop is at " << dest << Log::endl;
+      }
+      return;
+    } 
+    
+    //1: Check the map
+//    const Cache& map = read_map();
+    for(Cache::const_iterator i = map.begin(); i != map.end(); i++) {
+      if(i->overlayRange.containsKey(dest)) {
+        maceout << "Dest " << dest << " cache maps to " << (*i) << Log::endl;
+        //XXX: To update LRU, we either need a specific data structure, or could send selves a message to update (ugly)
+        //i->lastUsed = virtualTime++; //XXX: What about overflow
+        nextHop = i->routeId;
+        if(overlayId) { *overlayId = i->overlayId; }
+        if(range) { *range = i->overlayRange; }
+        return;
+      }
+    }
+
+    //2: Consult lower level
+    if(overlayId) {
+      nextHop = downcall_getNextHop(dest, *overlayId);
+      maceout << "Dest " << dest << " next hop is " << *overlayId << " at " << dest << Log::endl;
+    } else {
+      nextHop = downcall_getNextHop(dest);
+      maceout << "Dest " << dest << " next hop is at " << dest << Log::endl;
+    }
+  }
+
+}

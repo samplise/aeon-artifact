@@ -1,0 +1,60 @@
+//CK: Suggest putting comments in this file to indicate what each message is for, and who sends it.
+messages {
+  PlayerInitRequest {
+  	uint32_t clientId;
+  }
+
+  PlayerInitReply {
+  	uint32_t clientId;
+  	uint32_t playerId;
+    uint32_t roomId;
+    uint32_t buildingId;
+  }
+
+  MoveRequest {
+  	uint32_t clientId;
+  	uint32_t playerId;
+    uint32_t roomId;
+  }
+
+  ItemAccessRequest {
+    uint32_t clientId;
+    uint32_t playerId;
+
+    uint64_t reqId;
+  }
+
+  ItemChangeRequest {
+    uint32_t clientId;
+    uint32_t playerId;
+    uint32_t roomId;
+
+    uint64_t reqId;
+  }
+
+  MoveInBuildingRequest {
+    uint32_t clientId;
+    uint32_t playerId;
+    uint32_t buildingId;
+    uint32_t roomId;
+
+    uint32_t reqId;
+  }
+
+  RequestReply {
+    uint32_t clientId;
+    uint32_t buildingId;
+    uint32_t roomId;
+
+    uint32_t reqId;
+  }
+
+  ConnectionRequest {
+    uint32_t clientId;
+  }
+
+  ConnectionSetup {
+    uint32_t clientId;
+    MaceKey proxyAddr;
+  }
+}

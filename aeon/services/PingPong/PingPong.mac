@@ -1,0 +1,32 @@
+service PingPong;
+
+provides Null;
+
+trace=med;
+
+constructor_parameters {
+  MaceKey remote = MaceKey::null;
+}
+
+services {
+  Transport t = auto(shared,[reliable],[]);
+}
+
+messages {
+  Pong {
+    int counter;
+    uint64_t initTime;
+  }
+}
+
+transitions {
+  downcall maceInit() {
+    if (!remote.isNullAddress()) {
+      downcall_route(remote, Pong(0, curtime));
+    }
+  }
+
+  upcall deliver(s,d,m) {
+    downcall_route(s, Pong(m.counter+1, m.initTime));
+  }
+}

@@ -1,0 +1,102 @@
+#include "mmultimap.h"
+#include "message.mi"
+
+service FullCtxPaxos;
+
+//provides Consensus;
+
+trace=high;
+
+services {
+  	//use the TCP protocal to sent the msg
+  	Transport t = auto(shared,[reliable],[]);
+}
+
+constants {
+  	MaceKey masterKey = MaceKey("ipv4", );
+}
+
+constructor_parameters {
+		
+}
+
+states {
+  
+}
+
+typedefs {
+
+}
+
+messages {
+  	ClientReq {
+				Value value;
+		}
+}
+
+state_variables {
+		uint64_t proposerLogicalNodeID;
+		mace::map<uint64_t, MaceKey> logicalNodeMap;
+		uint64_t local_logicalID;
+
+		context Client {
+												
+		}
+
+}
+
+transitions {
+		downcall (state == init) maceInit() {
+				downcall_route(masterKey, ReportMsg());
+				async_clientInit();
+
+	  }
+
+		downcall propose(Value value){
+				downcall(ContextMapping::getHead(), ClientReq( value ));	
+		}
+
+		async [Client] clientInit(){
+				
+		}
+
+		async [Client] accept(mace::string& key){
+					
+		}
+	
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const ClientReq& req){
+				downcall_route( logicalNodesMap[proposerLogicalNodeID], req.value );	
+		}
+
+		upcall void deliver(const MaceKey& src, const MaceKey& dest, const ClientAccept& m){
+				async_accept(m.key);	
+		}
+
+		upcall void deliver(const MaceKey& src, const MaceKey& dest, const LogicalNodesInfoMsg& m){
+				logicalNodesMap = m.logicalNodesMap;
+
+				mace::map<uint64_t, MaceKey>::iterator iter = logicalNodesMap.begin();
+				while( iter!=logicalNodesMap.end() ){
+						if(localAddress() == iter->second){
+								local_logicalNodeID = iter->first;
+								break;
+						}	
+						iter++;
+				}
+
+				iter = logicalNodesMap.begin();
+				while( iter!=logicalNodesMap.end() ){
+						downcall_route(iter->second, RoleAnounceMsg(local_logicalNodeID, "client"));	
+				}
+		}
+
+		upcall void deliver(const MaceKey& src, const MaceKey& dest, const RoleAnounceMsg& m){
+				if(m.role == "proposer"){
+						proposerLogicalNodeID = m.logicalNodeID;	
+				}	
+		}
+}
+
+routine {
+			
+}

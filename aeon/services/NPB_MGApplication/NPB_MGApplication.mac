@@ -1,0 +1,1634 @@
+/* 
+ * GameOfLifeStencil.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2012, Bo Sang
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- 
+*/
+
+#include "mlist.h"
+#include "marray.h"
+#include "mdeque.h"
+#include "m_map.h"
+#include "mvector.h"
+
+#include <sys/time.h>
+#include <time.h>
+#include <math.h>
+
+service NPB_MGApplication;
+provides MG;
+
+trace = med;
+
+constants {
+	int lm = 5;
+	int lb = 1;
+  int m = 5;
+
+	int NXYZ_DEFAULT = 32;
+  int lt_default = 5;
+  int nit_default = 4;
+
+  int V_FLAG = 0;    
+	int U_FLAG = 1;
+	int R_FLAG = 2;
+
+  uint32_t mg3P_loop01_rprj301 = 3;
+  uint32_t mg3P_psinv01 = 4;
+  uint32_t mg3P_loop02_interp01 = 5;
+  uint32_t mg3P_loop02_resid01 = 6;
+  uint32_t mg3P_loop02_psinv01 = 7;
+  uint32_t mg3P_interp01 = 8;
+  uint32_t mg3P_resid01 = 9;
+  uint32_t mg3P_psinv02 = 10;
+  uint32_t execute_resid01 = 11;
+  uint32_t execute_resid02 = 12;
+  uint32_t execute_resid03 = 13;
+  uint32_t execute_loop01_resid01 = 14;
+  uint32_t execute_mg3P01 = 15;
+  uint32_t execute_loop01_mg3P01 = 16;
+	uint32_t execute_zran301 = 17;
+	uint32_t execute_zran302 = 18;
+
+	int CONTEXTS_NUM = 2;
+}
+
+services {
+    GenericStencil stencil = GenericGameOfLife();
+}
+
+states {
+
+}
+
+method_remappings {
+	uses {
+		downcall_update_value( mace::deque<Position> const&  -> mace::deque<std::string> const& , mace::deque<uint64_t> const& , 
+			mace::deque<double> const&  -> mace::deque<std::string> const& , int );
+
+		downcall_add_barrier( mace::deque<Position> const&  -> mace::deque<std::string> const& , mace::deque<int> const& , mace::deque<uint64_t> const&,  
+			mace::deque<double> const&  -> mace::deque<std::string> const& , Identifier const&  -> std::string const& );
+
+  } 
+  implements {
+    upcalls {
+      val_updated( const mace::deque<Position>& <- const mace::deque<std::string>& , 
+					const mace::deque<double>& <- const mace::deque<std::string>& , 
+					const mace::deque<double>& <- const mace::deque<std::string>& ,
+					const mace::deque<int>&, 
+					const Identifier& <- const std::string&);
+    }
+	}	
+}
+
+constructor_parameters {
+    
+}
+
+auto_types {
+    Position __attribute((comparable(equals=default; lessthan=default))){
+        int x;
+        int y;
+				int z;
+    }
+
+	Position2 __attribute((comparable(equals=default; lessthan=default))){
+		int x;
+		int y;
+		int z;
+		int flag;
+	}
+
+	Scale {
+		int Xmin;
+		int Xmax;
+		int Ymin;
+		int Ymax;
+		int Zmin;
+		int Zmax;
+	}
+
+
+	Identifier {
+  	Position pos;
+    int id;
+	}
+}
+
+typedefs {
+  typedef mace::vector< mace::vector<int> > IntMatrix;
+	typedef mace::vector< mace::vector< mace::vector<double> > > Double3DMatrix;
+	typedef mace::vector< mace::vector< mace::vector<int> > > Int3DMatrix;
+}
+
+state_variables {
+		context Element<const int x, const int y, const int z> {
+			Position pos;
+			Scale scl;
+		
+			Double3DMatrix u;
+			Double3DMatrix r;
+			Double3DMatrix v;
+
+			Int3DMatrix u_valid;
+
+      uint32_t cur_state;
+      uint32_t mg3P_state;
+      uint64_t round;
+
+      int nit;
+
+			mace::vector<int> nx;
+			mace::vector<int> ny;
+			mace::vector<int> nz;
+			
+			mace::vector<int> m1;
+			mace::vector<int> m2;
+			mace::vector<int> m3;
+			
+      IntMatrix ir;
+      int is1;
+      int is2; 
+      int is3; 
+      int ie1;
+      int ie2;
+      int ie3;
+
+      int n1;
+      int n2;
+      int n3;
+
+      mace::vector<double> a;
+			mace::vector<double> c;
+			
+			mace::deque<int> loop_indicator;
+
+			int lt;
+			double verify_value;
+		}
+}
+
+messages {
+				
+}
+
+transitions {
+	downcall maceInit(){
+		int x_split, y_split, z_split;
+		x_split = y_split = z_split = NXYZ_DEFAULT/CONTEXTS_NUM;
+		
+		int xi, yi, zi;
+		int curX, curY, curZ;
+
+		maceout<<"bsang: in maceInit, start to execute MG..."<<Log::endl;
+		curX = 1;
+		for(xi=0; xi<CONTEXTS_NUM; xi++){
+			curY = 1;
+			for(yi=0; yi<CONTEXTS_NUM; yi++){
+				curZ = 1;
+				for(zi=0; zi<CONTEXTS_NUM; zi++){
+					Scale scl;
+					scl.Xmin = curX;
+					scl.Ymin = curY;
+					scl.Zmin = curZ;
+					if(zi == CONTEXTS_NUM-1){
+						scl.Zmax = NXYZ_DEFAULT;
+					}else{
+						scl.Zmax = curZ+z_split-1;
+					}
+
+					if(yi == CONTEXTS_NUM-1){
+						scl.Ymax = NXYZ_DEFAULT;	
+					}else{
+						scl.Ymax = curY+y_split-1;	
+					}
+
+					if(xi == CONTEXTS_NUM-1){
+						scl.Xmax = NXYZ_DEFAULT;	
+					}else{
+						scl.Xmax = curX+x_split-1;	
+					}
+					curZ += z_split;
+					maceout<<"bsang: assign x("<<scl.Xmin<<", "<<scl.Xmax<<")y("<<scl.Ymin<<", "<<scl.Ymax<<")z("<<scl.Zmin<<", "<<scl.Zmax<<") to context("<<xi<<", "<<yi<<", "<<zi<<")"<<Log::endl;
+					async_context_init(xi, yi, zi, scl);
+				}
+				curY += y_split;
+			}
+			curX += x_split;
+		}
+	}
+
+  upcall [__null] val_updated( const mace::deque<Position>& required_vars, const mace::deque<double>& required_vals, 
+			const mace::deque<double>& vars,  const mace::deque<int>& vars_flags, const Identifier& identifier){
+  	Position pos = identifier.pos;
+
+		mace::map<Position, double> vals_map;
+		mace::map<Position, int> flags_map;
+		int i;
+
+		maceout<<"bsang: in val_updated for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): "<<Log::endl;
+		for(i=0; i<(int)required_vars.size(); i++){
+			vals_map[required_vars[i]] = required_vals[i];
+			flags_map[required_vars[i]] = vars_flags[i];
+			maceout<<"("<<required_vars[i].x<<", "<<required_vars[i].y<<", "<<required_vars[i].z<<")="<<required_vals[i]<<"; ";
+		}
+		maceout<<Log::endl<<Log::endl;
+		mace::deque<double> my_vars = vars;
+		async_val_updated2(pos.x, pos.y, pos.z, vals_map, flags_map, my_vars);
+	}
+
+    async [Element<x, y, z>] context_init  (int x, int y, int z, Scale init_scl){
+    	verify_value = 0.530770700573e-4;
+			m1.resize(m);
+			m2.resize(m);
+			m3.resize(m);
+
+			nx.resize(m);
+			ny.resize(m);
+			nz.resize(m);
+
+			ir.resize(3);
+			int i, j, k;
+			for(i=0; i<(int)ir.size(); i++){
+				ir[i].resize(m);	
+			}
+			a.resize(4);
+			c.resize(4);
+
+			u.resize(NXYZ_DEFAULT*2+2);
+			r.resize(NXYZ_DEFAULT*2+2);
+			v.resize(NXYZ_DEFAULT*2+2);
+			u_valid.resize(NXYZ_DEFAULT*2+2);
+			for(i=0; i<(int)u.size(); i++){
+				u[i].resize(NXYZ_DEFAULT*2+2);
+				r[i].resize(NXYZ_DEFAULT*2+2);
+				v[i].resize(NXYZ_DEFAULT*2+2);
+				u_valid[i].resize(NXYZ_DEFAULT*2+2);
+				for(j=0; j<(int)u[i].size(); j++){
+					u[i][j].resize(NXYZ_DEFAULT*2+2);
+					r[i][j].resize(NXYZ_DEFAULT*2+2);
+					v[i][j].resize(NXYZ_DEFAULT*2+2);
+					u_valid[i][j].resize(NXYZ_DEFAULT*2+2);
+				}
+			}
+
+			for(i=0; i<(int)u_valid.size(); i++){
+				for(j=0; j<(int)u_valid[i].size(); j++){
+					for(k=0; k<(int)u_valid[i][j].size(); k++){
+						u_valid[i][j][k] = 0;	
+					}	
+				}	
+			}
+
+				
+			round = 0;
+			scl = scl;
+			pos.x = x;
+			pos.y = y;
+			pos.z = z;
+			
+			a[0] = -8/3;
+    	a[1] = 0;
+    	a[2] = 1/6;
+    	a[3] = 1/12;
+
+    	c[0] = -3/8;
+    	c[1] = 1/32;
+    	c[2] = -1/64;
+    	c[3] = 0;
+
+    	lt = lt_default;
+    	nit = nit_default;
+
+    	int ax;
+    	int size1=3;
+			int mi[3][m];
+			int ng[3][m];
+    	//setup to intialize variables
+    	nx[lt-1] = NXYZ_DEFAULT;
+    	ny[lt-1] = NXYZ_DEFAULT;
+    	nz[lt-1] = NXYZ_DEFAULT;
+        
+    	ng[0][lt-1] = nx[lt-1];
+    	ng[1][lt-1] = ny[lt-1];
+    	ng[2][lt-1] = nz[lt-1];
+         
+    	for(ax=0; ax<size1; ax++){
+    		for(k=lt-2; k>=0; k--){
+      		ng[ax][k] = ng[ax][k+1]/2;  
+      	}
+    	}
+        
+    	for(k=lt-2; k>=0; k--){
+    		nx[k] = ng[0][k];
+      	ny[k] = ng[1][k];
+      	nz[k] = ng[2][k];
+    	}
+         
+    	for(k=lt-1; k>=0; k--){
+    		for(ax=0; ax<3; ax++){
+      		mi[ax][k] = 2 + ng[ax][k];  
+      	}
+      	m1[k] = mi[0][k];
+      	m2[k] = mi[1][k];
+      	m3[k] = mi[2][k];
+    	}
+         
+    	k = lt-1;
+    	is1 = 2 + ng[0][k] - ng[0][k];
+    	ie1 = 1 + ng[0][k];
+    	n1 = 3 + ie1 - is1;
+    	is2 = 2 + ng[1][k] - ng[1][k];
+    	ie2 = 1 + ng[1][k];
+    	n2 = 3 + ie2 - is2;
+    	is3 = 2 + ng[2][k] - ng[2][k];
+    	ie3 = 1 + ng[2][k];
+    	n3 = 3 + ie3 - is3;
+        
+    	ir[0][lt-1] = 0;
+    	ir[1][lt-1] = 0;
+    	ir[2][lt-1] = 0;
+    	for(j=lt-2; j>=0; j--){
+    		ir[0][j] = ir[0][j+1] + m1[j+1];
+      	ir[1][j] = ir[1][j+1] + m2[j+1];
+      	ir[2][j] = ir[2][j+1] + m3[j+1];
+    	}
+        
+			zero3(u, 0, 0, 0, n1, n2, n3);
+
+			if(x==0 && y==0 && z==0 ){
+				cur_state = execute_zran301;
+      	zran3(v, n1, n2, n3, nx[lt-1], ny[lt-1]);
+				mace::map<Position, double> zran3_results;
+				int i1, i2, i3;
+				for(i1=0; i1<n1; i1++){
+					for(i2=0; i2<n2; i2++){
+						for(i3=0; i3<n3; i3++){
+							if(v[i1][i2][i3]!=0){
+								Position	p;
+								p.x = i1;
+								p.y = i2;
+								p.z = i3;
+
+								zran3_results[p] = v[i1][i2][i3];
+							}	
+						}	
+					}	
+				}
+
+				for(i1=0; i1<CONTEXTS_NUM; i1++){
+					for(i2=0; i2<CONTEXTS_NUM; i2++){
+						for(i3=0; i3<CONTEXTS_NUM; i3++){
+							async_assign_zran3_results(i1, i2, i3, zran3_results);
+						}	
+					}	
+				}
+				
+			}else{
+				cur_state = execute_zran301;	
+			}
+
+    }
+
+		async [Element<x, y, z>] assign_zran3_results(const int x, const int y, const int z, const mace::map<Position, double>& zran3_results){
+			zero3(v, 0, 0, 0, n1, n2, n3);
+			mace::map<Position, double>::const_iterator iter = zran3_results.begin();
+			for(; iter!=zran3_results.end(); iter++){
+				Position p = iter->first;
+				v[p.x][p.y][p.z] = iter->second;
+			}
+
+			if(cur_state == execute_zran301){
+				cur_state = execute_resid01;
+				Identifier id;
+				id.pos = pos;
+
+				maceout<<"bsang: invoke pre_resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): "<<Log::endl;
+				pre_resid(scl, round, U_FLAG, 0, 0, 0, V_FLAG, 0, 0, 0, R_FLAG, 0, 0, 0, n1, n2, n3, id, u_valid);
+			}else if(cur_state == execute_zran302){
+				cur_state = execute_resid03;
+        Identifier id;
+        id.pos = pos;
+
+				maceout<<"bsang: invoke pre_resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): "<<Log::endl;
+        pre_resid(scl, round, U_FLAG, 0, 0, 0, V_FLAG, 0, 0, 0, R_FLAG, 0, 0, 0, n1, n2, n3, id, u_valid);
+			}
+		}
+
+    async [Element<x, y, z>] val_updated2(int x, int y, int z, const mace::map<Position, double>& required_vars, 
+					const mace::map<Position, int>& flags, const mace::deque<double>& vars){
+        int r_flag = R_FLAG;
+				int u_flag = U_FLAG;
+				int v_flag = V_FLAG;
+
+				ADD_SELECTORS("val_updated2");
+				if(cur_state == mg3P_loop01_rprj301){
+            int k = loop_indicator.back();
+						loop_indicator.pop_back();
+            int j = k-1;
+						update_eles(required_vars,  flags, u, v, r);
+						
+						maceout<<"bsang: invoke rprj3 for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop01_rprj301"<<Log::endl;
+						rprj3(scl, round, r, r_flag, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k], r, r_flag, ir[0][j], ir[1][j], 
+								ir[2][j], m1[j], m2[j], m3[j]);
+            round++;
+						k--;
+            if(k>=lb){
+                loop_indicator.push_back(k);
+                Identifier id;
+                id.pos = pos;
+								maceout<<"bsang: invoke pre_rprj3 for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop01_rprj301"<<Log::endl;
+								pre_rprj3(scl, round, r_flag, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k], r_flag, ir[0][j], ir[1][j], 
+										ir[2][j], m1[j], m2[j], m3[j], id, u_valid);
+            }else{
+                k = lb-1;
+                zero3(u, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k]);
+                cur_state = mg3P_psinv01;
+                Identifier id;
+                id.pos = pos;
+								maceout<<"bsang: invoke pre_psinv for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop01_rprj301"<<Log::endl;
+                pre_psinv(scl, round, r_flag, ir[0][k], ir[1][k], ir[2][k], U_FLAG, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], 
+										m3[k], k, id, u_valid);
+            }
+        }else if(cur_state == mg3P_psinv01){
+            int k = vars.front();
+						update_eles(required_vars,  flags, u, v, r);
+						maceout<<"bsang: invoke psinv for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_psinv01"<<Log::endl;
+            psinv(scl, round, r, r_flag, ir[0][k], ir[1][k], ir[2][k], u, u_flag, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], 
+								m3[k], c);
+						round++;
+            k = lb;
+            int j = k-1;
+            zero3(u, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k]);
+            cur_state = mg3P_loop02_interp01;
+            loop_indicator.push_back(k);
+            Identifier id;
+            id.pos = pos;
+						maceout<<"bsang: invoke pre_interp for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_psinv01"<<Log::endl;
+						pre_interp(scl, round, u_flag, ir[0][j], ir[1][j], ir[2][j], m1[j], m2[j], m3[j], u_flag, ir[0][k], ir[1][k], ir[2][k], 
+								m1[k], m2[k], m3[k], k, id, u_valid);
+        }else if(cur_state == mg3P_loop02_interp01){
+            int k = loop_indicator.back();
+            int j = k-1;
+						update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke interp for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_interp01"<<Log::endl;
+            interp(scl, round, u, u_flag, ir[0][j], ir[1][j], ir[2][j], m1[j], m2[j], m3[j], u, u_flag, ir[0][k], ir[1][k],	
+								ir[2][k], m1[k], m2[k], m3[k], u_valid);
+            round++;
+						cur_state = mg3P_loop02_resid01;
+            Identifier id;
+            id.pos = pos;
+						int r_flag = R_FLAG;
+						maceout<<"bsang: invoke pre_resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_iterp01"<<Log::endl;
+            pre_resid(scl, round, u_flag, ir[0][k], ir[1][k], ir[2][k], r_flag, ir[0][k], ir[1][k], ir[2][k], r_flag, ir[0][k], 
+								ir[1][k], ir[2][k], m1[k], m2[k], m3[k], id, u_valid);
+        }else if(cur_state == mg3P_loop02_resid01){
+            int k = loop_indicator.back();
+            
+						update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_resid01"<<Log::endl;
+            resid(scl, round, u, u_flag, ir[0][k], ir[1][k], ir[2][k], r, r_flag, ir[0][k], ir[1][k], ir[2][k], r, r_flag, 
+								ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k], a);
+						round++;
+            cur_state = mg3P_loop02_psinv01;
+            Identifier id;
+            id.pos = pos;
+						maceout<<"bsang: invoke pre_psinv for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_resid01"<<Log::endl;
+            pre_psinv(scl, round, r_flag, ir[0][k], ir[1][k], ir[2][k], u_flag, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k], 
+								k, id, u_valid);
+        }else if(cur_state == mg3P_loop02_psinv01){
+            int k = loop_indicator.back();
+						loop_indicator.pop_back();
+            int j = k-1;
+						update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke psinv for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_psinv01"<<Log::endl;
+            psinv(scl, round, r, r_flag, ir[0][k], ir[1][k], ir[2][k], u, u_flag, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], 
+								m3[k], c);
+            round++;
+						k++;
+            if(k<lt-1){
+                zero3(u, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k]);
+                cur_state = mg3P_loop02_interp01;
+                Identifier id;
+                id.pos = pos;
+                loop_indicator.push_back(k);
+								maceout<<"bsang: invoke pre_interp for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_psinv01"<<Log::endl;
+                pre_interp(scl, round, u_flag, ir[0][j], ir[1][j], ir[2][j], m1[j], m2[j], m3[j], u_flag, ir[0][k], ir[1][k], 
+										ir[2][k], m1[k], m2[k], m3[k], k, id, u_valid);
+            }else{
+                int j = lt - 2;
+                k = lt - 1;
+                cur_state = mg3P_interp01;
+                Identifier id;
+                id.pos = pos;
+								maceout<<"bsang: invoke pre_interp for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_loop02_psinv01"<<Log::endl;
+                pre_interp(scl, round, u_flag, ir[0][j], ir[1][j], ir[2][j], m1[j], m2[j], m3[j], u_flag, 0, 0, 0, 
+										n1, n2, n3, k, id, u_valid);
+            }
+        }else if(cur_state == mg3P_interp01){
+            int k = vars.front();
+						
+            int j = k-1;
+						update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke interp for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_interp01"<<Log::endl;
+						interp(scl, round, u, u_flag, ir[0][j], ir[1][j], ir[2][j], m1[j], m2[j], m3[j], u, u_flag, 0, 0, 0, 
+								n1, n2, n3, u_valid);
+            round++;
+						cur_state = mg3P_resid01;
+            Identifier id;
+            id.pos = pos;
+						maceout<<"bsang: invoke pre_resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_interp01"<<Log::endl;
+            pre_resid(scl, round, u_flag, 0, 0, 0, v_flag, 0, 0, 0, r_flag, 0, 0, 0, n1, n2, n3, id, u_valid);
+        }else if(cur_state == mg3P_resid01){
+            update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_resid01"<<Log::endl;
+            resid(scl, round, u, u_flag, 0, 0, 0, v, v_flag, 0, 0, 0, r, r_flag, 0, 0, 0, n1, n2, n3, a);
+            round++;
+						cur_state = mg3P_psinv02;
+            Identifier id;
+            id.pos = pos;
+						int k = lt-1;
+						maceout<<"bsang: invoke pre_psinv for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_resid01"<<Log::endl;
+            pre_psinv(scl, round, r_flag, 0, 0, 0, u_flag, 0, 0, 0, n1, n2, n3, k, id, u_valid);
+        }else if(cur_state == mg3P_psinv02){
+            update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke psinv for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_psinv02"<<Log::endl;
+            psinv(scl, round, r, r_flag, 0, 0, 0, u, u_flag, 0, 0, 0, n1, n2, n3, c);
+            round++;
+						maceout<<"bsang: invoke post_mg3P for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): mg3P_psinv02"<<Log::endl;
+						async_post_mg3P(x, y, z);
+        }else if(cur_state == execute_resid01){
+            update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_resid01"<<Log::endl;
+            resid(scl, round, u, u_flag, 0, 0, 0, v, v_flag, 0, 0, 0, r, r_flag, 0, 0, 0, n1, n2, n3, a);
+            round++;
+						mg3P_state = execute_mg3P01;
+						maceout<<"bsang: invoke pre_mg3P for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_resid01"<<Log::endl;
+            async_pre_mg3P(x, y, z);
+        }else if(cur_state == execute_resid02){
+            update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_resid02"<<Log::endl;
+            resid(scl, round, u, u_flag, 0, 0, 0, v, v_flag, 0, 0, 0, r, r_flag, 0, 0, 0, n1, n2, n3, a);
+            round++;
+						zero3(u, 0, 0, 0, n1, n2, n3);
+
+						int i1, i2, i3;
+						if(x==0 && y==0 && z==0 ){
+							cur_state = execute_zran302;
+      				zran3(v, n1, n2, n3, nx[lt-1], ny[lt-1]);
+							mace::map<Position, double> zran3_results;
+						
+							for(i1=0; i1<n1; i1++){
+								for(i2=0; i2<n2; i2++){
+									for(i3=0; i3<n3; i3++){
+										if(v[i1][i2][i3]!=0){
+											Position	p;
+											p.x = i1;
+											p.y = i2;
+											p.z = i3;
+
+											zran3_results[p] = v[i1][i2][i3];
+										}	
+									}	
+								}	
+							}
+
+							for(i1=0; i1<CONTEXTS_NUM; i1++){
+								for(i2=0; i2<CONTEXTS_NUM; i2++){
+									for(i3=0; i3<CONTEXTS_NUM; i3++){
+										async_assign_zran3_results(i1, i2, i3, zran3_results);
+									}	
+								}	
+							}
+				
+					}else{
+						cur_state = execute_zran302;	
+					}
+
+        }else if(cur_state == execute_resid03){
+            update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_resid03"<<Log::endl;
+            resid(scl, round, u, u_flag, 0, 0, 0, v, v_flag, 0, 0, 0, r, r_flag, 0, 0, 0, n1, n2, n3, a);
+            round++;
+						mg3P_state = execute_loop01_mg3P01;
+            int k = 1;
+            loop_indicator.push_back(k);
+						maceout<<"bsang: invoke pre_mg3P for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_resid03"<<Log::endl;
+            async_pre_mg3P(x, y, z);
+        }else if(cur_state == execute_loop01_resid01){
+            update_eles(required_vars, flags, u, v, r);
+						maceout<<"bsang: invoke resid for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_loop01_resid01"<<Log::endl;
+						resid(scl, round, u, u_flag, 0, 0, 0, v, v_flag, 0, 0, 0, r, r_flag, 0, 0, 0, n1, n2, n3, a);
+            round++;
+						int loop = loop_indicator.back();
+						loop_indicator.pop_back();
+            loop ++;
+            if(loop<=nit){
+                mg3P_state = execute_loop01_mg3P01;
+                loop_indicator.push_back(loop);
+								maceout<<"bsang: invoke pre_mg3P for context("<<pos.x<<", "<<pos.y<<", "<<pos.z<<"): execute_loop01_resid01"<<Log::endl;
+                async_pre_mg3P(x, y, z);    
+            }else{
+							maceout<<"Done computation! Now verifying..."<<Log::endl;
+							double rnmu = 0;
+							double rnm2 = norm2u3(r, n1, n2, n3, rnmu, nx[lt-1], ny[lt-1], nz[lt-1]);
+							int verified=verify(rnm2, 'S');
+							
+							if(verified == 1){
+								maceout<<"bsang: Yes! We succeed!"<<Log::endl;	
+							}else{
+								maceout<<"bsang: No...We failed..."<<Log::endl;	
+							}
+						}
+                    
+        }
+    }
+
+    async [Element<x, y, z>] pre_mg3P(int x, int y, int z){
+        int k, j;
+
+        k = lt-1;
+        j = k-1;
+        cur_state = mg3P_loop01_rprj301;
+        loop_indicator.push_back(k);
+        Identifier id;
+        id.pos = pos;
+				int r_flag = R_FLAG;
+        pre_rprj3(scl, round, r_flag, ir[0][k], ir[1][k], ir[2][k], m1[k], m2[k], m3[k], r_flag, ir[0][j], ir[1][j], ir[2][j], 
+						m1[j], m2[j], m3[j], id, u_valid);
+    }
+
+    async [Element<x, y, z>] post_mg3P(int x, int y, int z){
+        Identifier id;
+        id.pos = pos;
+				int u_flag = U_FLAG;
+				int v_flag = V_FLAG;
+				int r_flag = R_FLAG;
+        if(mg3P_state == execute_mg3P01){
+            cur_state = execute_resid02;
+            pre_resid(scl, round, u_flag, 0, 0, 0, v_flag, 0, 0, 0, r_flag, 0, 0, 0, n1, n2, n3, id, u_valid);
+        }else if(mg3P_state == execute_loop01_mg3P01){
+            cur_state = execute_loop01_resid01;
+            pre_resid(scl, round, u_flag, 0, 0, 0, v_flag, 0, 0, 0, r_flag, 0, 0, 0, n1, n2, n3, id, u_valid);
+        }    
+    }
+}
+
+routines {
+	[__null] void add_ele(mace::deque<Position>& required_vars, mace::deque<int>& vars_flags, mace::deque<uint64_t>& vars_rounds, 
+			int x, int y, int z, int flag, uint64_t round, Scale scl, mace::map<Position2, int>& check_map, Int3DMatrix& u_valid){
+		if(x<scl.Xmin || x>scl.Xmax || y<scl.Ymin || y>scl.Ymax || x<scl.Zmin || y>scl.Zmax || (flag==U_FLAG && u_valid[x][y][z]==0)){
+    	if(x<1) x=NXYZ_DEFAULT;
+			else if(x>NXYZ_DEFAULT) x=0;
+
+			if(y<1) y=NXYZ_DEFAULT;
+			else if(y>NXYZ_DEFAULT) y=0;
+	
+			if(z<1) z=NXYZ_DEFAULT;
+			else if(z>NXYZ_DEFAULT) z=0;
+
+			Position pos;
+			Position2 pos2;
+			pos.x = pos2.x = x;
+			pos.y = pos2.y = y;
+			pos.z = pos2.z = z;
+			pos2.flag = flag; 
+
+			if(check_map.find(pos2)==check_map.end()){
+				required_vars.push_back(pos);
+				vars_flags.push_back(flag);
+				vars_rounds.push_back(round);
+
+				check_map[pos2] = 1;
+			}
+    }
+  }
+
+	[__null] void update_eles(const mace::map<Position, double>& required_vars_argu, const mace::map<Position, int>& vars_flags_argu, 
+			Double3DMatrix& u, Double3DMatrix& v, Double3DMatrix& r){
+		mace::map<Position, double> required_vars = required_vars_argu;
+		mace::map<Position, int> vars_flags = vars_flags_argu;
+		
+		mace::map<Position, double>::iterator iter = required_vars.begin();
+		for(; iter!=required_vars.end(); iter++){
+			Position pos = iter->first;
+			int flag = vars_flags[pos];
+
+			if(flag == U_FLAG){
+				u[pos.x][pos.y][pos.z] = iter->second;
+			}else if(flag == R_FLAG){
+				r[pos.x][pos.y][pos.z] = iter->second;	
+			}else if(flag == V_FLAG){
+				v[pos.x][pos.y][pos.z] = iter->second;	
+			}else{
+				maceout<<"Unkown flag!"<<Log::endl;	
+			}
+
+			bool again = false;
+			if(pos.x == 1){
+				pos.x = NXYZ_DEFAULT+1;
+				again = true;
+			}else if(pos.x == NXYZ_DEFAULT){
+				pos.x = 0;
+				again = true;
+			}
+			
+			if(pos.y == 1){
+				pos.y = NXYZ_DEFAULT+1;
+				again = true;
+			}else if(pos.y == NXYZ_DEFAULT){
+				pos.y = 0;
+				again = true;
+			}
+
+			if(pos.z == 1){
+				pos.z = NXYZ_DEFAULT+1;
+				again = true;
+			}else if(pos.z == NXYZ_DEFAULT){
+				pos.z = 0;
+				again = true;
+			}
+
+			if(again){
+				if(flag == U_FLAG){
+					u[pos.x][pos.y][pos.z] = iter->second;
+				}else if(flag == R_FLAG){
+					r[pos.x][pos.y][pos.z] = iter->second;	
+				}else if(flag == V_FLAG){
+					v[pos.x][pos.y][pos.z] = iter->second;	
+				}else{
+					maceout<<"Unkow flag!"<<Log::endl;	
+				}
+			}
+		}
+	}
+
+	[__null] double max(double a, double b){
+		if(a>=b) return a;
+		else return b;
+	}
+
+	[__null] double min(double a, double b){
+		if(a<=b) return a;
+		else return b;
+	}
+
+
+
+//c---------------------------------------------------------------------
+//c     norm2u3 evaluates approximations to the L2 norm and the
+//c     uniform (or L-infinity or Chebyshev) norm,  under the
+//c     assumption that the boundaries are periodic or zero.  Add the
+//c     boundaries in with half weight (quarter weight on the edges
+//c     and eighth weight at the corners) for inhomogeneous boundaries.
+//c---------------------------------------------------------------------
+	
+	[__null] double norm2u3(Double3DMatrix r, int n1, int n2, int n3, double rnmu, int nx, int ny, int nz){
+		rnmu = 0.0;
+		double rnm2=0.0;
+
+		int i1, i2, i3;
+		for(i3=1;i3<n3-1;i3++){
+			for(i2=1;i2<n2-1;i2++){
+				for(i1=1;i1<n1-1;i1++){
+					rnm2 += r[i1][i2][i3]*r[i1][i2][i3];
+					double a = abs(r[i1][i2][i3]);
+					rnmu = max(rnmu, a);
+				}
+			}
+		}
+		double temp = rnm2/(nx*ny*nz);
+		rnm2 = sqrt(temp);
+		return rnm2;
+	}
+
+	/****************************************************
+	resid computes the residual: r = v - Au
+	 ****************************************************/
+	[__null] void pre_resid(Scale scl, uint64_t round, int u_flag, int ui1, int ui2, int ui3, int v_flag, int vi1, int vi2, int vi3, 
+			int r_flag, int ri1, int ri2, int ri3, int n1, int n2, int n3, Identifier id, Int3DMatrix& u_valid){
+		
+		int i1, i2, i3;
+
+	  mace::deque<Position> required_vars;
+		mace::deque<int> vars_flags; 
+		mace::deque<uint64_t> vars_rounds;
+    mace::deque<double> vars;
+		mace::map<Position2, int> check_map;
+
+    int start1 = max(0, scl.Xmin-ri1-1);
+    int end1 = min(n1, scl.Xmax-ri1+2);
+    int start2 = max(1, scl.Ymin-ri2);
+    int end2 = min(n2-1, scl.Ymax-ri2+1);
+    int start3 = max(1, scl.Zmin-ri3);
+    int end3 = min(n3-1, scl.Zmax-ri3+1);
+				
+		for(i3=start3; i3<end3; i3++){
+			for(i2=start2; i2<end2; i2++){
+				for(i1=start1; i1<end1; i1++){
+        	int x, y, z;
+          x = i1+vi1;
+          y = i2+vi2;
+          z = i3+vi3;
+					add_ele(required_vars, vars_flags, vars_rounds, x, y, z, r_flag, round, scl, check_map, u_valid);
+
+					int i2_iter, i3_iter;
+					for(i3_iter=i3-1; i3_iter<=i3+1; i3_iter++){
+						for(i2_iter=i2-1; i2_iter<=i2+1; i2_iter++){
+            	int x = i1+ui1;
+              int y = i2_iter+ui2;
+              int z = i3_iter+ui3;
+							add_ele(required_vars, vars_flags, vars_rounds, x, y, z, u_flag, round, scl, check_map, u_valid);
+	                       
+						}	
+					}
+				}
+
+			}	
+		}
+
+		downcall_add_barrier(required_vars, vars_flags, vars_rounds, vars, id);
+	}
+		 
+	[__null] void resid(Scale scl, uint64_t round, Double3DMatrix u, int u_flag, int ui1, int ui2, int ui3, Double3DMatrix v, 
+			int v_flag, int vi1, int vi2, int vi3, Double3DMatrix r, int r_flag, int ri1, int ri2, int ri3, int n1, int n2, int n3, 
+			mace::vector<double> a){
+			
+			int i3, i2, i1;
+				      
+		
+		double u1[NXYZ_DEFAULT/CONTEXTS_NUM+2], u2[NXYZ_DEFAULT/CONTEXTS_NUM+2];
+
+        int start1 = max(0, scl.Xmin-ri1-1);
+        int end1 = min(n1, scl.Xmax-ri1+2);
+        int start2 = max(1, scl.Ymin-ri2);
+        int end2 = min(n2-1, scl.Ymax-ri2+1);
+        int start3 = max(1, scl.Zmin-ri3);
+        int end3 = min(n3-1, scl.Zmax-ri3+1);
+
+		for(i3=start3; i3<end3; i3++){ 
+			for(i2=start2; i2<end2; i2++){
+				for(i1=start1; i1<end1; i1++){
+					u1[i1] = u[i1+ui1][i2-1+ui2][i3+ui3] + u[i1+ui1][i2+1+ui2][i3+ui3] + u[i1+ui1][i2+ui2][i3-1+ui3] 
+									+ u[i1+ui1][i2+ui2][i3+1+ui3];
+					u2[i1] = u[i1+ui1][i2-1+ui2][i3-1+ui3] + u[i1+ui1][i2+1+ui2][i3-1+ui3] + u[i1+ui1][i2-1+ui2][i3+1+ui3] 
+									+ u[i1+ui1][i2+1+ui2][i3+1+ui3];
+				}										
+
+				for(i1=start1+1; i1<end1-1; i1++){
+					r[i1+ri1][i2+ri2][i3+ri3] = v[i1+vi1][i2+vi2][i3+vi3] - a[0] * u[i1+ui1][i2+ui2][i3+ui3] - a[2] * ( u2[i1] + u1[i1-1] + u1[i1+1] )
+					              - a[3] * ( u2[i1-1] + u2[i1+1] );
+				}
+			}
+    }
+
+		mace::deque<Position> idxes;
+		mace::deque<double> vals;
+		mace::deque<uint64_t> rounds;
+		for(i3=start3; i3<end3; i3++){
+			for(i2=start2; i2<end2; i2++){
+				for(i1=start1+1; i1<end1-1; i1++){
+					Position pos;
+					pos.z = i3+ri1;
+					pos.y = i2+ri2;
+					pos.x = i1+ri3;
+					idxes.push_back(pos);
+					vals.push_back(r[pos.x][pos.y][pos.z]);
+					rounds.push_back(round);
+				}	
+			}	
+		}	
+		downcall_update_value(idxes, rounds, vals, r_flag);
+				
+	}
+	
+	
+	/****************************************************
+	 *	rprj3 projects onto the next coarser grid,
+	 *	using a trilinear Finite Element projection:  s = r' = P r
+	 ****************************************************/
+    [__null] void pre_rprj3(Scale scl, uint64_t round, int r_flag, int ri1, int ri2, int ri3, int m1k, int m2k, 
+						int m3k, int s_flag, int si1, int si2, int si3, int m1j, int m2j, int m3j, Identifier id, Int3DMatrix& u_valid){
+				int j3,  j2,  j1,  i3,  i2,  i1,  d1,  d2,  d3;
+            
+        if(m1k == 3) d1 = 2;
+        else d1 = 1;
+             
+        if(m2k == 3) d2 = 2;
+        else d2 = 1;
+             
+        if(m3k == 3) d3 = 2;
+        else d3 = 1;
+             
+        mace::deque<Position> required_vars;
+        mace::deque<int> vars_flags; 
+        mace::deque<uint64_t> vars_rounds;
+
+        mace::deque<double> vars;
+				mace::map<Position2, int> check_map;
+
+        int start1 = max(1, scl.Xmin-si1);
+        int end1 = min(m1j, scl.Xmax-si1+2);
+        int start2 = max(1, scl.Ymin-si2);
+        int end2 = min(m2j-1, scl.Ymax-si2+1);
+        int start3 = max(1, scl.Zmin-si3);
+        int end3 = min(m3j-1, scl.Zmax-si3+1);
+        
+        int x, y, z;
+
+        for(j3=start3; j3<end3; j3++){ 
+            i3 = 2*j3-d3;
+            for(j2=start2; j2<end2; j2++){
+                i2 = 2*j2-d2;
+                for(j1=start1; j1<end1; j1++){
+                    i1 = 2*j1-d1;
+
+                    int i1_iter, i2_iter, i3_iter;
+
+                    for(i1_iter=i1-1; i1_iter<=i1+1; i1_iter++){
+                        for(i2_iter=i2-1; i2_iter<=i2+1; i2_iter++){
+                            for(i3_iter=i3-1; i3_iter<=i3+1; i3_iter++){
+                                if(i1_iter==i1-1 && i2_iter==i2-1 && i3_iter==i3+1) continue;
+                                if(i1_iter==i1+1 && (i2_iter!=i2 || i3_iter!=i3)) continue;
+                                x = i1_iter+ri1;
+                                y = i2_iter+ri2;
+                                z = i3_iter+ri3;
+
+																add_ele(required_vars, vars_flags, vars_rounds,  x, y, z, r_flag, round, scl, check_map, u_valid);
+                            }    
+                        }
+                    }
+                }
+            }
+        }
+        downcall_add_barrier(required_vars, vars_flags, vars_rounds, vars, id);
+    }
+
+	[__null] void rprj3(Scale scl, uint64_t round, Double3DMatrix r, int r_flag, int ri1, int ri2, int ri3, int m1k, int m2k, int m3k,
+	        Double3DMatrix s, int s_flag, int si1, int si2, int si3, int m1j, int m2j, int m3j){
+		int j3,  j2,  j1,  i3,  i2,  i1,  d1,  d2,  d3;
+		double x1[2*(NXYZ_DEFAULT/CONTEXTS_NUM+2)], y1[2*(NXYZ_DEFAULT/CONTEXTS_NUM+2)], x2, y2;
+		
+	  if(m1k == 3) d1 = 2;
+		else d1 = 1;
+									
+		if(m2k == 3) d2 = 2;
+		else d2 = 1;
+									
+		if(m3k == 3) d3 = 2;
+		else d3 = 1;
+
+    int start1 = max(0, scl.Xmin-si1-1);
+    int end1 = min(m1j, scl.Xmax-si1+2);
+    int start2 = max(1, scl.Ymin-si2);
+    int end2 = min(m2j-1, scl.Ymax-si2+1);
+    int start3 = max(1, scl.Zmin-si3);
+    int end3 = min(m3j-1, scl.Zmax-si3+1);
+			
+		for(j3=start3; j3<end3; j3++){ 
+			i3 = 2*j3-d3;
+      for(j2=start2; j2<end2; j2++){
+				i2 = 2*j2-d2;
+				for(j1=start1; j1<end1; j1++){
+					i1 = 2*j1-d1;
+          x1[i1-1] = r[i1-1+ri1][i2-1+ri2][i3+ri3] + r[i1-1+ri1][i2+1+ri2][i3+ri3] + r[i1-1+ri1][i2+ri2][i3-1+ri3] 
+									+ r[i1-1+ri1][i2+ri2][i3+1+ri3];
+          y1[i1-1] = r[i1-1+ri1][i2-1+ri2][i3-1+ri3] + r[i1-1+ri1][i2-1+ri2][i3+1+ri3] + r[i1-1+ri1][i2+1+ri2][i3-1+ri3] 
+                  + r[i1-1+ri1][i2+1+ri2][i3+1+ri3];
+				}
+        for(j1=start1; j1<end1-1; j1++){
+        	i1 = 2*j1-d1;
+          int ele_x = ri1 + i1;
+          int ele_y = ri2 + i2;
+          int ele_z = ri3 + i3;
+                    
+					y2 = r[ele_x][ele_y-1][ele_z-1] + r[ele_x][ele_y-1][ele_z+1] + r[ele_x][ele_y+1][ele_z-1] + r[ele_x][ele_y+1][ele_z+1];
+					x2 = r[ele_x][ele_y-1][ele_z] + r[ele_x][ele_y+1][ele_z] + r[ele_x][ele_y][ele_z-1] + r[ele_x][ele_y][ele_z+1];
+					s[si1+j1][si2+j2][si3+j3] = 0.5 * r[ele_x][ele_y][ele_z] 
+																		+ 0.25 * ( r[ele_x-1][ele_y][ele_z] + r[ele_x+1][ele_y][ele_z] + x2) 
+																		+ 0.125 * ( x1[i1-1] + x1[i1+1] + y2) + 0.0625 * ( y1[i1-1] + y1[i1+1] );
+        }
+    	}
+  	}
+
+    mace::deque<Position> idxes;
+    mace::deque<double> vals;
+		mace::deque<uint64_t> rounds;
+    for(j3=start3; j3<end3; j3++){
+    	for(j2=start2; j2<end2; j2++){
+      	for(j1=start1; j1<end1-1; j1++){
+        	Position pos;
+          pos.z = j3+si1;
+          pos.y = j2+si2;
+          pos.x = j1+si3;
+          idxes.push_back(pos);
+          vals.push_back(s[pos.x][pos.y][pos.z]);
+        }
+    	}
+  	}
+    downcall_update_value(idxes, rounds, vals, s_flag);
+
+	}				
+		
+	/****************************************************
+	 *	interp adds the trilinear interpolation of the correction
+	 *	from the coarser grid to the current approximation:  u = u + Qu'
+	 ****************************************************/
+    [__null] void pre_interp(Scale scl, uint64_t round, int z_flag, int ir1m, int ir2m, int ir3m, int mm1, int mm2, int mm3, 
+            int u_flag, int ir1n, int ir2n, int ir3n, int n1, int n2, int n3, int k, Identifier& id, Int3DMatrix& u_valid){
+        int i3, i2, i1, d1, d2, d3, t1, t2, t3;
+
+        mace::deque<Position> required_vars;
+        mace::deque<int> vars_flags; 
+        mace::deque<uint64_t> vars_rounds;
+        mace::deque<double> vars;
+
+				mace::map<Position2, int> check_map;
+
+        vars.push_back(k);
+
+
+        if( n1!=3 && n2!=3 && n3!=3 ){
+        	int start1 = (int)max(0, scl.Xmin-1-ir1n);
+          int end1 = (int)min(mm1, scl.Xmax+2-ir1n);
+
+          int start2 = (int)max(0, scl.Ymin-1-ir2n);
+          int end2 = (int)min(mm2-1, scl.Ymax-ir2n+1);
+
+          int start3 = (int)max(0, scl.Zmin-1-ir3n);
+          int end3 = (int)min(mm3-1, scl.Zmax-ir3n+1);
+          
+					int i1_iter, i2_iter, i3_iter, x, y, z;
+					for(i3=start3; i3<end3; i3++){
+          	for(i2=start2; i2<end2; i2++){
+            	for(i1=start1; i1<end1; i1++){
+              	i1_iter = i1;
+                for(i2_iter=i2; i2_iter<=i2+1; i2_iter++){
+                	for(i3_iter=i3; i3_iter<=i3+1; i3_iter++){
+                  	x = i1_iter+ir1m;
+                    y = i2_iter+ir2m;
+                    z = i3_iter+ir3m;
+										add_ele(required_vars, vars_flags, vars_rounds, x, y, z, z_flag, round, scl, check_map, u_valid);
+                   }
+                }
+            	}       
+              
+							for(i1=start1; i1<end1-1; i1++){
+								for(i1_iter=2*i1-1; i1_iter<=2*i1; i1_iter++){
+									for(i2_iter=2*i2-1; i2_iter<=i1*2; i2_iter++){
+										for(i3_iter=2*i3-1; i3_iter<=i3*2; i3_iter++){
+											x = i1_iter+ir1n;
+											y = i2_iter+ir2n;
+											z = i3_iter+ir3n;
+											add_ele(required_vars, vars_flags, vars_rounds, x, y, z, u_flag, round, scl, check_map, u_valid);
+										}	
+									}	
+								}	
+							}
+         		}
+					}
+         	downcall_add_barrier(required_vars, vars_flags, vars_rounds, vars, id);
+      	}else{
+         	if(n1 == 3){
+          			d1 = 2;
+            		t1 = 1;
+          	}else{
+          			d1 = 1;
+            		t1 = 0;
+          	}
+                 
+          	if(n2 == 3){
+          			d2 = 2;
+            		t2 = 1;
+          	}else{
+          			d2 = 1;
+            		t2 = 0;
+          	}
+                 
+          	if(n3 == 3){
+          			d3 = 2;
+            		t3 = 1;
+          	}else{
+          			d3 = 1;
+            		t3 = 0;
+          	}
+
+          	int start1, end1, start2, end2, start3, end3;
+          	start1 = (int)min(d1, 0);
+          	start1 = (int)max(start1, scl.Xmin-1-ir1n);
+          	end1 = (int)min(mm1-1, scl.Xmax-ir1n+1);
+                 
+          	start2 = (int)min(d2, 0);
+          	start2 = (int)max(start2, scl.Ymin-1-ir2n);
+            end2 = (int)min(mm2-1, scl.Ymax-ir2n+1);
+                 
+            start3 = (int)min(d3, 0);
+            start3 = (int)max(start3, scl.Zmin-1-ir3n);
+            end3 = (int)min(mm3-1, scl.Zmax-ir3n+1);
+                 
+						int i1_iter, i2_iter, i3_iter, x, y, z;
+            for(i3=start3; i3<end3; i3++){
+            		for(i2=start2; i2<end2; i2++){
+                		for(i1=start1; i1<end1; i1++){
+                    		
+                        for(i1_iter = i1; i1_iter<=i1+1; i1_iter++){
+                        		for(i2_iter = i2; i2_iter<=i2+1; i2_iter++){
+                            		for(i3_iter = i3; i3_iter<=i3+1; i3_iter++){
+                                		x = i1_iter+ir1m;
+                                    y = i2_iter+ir2m;
+                                    z = i3_iter+ir3m;
+																		add_ele(required_vars, vars_flags, vars_rounds, x, y, z, z_flag, round, scl, check_map, u_valid);
+                                }    
+                            }    
+                        }
+
+												for(i1_iter=2*i1-d1; i1_iter<=2*i1-t1; i1_iter++){
+													for(i2_iter=2*i2-d2; i2_iter<=2*i2-t2; i2_iter++){
+														for(i3_iter=2*i3-d3; i3_iter<=2*i3-t3; i3_iter++){
+															x = i1_iter+ir1n;
+															y = i2_iter+ir2n;
+															z = i3_iter+ir3n;
+															add_ele(required_vars, vars_flags, vars_rounds, x, y, z, u_flag, round, scl, check_map, u_valid);
+														}	
+													}	
+												}
+                    }
+               	}
+          	}
+            downcall_add_barrier(required_vars, vars_flags, vars_rounds, vars, id);
+      	}
+
+    }
+    
+
+        
+		[__null] void interp(Scale scl, uint64_t round, Double3DMatrix z, int z_flag, int ir1m, int ir2m, int ir3m, int mm1, int mm2, 
+					int mm3, Double3DMatrix u, int u_flag, int ir1n, int ir2n, int ir3n, int n1, int n2, int n3, Int3DMatrix& u_valid){
+		    int i3, i2, i1, d1, d2, d3, t1, t2, t3;
+        double z1[NXYZ_DEFAULT/CONTEXTS_NUM+2], z2[NXYZ_DEFAULT/CONTEXTS_NUM+2], z3[NXYZ_DEFAULT/CONTEXTS_NUM+2];
+
+            if( n1!=3 && n2!=3 && n3!=3 ){
+                int start1 = max(0, scl.Xmin-ir1n-1);
+                int end1 = min(mm1, scl.Xmax+2-ir1n);
+
+                int start2 = max(0, scl.Ymin-ir2n-1);
+                int end2 = min(mm2-1, scl.Ymax-ir2n+1);
+
+                int start3 = max(0, scl.Zmin-ir3n-1);
+                int end3 = min(mm3-1, scl.Zmax-ir3n+1);
+
+                for(i3=start3; i3<end3; i3++){
+                    for(i2=start2; i2<end2; i2++){
+                        for(i1=start1; i1<end1; i1++){
+                            z1[i1] = z[i1+ir1m][i2+ir2m+1][i3+ir3m] + z[i1+ir1m][i2+ir2m][i3+ir3m];
+                            z2[i1] = z[i1+ir1m][i2+ir2m][i3+ir3m+1] + z[i1+ir1m][i2+ir2m][i3+ir3m];
+                            z3[i1] = z[i1+ir1m][i2+ir2m+1][i3+ir3m+1] + z[i1+ir1m][i2+ir2m][i3+ir3m+1] + z1[i1];
+                        }
+                        
+                        for(i1=start1; i1<end1-1; i1++){
+                            u[2*i1-1+ir1n][2*i2-1+ir2n][2*i3-1+ir3n] = u[2*i1-1+ir1n][2*i2-1+ir2n][2*i3-1+ir3n] 
+																																			+ u[i1+ir1m][i2+ir2m][i3+ir3m];
+                            u[2*i1+ir1n][2*i2-1+ir2n][2*i3-1+ir3n] = u[2*i1+ir1n][2*i2-1+ir2n][2*i3-1+ir3n] 
+																																		+ 0.5*( u[i1+1+ir1m][i2+ir2m][i3+ir3m] 
+                                                                    + u[i1+ir1m][i2+ir2m][i3+ir3m] );
+                        }
+                         
+                        for(i1=start1; i1<end1-1; i1++){
+                            u[2*i1-1+ir1n][2*i2+ir2n][2*i3-1+ir3n] = u[2*i1-1+ir1n][2*i2+ir2n][2*i3-1+ir3n] + 0.5*z1[i1];
+                            u[2*i1+ir1n][2*i2+ir2n][2*i3-1+ir3n] = u[2*i1+ir1n][2*i2+ir2n][2*i3-1+ir3n] + 0.25*( z1[i1] + z1[i1+1] );
+                        }
+                         
+                        for(i1=start1; i1<end1-1; i1++){
+                            u[2*i1-1+ir1n][2*i2-1+ir2n][2*i3+ir3n] = u[2*i1-1+ir1n][2*i2-1+ir2n][2*i3+ir3n] + 0.5*z2[i1];
+                            u[2*i1+ir1n][2*i2-1+ir2n][2*i3+ir3n] = u[2*i1+ir1n][2*i2-1+ir2n][2*i3+ir3n] + 0.25*( z2[i1] + z2[i1+1] );
+                        }
+                         
+                        for(i1=start1; i1<end1-1; i1++){
+                            u[2*i1-1+ir1n][2*i2+ir2n][2*i3+ir3n] = u[2*i1-1+ir1n][2*i2+ir2n][2*i3+ir3n] + 0.25*z3[i1];
+                            u[2*i1+ir1n][2*i2+ir2n][2*i3+ir3n]   = u[2*i1+ir1n][2*i2+ir2n][2*i3+ir3n] + 0.125*( z3[i1] + z3[i1+1] );
+                        }
+                    }
+                }
+
+                mace::deque<Position> idxes;
+                mace::deque<double> vals;
+								mace::deque<uint64_t> rounds;
+                for(i3=start3; i3<end3; i3++){
+                    for(i2=start2; i2<end2; i2++){
+                        for(i1=start1; i1<end1; i1++){
+                            int i1_iter, i2_iter, i3_iter;
+                            for(i2_iter=i2*2-1; i2_iter<=i2*2; i2_iter++){
+                                for(i3_iter=i3*2-1; i3_iter<=i3*2; i3_iter++){
+                                    for(i1_iter=i1*2-1; i1_iter<=i1*2; i1_iter++){
+                                        Position pos;
+                                        pos.z = i3_iter+ir3n;
+                                        pos.y = i2_iter+ir2n;
+                                        pos.x = i1_iter+ir1n;
+                                        idxes.push_back(pos);
+                                        vals.push_back(u[pos.x][pos.y][pos.z]);
+																				rounds.push_back(round);
+	
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                downcall_update_value(idxes, rounds, vals, u_flag);
+
+								for(i1=scl.Xmin; i1<=scl.Xmax; i1++){
+									for(i2=scl.Ymin; i2<=scl.Ymax; i2++){
+										for(i3=scl.Zmin; i3<=scl.Zmax; i3++){
+											if(i1<(2*start1-1+ir1n) || i1>(2*end1+ir1n) || i2<(2*start2-1+ir2n) || i2>(2*end2+ir2n) 
+													|| i3<(2*start3-1+ir3n) || i3>(2*end3+ir3n)){
+												u_valid[i1][i2][i3] = 0;
+											}	
+										}	
+									}	
+								}
+
+            }else{
+                if(n1 == 3){
+                    d1 = 2;
+                    t1 = 1;
+                }else{
+                    d1 = 1;
+                    t1 = 0;
+                }
+
+                if(n2 == 3){
+                    d2 = 2;
+                    t2 = 1;
+                }else{
+                    d2 = 1;
+                    t2 = 0;
+                }
+
+                if(n3 == 3){
+                    d3 = 2;
+                    t3 = 1;
+                }else{
+                    d3 = 1;
+                    t3 = 0;
+                }
+
+                int start1, end1;
+                int start2, end2;
+                int start3, end3;
+
+                
+                start3 = max(d3-1, scl.Zmin-1-ir3n);
+                end3 = min(mm3-1, scl.Zmax-ir3n+1);
+                for(i3=start3; i3<end3; i3++){
+                    start2 = max(d2-1, scl.Ymin-1-ir2n);
+                    end2 = min(mm2-1, scl.Ymax-ir2n+1);
+                    for(i2=start2; i2<end2; i2++){
+                        start1 = max(d1-1, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-d1+ir1n][2*i2-d2+ir2n][2*i3-d3+ir3n] = u[2*i1-d1+ir1n][2*i2-d2+ir2n][2*i3-d3+ir3n] + u[i1+ir1m][i2+ir2m][i3+ir3m];
+                        }
+                        
+                        start1 = max(0, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-t1+ir1n][2*i2-d2+ir2n][2*i3-d3+ir3n] = u[2*i1-t1+ir1n][2*i2-d2+ir2n][2*i3-d3+ir3n] + 0.5*(u[i1+1+ir1m][i2+ir2m][i3+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m] );
+                        }
+                    }
+
+                    start2 = max(0, scl.Ymin-1-ir2n);
+                    end2 = min(mm2-1, scl.Ymax-ir2n+1);
+                    for(i2=start2; i2<end2; i2++){
+                        start1 = max(d1-1, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-d1+ir1n][2*i2-t2+ir2n][2*i3-d3+ir3n] = u[2*i1-d1+ir1n][2*i2-t2+ir2n][2*i3-d3+ir3n] + 0.5*(u[i1+ir1m][i2+1+ir2m][i3+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m] );
+                        }
+                         
+                        start1 = max(0, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-t1+ir1n][2*i2-t2+ir2n][2*i3-d3+ir3n] = u[2*i1-t1+ir1n][2*i2-t2+ir2n][2*i3-d3+ir3n] + 0.25*(u[i1+1+ir1m][i2+1+ir2m][i3+ir3m] 
+                                                                        + u[i1+1+ir1m][i2+ir2m][i3+ir3m] + u[i1+ir1m][i2+1+ir2m][i3+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m] );
+                        }
+                    }
+                }
+                
+                start3 = max(0, scl.Zmin-1-ir3n);
+                end3 = min(mm3-1, scl.Zmax-ir3n+1);
+                for(i3=start3; i3<end3; i3++){
+                    start2 = max(d2-1, scl.Ymin-1-ir2n);
+                    end2 = min(mm2-1, scl.Ymax-ir2n+1);
+                    for(i2=d2; i2<mm2; i2++){
+                        start1 = max(d1-1, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Zmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-d1+ir1n][2*i2-d2+ir2n][2*i3-t3+ir3n] = u[2*i1-d1+ir1n][2*i2-d2+ir2n][2*i3-t3+ir3n] + 0.5*(u[i1+ir1m][i2+ir2m][i3+1+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m]);
+                        }
+                         
+                        start1 = max(0, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-t1+ir1n][2*i2-d2+ir2n][2*i3-t3+ir3n] = u[2*i1-t1+ir1n][2*i2-d2+ir2n][2*i3-t3+ir3n] + 0.25*(u[i1+1+ir1m][i2+ir2m][i3+1+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+1+ir3m] + u[i1+1+ir1m][i2+ir2m][i3+ir3m]
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m]);
+                        }
+                    }
+                     
+                    start2 = max(0, scl.Ymin-1-ir2n);
+                    end2 = min(mm2-1, scl.Ymax-ir2n+1);
+                    for(i2=start2; i2<end2; i2++){
+                        start1 = max(d1-1, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-d1+ir1n][2*i2-t2+ir2n][2*i3-t3+ir3n] = u[2*i1-d1+ir1n][2*i2-t2+ir2n][2*i3-t3+ir3n] + 0.25*(u[i1+ir1m][i2+1+ir2m][i3+1+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+1+ir3m] + u[i1+ir1m][i2+1+ir2m][i3+ir3m]
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m]);
+                        }
+        
+                        start1 = max(0, scl.Xmin-1-ir1n);
+                        end1 = min(mm1-1, scl.Xmax-ir1n+1);
+                        for(i1=start1; i1<end1; i1++){
+                            u[2*i1-t1+ir1n][2*i2-t2+ir2n][2*i3-t3+ir3n] = u[2*i1-t1+ir1n][2*i2-t2+ir2n][2*i3-t3+ir3n] + 0.125*(u[i1+1+ir1m][i2+1+ir2m][i3+1+ir3m] 
+                                                                        + u[i1+1+ir1m][i2+ir2m][i3+1+ir3m] + u[i1+ir1m][i2+1+ir2m][i3+1+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+1+ir3m] + u[i1+1+ir1m][i2+1+ir2m][i3+ir3m] 
+                                                                        + u[i1+1+ir1m][i2+ir2m][i3+ir3m] + u[i1+ir1m][i2+1+ir2m][i3+ir3m] 
+                                                                        + u[i1+ir1m][i2+ir2m][i3+ir3m]);
+                        }
+                    }
+                }
+               
+                mace::deque<Position> idxes;
+                mace::deque<double> vals;
+								mace::deque<uint64_t> rounds;
+                start1 = min(d1-1, 0);
+                start1 = max(start1, scl.Xmin-1-ir1n);
+                end1 = min(mm1-1, scl.Xmax-ir1n+1);
+
+                start2 = min(d2-1, 0);
+                start2 = max(start2, scl.Ymin-1-ir2n);
+                end2 = min(mm2-1, scl.Ymax-ir2n+1);
+
+                start3 = min(d3-1, 0);
+                start3 = max(start3, scl.Zmin-1-ir3n);
+                end3 = min(mm3-1, scl.Zmax-ir3n+1);
+
+
+                for(i3=start3; i3<end3; i3++){
+                    for(i2=start2; i2<end2; i2++){
+                        for(i1=start1; i1<end1; i1++){
+                            int i1_iter, i2_iter, i3_iter;
+                            for(i1_iter=2*i1-d1+ir1n; i1_iter<=2*i1-t1+ir1n; i1_iter++){
+                                for(i2_iter=2*i2-d2+ir2n; i2_iter<=2*i2-t2+ir2n; i2_iter++){
+                                    for(i3_iter=2*i3-d3+ir3n; i3_iter<=2*i3-t3+ir3n; i3_iter++){
+                                        if(scl.Xmin<=i1_iter && i1_iter<=scl.Xmax && scl.Ymin<=i2_iter && i2_iter<=scl.Ymax 
+                                                && scl.Zmin<=i3_iter && i3_iter<=scl.Zmax){ 
+                                            Position pos;
+                                            pos.z = i3_iter;
+                                            pos.y = i2_iter;
+                                            pos.x = i1_iter;
+                            
+                                            idxes.push_back(pos);
+                                            vals.push_back(u[i1_iter][i2_iter][i3_iter]);
+																						rounds.push_back(round);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                downcall_update_value(idxes, rounds, vals, u_flag);
+
+							for(i1=scl.Xmin; i1<=scl.Xmax; i1++){
+								for(i2=scl.Ymin; i2<=scl.Ymax; i2++){
+									for(i3=scl.Zmin; i3<=scl.Zmax; i3++){
+										if(i1<(2*start1-d1+ir1n) || i1>(2*end1-t1+ir1n) || i2<(2*start2-d2+ir2n) || i2>(2*end2-t2+ir2n) ||
+												i3<(2*start3-d3+ir3n) || i3>(2*end3-t3+ir3n)){
+											u_valid[i1][i2][i3] = 0;	
+										}	
+									}	
+								}	
+							}
+            }
+        }
+                       
+                       
+
+                       
+                       
+                
+		
+		/****************************************************
+		 *	 psinv applies an approximate inverse as smoother:  u = u + Cr
+		 *	
+		 ****************************************************/
+        [__null] void pre_psinv(Scale scl, uint64_t round, int r_flag, int r1, int r2, int r3, int u_flag, int u1, int u2, int u3, 
+                int n1, int n2, int n3, int k, Identifier id, Int3DMatrix& u_valid){
+            int i1, i2, i3;
+
+            mace::deque<Position> required_vars;
+            mace::deque<int> vars_flags; 
+            mace::deque<uint64_t> vars_rounds;
+            mace::deque<double> vars;
+						mace::map<Position2, int> check_map;
+
+            vars.push_back((double)k);
+
+            int start1 = max(0, scl.Xmin-1-u1);
+            int end1 = min(n1, scl.Xmax+2-u1);
+            int start2 = max(1, scl.Ymin-u2);
+            int end2 = min(n2-1, scl.Ymax+1-u2);
+            int start3 = max(1, scl.Zmin-u3);
+            int end3 = min(n3-1, scl.Zmax+1-u3);
+
+						int i1_iter, i2_iter, i3_iter;
+            for(i3=start3; i3<end3; i3++){
+                for(i2=start2; i2<end2; i2++){
+                    for(i1=start1; i1<end1; i1++){
+                        i1_iter = i1;
+
+                        for(i2_iter=i2-1; i2_iter<=i2+1; i2_iter++){
+                            for(i3_iter=i3-1; i3_iter<=i3+1; i3_iter++){
+                                if(i2_iter == i2 && i3_iter == i3) continue;
+																add_ele(required_vars,  vars_flags,  vars_rounds, i1_iter+r1,  i2_iter+r2, i3_iter+r3,  r_flag,  round,  
+																	scl, check_map, u_valid);
+
+                            }
+                        }
+                    }
+
+                    i2_iter = i2;
+                    i3_iter = i3;
+
+                    for(i1_iter=i1-1; i1_iter<=i1+1; i1_iter++){
+                    	add_ele(required_vars,  vars_flags,  vars_rounds, i1_iter+r1, i2_iter+r2,  i3_iter+r3,  r_flag,  round,  
+												scl, check_map, u_valid);
+                    }
+                }
+            }
+            downcall_add_barrier(required_vars, vars_flags, vars_rounds, vars, id);
+
+        }
+
+		[__null] void psinv(Scale scl, uint64_t round, Double3DMatrix r, int r_flag, int ri1, int ri2, int ri3, 
+					Double3DMatrix u, int u_flag, int ui1, int ui2, int ui3, int n1, int n2, int n3, mace::vector<double> c){
+		    int i3, i2, i1;
+
+            double r1[NXYZ_DEFAULT/CONTEXTS_NUM+2], r2[NXYZ_DEFAULT/CONTEXTS_NUM+2];
+            int start1 = max(0, scl.Xmin-1-ui1);
+            int end1 = min(n1, scl.Xmax+1-ui1);
+            int start2 = max(1, scl.Ymin-ui2);
+            int end2 = min(n2-1, scl.Ymax+1-ui2);
+            int start3 = max(1, scl.Zmin-ui3);
+            int end3 = min(n3-1, scl.Zmax+1-ui3);
+
+            for(i3=start3; i3<end3; i3++){
+                for(i2=start2; i2<end3; i2++){
+                    for(i1=start1; i1<end3; i1++){
+                        r1[i1] = r[i1+ri1][i2-1+ri2][i3+ri3] + r[i1+ri1][i2+1+ri2][i3+ri3] + r[i1+ri1][i2+ri2][i3-1+ri3] 
+																+ r[i1+ri1][i2+ri2][i3+1+ri3];
+                        r2[i1] = r[i1+ri1][i2-1+ri2][i3-1+ri3] + r[i1+ri1][i2+1+ri2][i3-1+ri3] + r[i1+ri1][i2-1+ri2][i3+1+ri3] 
+															+ r[i1+ri1][i2+1+ri2][i3+1+ri3];
+                    }
+                     
+                    for(i1=start1+1; i1<end1-1; i1++){
+                        u[i1+ui1][i2+ui2][i3+ui3] = u[i1+ui1][i2+ui2][i3+ui3] + c[0]*r[i1+ri1][i2+ri2][i3+ri3] + c[1]*( r[i1-1+ri1][i2+ri2][i3+ri3] 
+                                                    + r[i1+1+ri1][i2+ri2][i3+ri3] + r1[i1] )
+                                                    + c[2] * ( r2[i1] + r1[i1-1] + r1[i1+1] );
+                    }
+                }
+            }
+
+            mace::deque<Position> idxes;
+            mace::deque<double> vals;
+						mace::deque<uint64_t> rounds;
+            for(i3=start3; i3<end3; i3++){
+                for(i2=start2; i2<end2; i2++){
+                    for(i1=start1+1; i1<end1-1; i1++){
+                        Position pos;
+                        pos.z = i3+ui1;
+                        pos.y = i2+ui2;
+                        pos.x = i1+ui3;
+                         
+                        idxes.push_back(pos);
+                        vals.push_back(u[pos.x][pos.y][pos.z]);
+												rounds.push_back(round);
+                    }
+                }
+            }
+            downcall_update_value(idxes, rounds, vals, u_flag);
+		}				
+				
+    [__null] void zero3(Double3DMatrix z, int zi1, int zi2, int zi3, int n1, int n2, int n3){
+        int i1, i2, i3;
+
+        for(i3=zi1; i3<n3; i3++){
+            for(i2=zi2; i2<n2; i2++){
+                for(i1=zi3; i1<n1; i1++){
+                    z[i1][i2][i3] = 0;    
+                }    
+            }    
+        }
+    }
+
+    [__null] void zran3(Double3DMatrix matrix, int n1, int n2, int n3, int nx, int ny){
+        int i, i1, i2, i3;
+
+				for(i1=0; i1<n1; i1++){
+						for(i2=0; i2<n2; i2++){
+								for(i3=0; i3<n3; i3++){
+										matrix[i1][i2][i3] = 0.0;	
+								}	
+						}	
+				}
+
+
+
+        for(i=0; i<10; i++){
+					bool flag = false;
+					while(!flag){
+            int x = rand()%n1;
+            int y = rand()%n2;
+            int z = rand()%n3;
+						if(matrix[x][y][z] == 0){
+            	matrix[x][y][z] = 1;
+							flag = true;
+						}
+					}
+        }
+
+        for(i=0; i<10; i++){
+					bool flag = false;
+					while(!flag){
+            int x = rand()%n1;
+            int y = rand()%n2;
+            int z = rand()%n3;
+						if(matrix[x][y][z] == 0){
+            	matrix[x][y][z] = -1;
+							flag = true;
+						}
+					}
+        }
+
+    }
+
+		[__null] int verify(double rnm2, char class_type){
+			double verify_value=0.0;
+			double epsilon = 1.0e-8;
+			
+			int verified;
+			if (class_type != 'U') {
+				if(class_type == 'S') {
+					verify_value = 0.530770700573e-4;
+				}else if(class_type == 'W') {
+					verify_value = 0.250391406439e-17; 
+				}else if(class_type == 'A') {
+					verify_value = 0.2433365309e-5;
+				}else if(class_type == 'B') {
+					verify_value = 0.180056440132e-5;
+				}else if(class_type == 'C') {
+					verify_value = 0.570674826298e-6;
+				}
+				if( abs( rnm2 - verify_value ) < epsilon ) {
+						verified = 1;
+				}else{
+						verified = 0;
+				}
+			}else{
+				verified = -1;
+			}
+			return  verified;  
+		}
+}
+
+

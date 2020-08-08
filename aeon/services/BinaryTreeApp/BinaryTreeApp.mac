@@ -1,0 +1,134 @@
+
+#include <stdlib.h>
+
+service BinaryTreeApp;
+provides Null;
+
+typedefs {
+}
+services {
+
+}
+
+constants {
+  
+}
+
+constructor_parameters {
+  uint32_t N_CHILD = 3;
+  uint32_t N_CLIENTS = 1;
+  uint64_t OUTPUT_COUNT = 100;  
+}
+
+messages {
+
+}
+
+auto_types {
+  
+}
+ 
+state_variables {
+  context Client<uint32_t clindId> {
+    uint32_t clientId;
+
+    uint64_t totalReqCount;
+    uint64_t totalReqLatency;
+    uint64_t requestTime;
+  }
+
+  context BinaryTree {
+    
+  }
+
+  context BinaryTreeNode<uint32_t nodeId> {
+    uint32_t l_node;
+    uint32_t n_l_children;
+
+    uint32_t r_node;
+    uint32_t n_r_children;
+  }
+
+}
+
+
+ 
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("BinaryTreeApp");
+    maceout << "Start BinaryTreeApp!" << Log::endl;
+    async_initBinaryTree();
+  }
+
+  async [Client<cId>] initClient(const uint32_t& cId ) {
+    ADD_SELECTORS("BinaryTreeApp");
+    maceout<< "To initialize Client " << cId << Log::endl;
+    clientId = cId;
+       
+    totalReqCount = 0;
+    totalReqLatency = 0;
+    
+    sleep(1);
+    requestTime = mace::getmtime();
+    async_request(cId);
+  }
+
+  async [Client<cId>] requestReply( const uint32_t& cId ) {
+    ADD_SELECTORS("BinaryTreeApp");
+
+    uint64_t lastReqLatency = mace::getmtime() - requestTime;
+    totalReqCount ++;
+    totalReqLatency += lastReqLatency;
+
+    if( totalReqCount % OUTPUT_COUNT == 0 ) {
+      double avgReqLatency = totalReqLatency / OUTPUT_COUNT;
+
+      maceout << "Client("<< cId <<") totalReqCount=" << totalReqCount << " avgReqLatency=" << avgReqLatency << Log::endl;
+      
+      totalReqLatency = 0;
+    }
+
+    requestTime = mace::getmtime();
+    async_request(cId);
+  }
+
+  async [BinaryTree] initBinaryTree() {
+    ADD_SELECTORS("BinaryTreeApp");
+    maceout<< "Initialize BinaryTree!" << Log::endl;
+
+    for (uint32_t i = 1; i<=N_CHILD; i++) {
+      async_initTreeNode(i);
+    }
+
+    for (uint32_t i = 1; i<=N_CLIENTS; i++) {
+      async_initClient(i);
+    }
+  }
+
+  async [BinaryTreeNode<nodeId>] initTreeNode(const uint32_t& nodeId) {
+    ADD_SELECTORS("BinaryTreeApp");
+    maceout<< "Create TreeNode["<< nodeId <<"]!" << Log::endl;
+  }
+
+  async [BinaryTree] request(const uint32_t& cId) {
+    uint32_t nId = RandomUtil::randInt() % N_CHILD + 1;
+    broadcast_requestNode(nId);
+    if (N_CHILD > 1) {
+      uint32_t nId2 = (nId + 1) % (N_CHILD + 1);
+      if (nId2 == 0) {
+        nId2 = 1;
+      }
+      broadcast_requestNode(nId2);
+    }
+    async_requestReply(cId);
+  }
+
+  broadcast [BinaryTreeNode<nodeId>] requestNode(const uint32_t& nodeId) {
+    
+  }  
+}
+
+routines {
+
+}
+

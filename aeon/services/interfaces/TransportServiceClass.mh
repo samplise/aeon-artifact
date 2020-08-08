@@ -1,0 +1,96 @@
+/* 
+ * TransportServiceClass.mh : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, James W. Anderson, Ryan Braud
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+serviceclass Transport {
+  struct Connection {
+    typedef int type;
+    static const type INCOMING = 0;
+    static const type OUTGOING = 1;
+    static const type NAT = 2;
+  };
+
+  // Returns the registration id for this registration.  Should be used on
+  // all calls into and this service and to the handlers.  Providing the
+  // registration id is a kind of authentication, though not strong.  These 
+  // should be unique, but must match across nodes.  The design of such a
+  // system in general may be complex, and is punted for now.
+  // NOTE: We are providing for requesting a particular registration uid
+  // via second parameter.
+  // NOTE: reistration uid's represent a registration bond.  But multiple
+  // handler types registered for the same logical bond should use the same
+  // registration uid, so that if the same flow calls multiple handlers, both
+  // may be correctly routed using a single registration uid.
+  // NOTE: Passing in -1 causes a new uid to be generated and returned to you.
+  
+  //For the following calls, the int return value tells whether the service 
+  //accepted the message.  It does NOT guarantee delivery or other properties.
+  virtual bool route(const MaceKey& dest, const std::string& s) { return false; }
+
+  // Route the message withthe specified the source address; asserts
+  // that the MaceKey src is of type ipv4.
+  virtual bool route(const MaceKey& src, const MaceKey& dest,
+		     const std::string& s) {
+    return false;
+  }
+
+  size_t send(const MaceKey& dest, const std::string& s) {
+    bool r = route(dest, s, rid);
+    if (r) {
+      return s.size();
+    }
+    else {
+      return 0;
+    }
+  }
+
+  virtual void suspendDeliver();
+  virtual void suspendDeliver(const MaceKey& dest);
+  virtual void resumeDeliver();
+  virtual void resumeDeliver(const MaceKey& dest);
+  
+  handlers ReceiveData, NetworkError;
+
+  mace services {
+    method_remappings {
+      uses {
+	downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t);
+	downcall_route(const MaceKey&, const MaceKey&, const Message& -> const std::string&, registration_uid_t);
+	downcall_send(const MaceKey&, const Message& -> const std::string&, registration_uid_t);
+      }
+      implements {
+	upcalls {
+	  deliver(const MaceKey&, const MaceKey&, const Message& <- const std::string&);
+	  messageError(const MaceKey&, TransportError::type, const Message& <- const std::string&, registration_uid_t);
+	}
+      }
+    }
+  }
+
+};

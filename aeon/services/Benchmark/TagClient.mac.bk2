@@ -1,0 +1,238 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service TagClient;
+ 
+provides Null, MigrationTest;
+
+trace=low;
+
+services {
+  Transport t;
+}
+ 
+constants {
+  // Indicates the location that the kid stays in
+  uint16_t LOCATION_IN_WORLD = 0;
+  uint16_t LOCATION_IN_HALLWAY = 1;
+  uint16_t LOCATION_IN_ROOM = 2;
+
+  // Indicates the kid direction
+  uint16_t DIRECTION_STATIONARY = 0;
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+
+  // The size of a standard world, hallway and room. It's a 50 * 50 grid.
+  uint16_t WORLD_SIZE = 50;
+  uint16_t HALLWAY_SIZE = 50;
+  uint16_t ROOM_SIZE = 50;
+
+  uint16_t DEFAULT_COORD = 0;
+}
+ 
+constructor_parameters {
+  // The total exist time of a player
+  uint64_t ONE_DAY = 24 * 1000 * 1000;
+  uint32_t NUM_DAYS = 1;   /* How many iterations of ONE_DAY? */
+  //uint64_t JOIN_TIME = 9 * 1000 * 1000;
+  //uint64_t LEAVE_TIME = 22 * 1000 * 1000;
+  // The time interval to send every move instruction
+  uint64_t MOVEMENT_PERIOD = 1 * 1000 * 1000;
+  // The time interval to request the current room map
+  uint64_t MAP_REQUEST_PERIOD = 1 * 1000 * 1000;
+  // The extra CPU burden to the server
+  //uint32_t BURDEN = 100;
+  //uint64_t HEAD_INITIAL_WAIT_TIME = 10*1000*1000;
+  uint64_t PREJOIN_WAIT_TIME = 30*1000*1000;
+  uint64_t EXIT_TIME = 600 * 1000 * 1000;
+  std::string CLIENT_ID = "0"; /* This should be unique */
+	NodeSet Servers = NodeSet();
+}
+
+states {
+  PREJOINING;
+  PREJOINED;
+  SLEEPING;
+  JOINING;
+  PLAYING;
+  STOPPING;
+}
+
+auto_types {
+  coordinate __attribute((comparable(equals=default; lessthan=default))) {
+    uint16_t x;
+    uint16_t y;
+  }
+}
+
+#minclude "TagMessage.mi"
+
+state_variables {
+  uint64_t JOIN_TIME;
+  uint64_t LEAVE_TIME;
+
+	uint64_t prejoin_wait_time;
+  //
+  // The timer to control the total exist time
+  timer exitTimer;
+  timer stopTimer;
+  timer prejoinTimer;
+  // The timer to control the frequency of map request
+  timer mapRequest __attribute((recur(MAP_REQUEST_PERIOD)));
+  //This is the timer that increase how many msgs to be sent per cycle
+  timer msgSend __attribute((recur(MOVEMENT_PERIOD)));
+
+  timer joinTimer __attribute((recur(ONE_DAY))); 
+  timer leaveTimer __attribute((recur(ONE_DAY))); 
+
+  // The server's address
+  MaceKey serverAddr; 
+
+  //uint16_t msg_per_cycle;
+  uint16_t kidID;
+  uint16_t kidRole;
+  int kidLocation;
+  uint16_t curBuilding;
+  uint16_t curRoom;
+  coordinate coord;
+  uint16_t kidDirection;
+}
+ 
+transitions {
+  downcall (state==init) maceInit() {
+    //usleep(HEAD_INITIAL_WAIT_TIME);
+
+    //maceout << "Initializing TagClient" << Log::endl; 
+    //serverAddr = MaceKey(ipv4, params::get<std::string>("SERVER_ADDR") );
+		ASSERT(Servers.size() == 1);
+		serverAddr = *(Servers.begin());
+		prejoin_wait_time = PREJOIN_WAIT_TIME;
+    // Send out the kid initial request
+    //maceout << "Send RequireKidInit msg to server" << Log::endl;
+    // Start the global timer
+    /* Read the values */
+
+    JOIN_TIME = params::get<uint64_t>("JOIN_TIME_"+CLIENT_ID, 120*1000*1000);
+    LEAVE_TIME = params::get<uint64_t>("LEAVE_TIME_"+CLIENT_ID, 240*1000*1000);
+    maceout << "CLIENT_ID = " << CLIENT_ID << Log::endl;
+    maceout << "JOIN_TIME = " << JOIN_TIME << Log::endl;
+    maceout << "LEAVE_TIME = " << LEAVE_TIME << Log::endl;
+
+    // Everyone will join at a time, and upon getting response, it will immeidately leave.
+    state = PREJOINING;
+    //maceout << curtime << " prejoining" << Log::endl;
+    downcall_route(serverAddr, RequireKidInit());
+    prejoinTimer.schedule(PREJOIN_WAIT_TIME);
+    exitTimer.schedule(EXIT_TIME); // Still, you should set exitTimer.
+  }
+
+
+  upcall (state == PREJOINING) deliver(const MaceKey& src, const MaceKey& dest, const ResponseKidInit& msg) {
+    maceout << curtime << " prejoined" << Log::endl;
+    downcall_route(serverAddr, RequireKidLeave(msg.kidID, msg.kidLocation, msg.kidBuilding, msg.kidRoom));
+    state = PREJOINED;
+  }
+
+  scheduler prejoinTimer() {
+    //ASSERT(state == PREJOINED); // If not, you are failed to join by time.
+
+    //maceout << curtime << " prejoin wait finished" << Log::endl;
+
+		if(state == PREJOINED) {
+    	stopTimer.schedule(NUM_DAYS * ONE_DAY);
+    	joinTimer.schedule(JOIN_TIME);
+    	leaveTimer.schedule(LEAVE_TIME);
+    	state = SLEEPING;
+    	maceout << curtime << " sleeping" << Log::endl;
+		}else {
+			prejoin_wait_time = prejoin_wait_time/2;
+			ASSERT(prejoin_wait_time >= 1000)
+			prejoinTimer.schedule(prejoin_wait_time);	
+		}
+  }
+
+  scheduler (state == SLEEPING) joinTimer(){  
+    maceout << curtime << " joining" << Log::endl;
+    downcall_route(serverAddr, RequireKidInit());
+    state = JOINING;  
+  }
+
+  upcall (state == JOINING) deliver(const MaceKey& src, const MaceKey& dest, const ResponseKidInit& msg) {
+    //maceout << "A ResponseKidInit msg has been received." << Log::endl;
+    kidID = msg.kidID;
+    kidRole = msg.kidRole;
+    kidLocation = msg.kidLocation;
+    curBuilding = msg.kidBuilding;
+    curRoom = msg.kidRoom;
+    coord.x = DEFAULT_COORD;
+    coord.y = DEFAULT_COORD;
+    kidDirection = msg.kidDirection;
+    // Start the instruction timer and the map request timer
+    if( !msgSend.isScheduled() )
+      msgSend.schedule(MOVEMENT_PERIOD);
+    if( !mapRequest.isScheduled() )
+      mapRequest.schedule(MAP_REQUEST_PERIOD);
+    state = PLAYING;
+    maceout << curtime << " playing" << Log::endl;
+    //maceout << "The client has been initialized." << Log::endl;
+  }
+ 
+  scheduler (state == PLAYING) msgSend() {
+    // Constantly change the kid's direction
+    uint16_t newDirection = RandomUtil::randInt(5); 
+    //maceout << "Send SetDirection msg to server" << Log::endl;
+    maceout << curtime << " move" << Log::endl;
+    downcall_route(serverAddr, SetDirection(kidID, newDirection));
+  }
+
+  scheduler (state == PLAYING) mapRequest() {
+    // Constantly request the map from the server
+    //maceout << "Send RequireMapInfo msg to server" << Log::endl;
+    maceout << curtime << " map_request" << Log::endl;
+    downcall_route(serverAddr, RequireMapInfo(kidID, kidLocation, curBuilding, 
+          curRoom, curtime));
+  }
+  
+  //Receive the room Map
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ReceiveMapInfo& msg)
+  {
+    uint64_t currentTime = curtime;
+    maceout << currentTime << " latency: " << currentTime - msg.timeStamp << Log::endl;
+  }
+ 
+  scheduler (state == PLAYING) leaveTimer() {
+    maceout << curtime << " leaving" << Log::endl;
+    downcall_route(serverAddr, RequireKidLeave(kidID, kidLocation, curBuilding, curRoom));
+    mapRequest.cancel();
+    msgSend.cancel();
+    state = SLEEPING;
+    maceout << curtime << " sleeping" << Log::endl;
+  }
+
+  scheduler stopTimer() {
+    // Now stop issuing request
+    if( state == PLAYING )
+      downcall_route(serverAddr, RequireKidLeave(kidID, kidLocation, curBuilding, curRoom));
+    maceout << curtime << " stopping" << Log::endl;
+    joinTimer.cancel();
+    leaveTimer.cancel();
+    msgSend.cancel();
+    mapRequest.cancel();
+    state = STOPPING;
+  }
+
+  scheduler exitTimer() {
+    maceout << curtime << " exit" << Log::endl;
+    // Exit the application when it's triggered
+    exit(0);
+  }
+
+
+}

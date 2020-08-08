@@ -1,0 +1,262 @@
+/* 
+ * Find.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, James W. Anderson
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+using mace::string;
+using mace::deque;
+using mace::map;
+using boost::shared_ptr;
+using std::cout;
+using std::cerr;
+using std::endl;
+
+#include "maceConfig.h"
+#include "FileUtil.h"
+
+service Find;
+
+provides FileFind;
+
+registration = dynamic<string>;
+
+trace = off;
+
+services {
+}
+
+constants {
+}
+
+constructor_parameters {
+}
+
+typedefs {
+  typedef shared_ptr<StringList> StringListPtr;
+  typedef deque<DirEntry, mace::SoftState> DirEntryStack;
+  typedef map<registration_uid_t, FindState> FindMap;
+}
+
+auto_types {
+  DirEntry {
+    StringListPtr l __attribute((serialize(no)));
+    string path;
+  };
+
+  FindState {
+    registration_uid_t rid;
+    string path;
+    string userRoot;
+    string root;
+    uint64_t nextScheduled = 0;
+    bool normalize = false;
+    bool paused = false;
+    bool doListingsCheck = false;
+    DirEntryStack dirStack __attribute((serialize(no))) = DirEntryStack();
+    DirEntryStack dirListings __attribute((serialize(no))) = DirEntryStack();
+
+    string getPath() const {
+      if (normalize) {
+	if (path == root) {
+	  return "/";
+	}
+	return path.substr(root.size());
+      }
+      return path;
+    }
+
+    string getPath(const string& p) const {
+      if (normalize) {
+	if (p == root) {
+	  return "/";
+	}
+	return p.substr(root.size());
+      }
+      return p;
+    }
+
+  };
+}
+
+state_variables {
+  FindMap inProgress;
+  timer<registration_uid_t> t __attribute((multi(yes)));
+}
+
+transitions {
+  downcall beginFind(const std::string& p, bool normalizePaths,
+		     registration_uid_t rid) {
+    if (inProgress.find(rid) != inProgress.end()) {
+      maceerr << "find already in progress for " << rid << Log::endl;
+      ABORT("concurrent find");
+    }
+    string root = StrUtil::trimBack(p, '/');
+    string initpath = root;
+    if (root.empty()) {
+      initpath = "/";
+    }
+    inProgress[rid] = FindState(rid, initpath, p, root, t.schedule(1, rid),
+				normalizePaths);
+  } // beginFind
+
+  downcall cancelFind(registration_uid_t rid) {
+    FindMap::iterator i = inProgress.find(rid);
+    if (i != inProgress.end()) {
+      t.cancel(i->second.nextScheduled);
+      inProgress.erase(i);
+    }
+  } // cancelFind
+
+  downcall pauseFind(registration_uid_t rid) {
+    FindMap::iterator i = inProgress.find(rid);
+    if (i == inProgress.end()) {
+      maceerr << "no find in progress for " << rid << Log::endl;
+      ASSERT(0);
+    }
+    i->second.paused = true;
+    t.cancel(i->second.nextScheduled);
+  }  // pauseFind
+
+  downcall resumeFind(registration_uid_t rid) {
+    FindMap::iterator i = inProgress.find(rid);
+    if (i == inProgress.end()) {
+      maceerr << "no find in progress for " << rid << Log::endl;
+      ASSERT(0);
+    }
+    ASSERT(i->second.paused);
+    i->second.paused = false;
+    i->second.nextScheduled = t.schedule(1, rid);
+  } // resumeFind
+
+  scheduler t(registration_uid_t& rid) {
+    FindMap::iterator i = inProgress.find(rid);
+    if (i == inProgress.end()) {
+      maceerr << "no find in progress for " << rid << Log::endl;
+      ABORT("no find in progress");
+    }
+      
+    FindState& f = i->second;
+    f.nextScheduled = 0;
+
+    if (f.path.empty()) {
+      ASSERT(!f.dirStack.empty());
+
+      DirEntry& e = f.dirStack.back();
+      ASSERT(!e.l->empty());
+      if (e.path == "/") {
+	f.path = "/" + e.l->front();
+      }
+      else {
+	f.path = e.path + "/" + e.l->front();
+      }
+      e.l->pop_front();
+
+      while (f.doListingsCheck && !f.dirListings.empty()) {
+	const DirEntry& de = f.dirListings.back();
+	if (f.path.find(de.path) != 0) {
+	  upcall_leavingDir(f.getPath(de.path), *(de.l), rid);
+	  f.dirListings.pop_back();
+	}
+	else {
+	  break;
+	}
+      }
+
+      f.doListingsCheck = false;
+      if (e.l->empty()) {
+	f.dirStack.pop_back();
+	f.doListingsCheck = true;
+      }
+      if (!f.dirStack.empty()) {
+	f.nextScheduled = t.schedule(1, rid);
+      }
+    }
+
+    try {
+      struct stat sbuf;
+      FileUtil::lstatWithErr(f.path, sbuf);
+
+      if (S_ISDIR(sbuf.st_mode)) {
+	if (upcall_atDir(f.getPath(), sbuf, rid)) {
+	  StringListPtr l = StringListPtr(new StringList());
+	  try {
+	    FileUtil::readDir(f.path, *l, true);
+	    if (!l->empty()) {
+	      f.dirStack.push_back(DirEntry(l, f.path));
+	      f.dirListings.push_back(
+		DirEntry(StringListPtr(new StringList(*l)), f.path));
+
+	      if (!f.nextScheduled) {
+		f.nextScheduled = t.schedule(1, rid);
+	      }
+	    }
+	    else {
+	      upcall_leavingDir(f.getPath(), StringList(), rid);
+	    }
+	  }
+	  catch (const FileException& e) {
+	    if (!upcall_readDirError(f.getPath(), e, rid)) {
+	      cancelFind(rid);
+	      return;
+	    }
+	  }
+	}
+      }
+      else if (S_ISREG(sbuf.st_mode)) {
+	upcall_atFile(f.getPath(), sbuf, rid);
+      }
+      else {
+        #ifndef WINDOWS_FILES
+        if (S_ISLNK(sbuf.st_mode)) {
+          upcall_atLink(f.getPath(), sbuf, rid);
+        }
+        #endif
+      }
+
+    }
+    catch (const FileException& e) {
+      if (!upcall_statError(f.getPath(), e, rid)) {
+	cancelFind(rid);
+	return;
+      }
+    }
+    f.path.clear();
+    if (f.dirStack.empty()) {
+      ASSERT(!f.nextScheduled);
+      while (!f.dirListings.empty()) {
+	const DirEntry& de = f.dirListings.back();
+	upcall_leavingDir(f.getPath(de.path), *(de.l), rid);
+	f.dirListings.pop_back();
+      }
+      ASSERT(f.dirListings.empty());
+      upcall_findComplete(f.userRoot, rid);
+      inProgress.erase(rid);
+    }
+  }
+} // transitions
+

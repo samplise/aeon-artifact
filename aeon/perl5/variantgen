@@ -1,0 +1,37 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+#use lib $ENV{HOME} . "/mace/perl5";
+
+use File::Basename;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+use Parse::RecDescent;
+
+require Mace::Compiler::VariantGrammar;
+
+# $::RD_HINT = 1;
+
+my $mod = shift(@ARGV);
+
+if($mod eq "VariantRecDescent.pm") {
+    if (! -f $mod) {
+	Parse::RecDescent->Precompile(Mace::Compiler::VariantGrammar::VARIANT(),
+				      "Mace::Compiler::VariantRecDescent");
+	exit(0);
+    }
+
+    mkdir("tmp");
+    chdir("tmp");
+    Parse::RecDescent->Precompile(Mace::Compiler::VariantGrammar::VARIANT(),
+				  "Mace::Compiler::VariantRecDescent");
+    my $out = `diff -q $mod ../$mod`;
+    if ($out) {
+	system("mv $mod ..");
+    }
+    else {
+	unlink($mod);
+    }
+    chdir("..");
+    rmdir("tmp");
+}

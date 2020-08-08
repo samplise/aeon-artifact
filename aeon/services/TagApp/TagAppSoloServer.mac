@@ -1,0 +1,713 @@
+#include "marray.h"
+#include "m_map.h"
+#include "RandomUtil.h"
+#include "mace-macros.h"
+
+service TagAppSoloServer;
+
+provides Null;
+
+ 
+services {
+  Transport t;
+}
+
+constants {
+  uint16_t LOCATION_IN_WORLD = 0;
+  uint16_t LOCATION_IN_HALLWAY = 1;
+  uint16_t LOCATION_IN_ROOM = 2;
+  uint16_t LOCATION_ERROR = 3;
+   
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+
+  uint16_t WORLD_SIZE = 30;
+  uint16_t HALLWAY_SIZE = 10;
+  uint16_t ROOM_SIZE = 10;
+}
+ 
+constructor_parameters {
+  uint32_t N_BUILDINGS = 10;
+  uint32_t N_ROOMS = 10;
+
+  uint32_t N_PLAYERS = 50;
+
+  uint32_t PLAYER_INIT_IN_WORLD_PERCENT = 10;
+  uint32_t PLAYER_INIT_IN_ROOM_PERCENT = 100;
+
+  uint32_t INFO_REQ_PERCENT = 50;
+  uint32_t MOVE_REQ_PERCENT = 100;
+
+  uint64_t OUTPUT_COUNT = 100;
+}
+
+typedefs {
+  typedef mace::map<Coordinate, int> portalMap; 
+}
+
+auto_types {
+  Coordinate __attribute((comparable(equals=default; lessthan=default))) {
+    uint32_t x;
+    uint32_t y;
+  }
+}
+
+
+/*
+ * I use a two dimension array to represent the map.
+ * The initial number on each block is -1 which represent that the block is vacant.
+ * If the number in each block is positive, that means there is a kid with the 
+ * positive number as his kidID is standing on this block.
+ */
+
+state_variables {
+  
+  // This 2D map represent the world map
+  context World {
+    mace::array<mace::array<int, WORLD_SIZE>, WORLD_SIZE> worldMap;
+    mace::set<uint32_t> playersInWorld;
+    // Map the building entrance coordinate to the building number
+    portalMap buildings;
+  }  
+
+  context Building <uint32_t nBuilding> {
+  	uint32_t buildingId;
+    uint32_t hallwayId;
+    mace::map<uint32_t, uint32_t> roomIds;
+
+    uint32_t nextRoomId;
+  }
+    
+  context Room <uint32_t nRoom> {
+		uint32_t buildingId;
+    uint32_t roomId;
+		mace::set<uint32_t> playersInRoom;
+		mace::array<mace::array<int, ROOM_SIZE>, ROOM_SIZE> roomMap;
+  }
+
+  context Hallway<uint32_t nHallway> {
+    uint32_t hallwayId;
+    uint32_t buildingId;
+    mace::array<mace::array<int, HALLWAY_SIZE>, HALLWAY_SIZE> hallwayMap;
+		mace::set<uint32_t> playersInHallway;
+    portalMap doorway;
+  }
+  
+  context Player <uint32_t nPlayer> {
+  	//indicates the ID of a kid
+    uint32_t playerId;
+    
+    int location;
+    
+    uint32_t curBuilding;
+    uint32_t curRoom;
+    uint32_t curHallway;
+    Coordinate coord;
+    
+    uint16_t playerDirection;
+
+    uint64_t infoReqCount;
+    uint64_t moveReqCount;
+    uint64_t reqCount;
+
+    uint64_t curRequestLauchedTime;
+    uint64_t timePeriod;
+  }
+}
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("TagAppSoloServer");
+    maceout << "Start solo tag server!" << Log::endl;
+    async_worldInit();
+
+    for(uint32_t i=0; i<N_PLAYERS; i++) {
+      uint32_t playerId = createNewContext("Player");
+      mace::string playerCtxName = generateContextName("Player", playerId);
+      createNewOwnership("globalContext", playerCtxName);
+      async_playerInit(playerId);
+    }
+  }
+
+  // Initialize a single kid
+  async [Player<nPlayer>] playerInit(uint32_t nPlayer) {
+    ADD_SELECTORS("TagAppSoloServer");
+    ASSERT(nPlayer > 0);
+    
+    sleep(5);
+    maceout << "To initialize Player("<< nPlayer <<")!" << Log::endl;
+
+    playerId = nPlayer;
+    
+    curBuilding = 0;
+    curRoom = 0;
+    curHallway = 0;       
+    coord.x = 0;
+    coord.y = 0;
+
+    infoReqCount = 0;
+    moveReqCount = 0;
+    reqCount = 0;
+
+    timePeriod = 0;
+    
+    uint16_t d = RandomUtil::randInt(5);
+    if( d==0 ) d=1;
+    playerDirection = d;
+
+    /*
+    uint32_t initLocationPercent = RandomUtil::randInt(100);
+    uint32_t initLocation = LOCATION_IN_WORLD;
+    if( initLocationPercent > PLAYER_INIT_IN_WORLD_PERCENT ) {
+      initLocation = LOCATION_IN_ROOM;
+    }
+    */
+
+    uint32_t initLocation = LOCATION_IN_ROOM;
+
+    if( initLocation == LOCATION_IN_WORLD ) {
+      async_putInitPlayerInWorld( nPlayer );
+    } else if( initLocation == LOCATION_IN_ROOM ) {
+    
+      uint32_t nBuilding = RandomUtil::randInt(N_BUILDINGS + 1);
+      if( nBuilding == 0 ) nBuilding ++;
+      /*
+      uint32_t nBuilding = nPlayer % N_BUILDINGS;
+      if( nBuilding == 0 ) nBuilding = N_BUILDINGS;
+      */
+      async_putInitPlayerInRoom(nBuilding, nPlayer);
+    }
+  }
+
+  async [World] worldInit() {
+    ADD_SELECTORS("TagAppSoloServer");
+    maceout << "Initilaize world!" << Log::endl;
+    for (uint32_t i = 0; i < WORLD_SIZE; i++) {
+      for (uint32_t j = 0; j < WORLD_SIZE; j++) {
+        worldMap[i][j] = -1;
+      }
+    }
+
+    // Initialize the building entrance
+    for (uint32_t i = 0; i < N_BUILDINGS; i++) {
+      // Randomly spread the entrance of the room through the map
+      Coordinate coord;
+       
+      while (true) {
+        coord.x = RandomUtil::randInt(WORLD_SIZE);
+        coord.y = RandomUtil::randInt(WORLD_SIZE);
+        if ( (coord.x == 0 && coord.y == 0) || buildings.find(coord) != buildings.end()) {
+          continue;
+        } else {
+          break;
+        }
+      }
+
+      ASSERT(coord.x < WORLD_SIZE && coord.y < WORLD_SIZE);
+      uint32_t buildingId = createNewContext("Building");
+      mace::string buildingCtxName = generateContextName("Building", buildingId);
+      createNewOwnership("World", buildingCtxName);
+      async_buildingInit(buildingId);
+      
+      buildings.put(coord, buildingId);
+
+      maceout << "Building["<< buildingId<<"] coordinate = " << coord << Log::end;
+    }
+  }
+  
+  // Initial a single building
+  async [Building<nBuilding>] buildingInit (int nBuilding) {
+    ADD_SELECTORS("TagAppSoloServer");
+    maceout << "Initialize Building " << nBuilding << Log::endl;
+    ASSERT(nBuilding >= 1);
+    nextRoomId = 0;
+
+
+    buildingId = nBuilding; 
+    mace::string buildingCtxName = generateContextName("Building", buildingId); 
+    portalMap doorway;
+    for (uint32_t rCount = 0; rCount < N_ROOMS; rCount++) {
+      Coordinate coord;
+       
+      while (true) {
+        coord.x = RandomUtil::randInt(HALLWAY_SIZE);
+        coord.y = RandomUtil::randInt(HALLWAY_SIZE);
+        if ( (coord.x == 0 && coord.y == 0) || doorway.find(coord) != doorway.end()) {
+          continue;
+        } else {
+          break;
+        }
+      }
+
+      uint32_t roomId = createNewContext("ROOM");
+      mace::string roomCtxName = generateContextName("Room", roomId);
+      createNewOwnership(buildingCtxName, roomCtxName);
+      doorway[coord] = roomId;
+      roomIds[rCount] = roomId;
+      async_roomInit(roomId, nBuilding);
+      maceout << "Building["<< buildingId<<"]Room["<< roomId <<"] coordinate = " << coord << Log::end;
+    }
+
+    hallwayId = createNewContext("Hallway");
+    mace::string hallwayCtxName = generateContextName("Hallway", hallwayId);
+    createNewOwnership(buildingCtxName, hallwayCtxName);
+    async_hallwayInit(hallwayId, nBuilding, doorway); 
+    maceout << "Building["<< buildingId<<"]Hallway["<< hallwayId <<"]!" << Log::end;
+  }
+
+  // Initial a single room
+  async [Room<nRoom>] roomInit(uint32_t nRoom, uint32_t nBuilding) {
+    ADD_SELECTORS("TagAppSoloServer");
+    maceout << "Initialize Building["<< nBuilding <<"]room["<< nRoom <<"]!" << Log::endl;
+    ASSERT(nBuilding > 0 && nRoom > 0);
+    
+    for (uint32_t i = 0; i < ROOM_SIZE; i++) {
+      for (uint32_t j = 0; j < ROOM_SIZE; j++) {
+        roomMap[i][j] = -1;
+      }
+    }
+    roomId = nRoom;
+    buildingId = nBuilding;
+  }
+
+  async [Hallway<nHallway>] hallwayInit(const uint32_t& nHallway, uint32_t nBuilding, const portalMap& rooms) {
+    ADD_SELECTORS("TagAppSoloServer");
+    maceout << "Initialize Building["<< nBuilding <<"]Hallway["<< nHallway <<"]!" << Log::endl;
+    for (uint32_t i = 0; i < HALLWAY_SIZE; i++) {
+      for (uint32_t j = 0; j < HALLWAY_SIZE; j++)
+        hallwayMap[i][j] = -1;
+    }
+    doorway = rooms;
+    hallwayId = nHallway;
+    buildingId = nBuilding;
+  }
+
+  async [Player<nPlayer>] playerInitReply( const uint32_t& nPlayer, const uint16_t& initLocation, const Coordinate& newCoord, const uint32_t& nBuilding, const uint32_t& nRoom) {
+
+    ADD_SELECTORS("TagAppSoloServer");
+    if( location == LOCATION_ERROR ) {
+      maceout << "Fail to put Player("<< nPlayer <<") in the world!" << Log::endl;
+      return;
+    }
+
+    location = initLocation;
+    coord = newCoord;
+    curBuilding = nBuilding;
+    curRoom = nRoom;
+
+    if( location == LOCATION_IN_WORLD ) {
+      maceout << "Put Player("<< nPlayer <<") in world and coord = " << coord << Log::endl;
+    } else if ( location == LOCATION_IN_ROOM ) {
+      maceout << "Put Player("<< nPlayer <<") in Building["<< curBuilding <<"]Room["<< curRoom <<"] and coord = " << coord << Log::endl;
+    }
+
+    uint16_t p = RandomUtil::randInt(100);
+    curRequestLauchedTime = mace::getmtime();
+    if( p < INFO_REQ_PERCENT) {
+      if( location == LOCATION_IN_WORLD ) {
+        async_retriveWorldInfo(nPlayer);
+      } else if( location == LOCATION_IN_HALLWAY ) {
+        async_retriveHallwayInfo( curHallway, nPlayer );
+      } else if( location == LOCATION_IN_ROOM ) {
+        async_retriveRoomInfo( curRoom, nPlayer );
+      }
+    } else {
+      if (location == LOCATION_IN_WORLD) {
+        async_movePlayerInWorld( nPlayer, coord, playerDirection );
+      } else if (location == LOCATION_IN_HALLWAY) {
+        async_movePlayerInHallway( curHallway, nPlayer, coord, playerDirection );
+      } else {
+        async_movePlayerInRoom( curRoom, nPlayer, coord, playerDirection );
+      }
+    }
+  }
+
+  async [Player<nPlayer>] moveReqReply(uint32_t nPlayer, uint32_t newBuilding,
+      uint32_t newRoom, uint32_t newHallway, Coordinate newCoord, int newLocation) {
+    ADD_SELECTORS("TagAppSoloServer");
+    location  = newLocation; 
+    curBuilding = newBuilding;
+    curRoom = newRoom;
+    curHallway = newHallway;
+    
+    coord.x = newCoord.x;
+    coord.y = newCoord.y;
+
+    reqCount ++;
+    moveReqCount ++ ;
+    timePeriod += mace::getmtime() - curRequestLauchedTime;
+
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg_latency = timePeriod / OUTPUT_COUNT;
+      maceout << "Player("<< nPlayer <<") avg="<< avg_latency <<" reqCount=" << reqCount << " moveReqCount=" << moveReqCount << " infoReqCount=" << infoReqCount << Log::endl;
+      moveReqCount = 0;
+      infoReqCount = 0;
+      timePeriod = 0;
+    }
+
+    uint16_t p = RandomUtil::randInt(100);
+    curRequestLauchedTime = mace::getmtime();
+    if( p < INFO_REQ_PERCENT) {
+      if( location == LOCATION_IN_WORLD ) {
+        async_retriveWorldInfo(nPlayer);
+      } else if( location == LOCATION_IN_HALLWAY ) {
+        async_retriveHallwayInfo( curHallway, nPlayer );
+      } else if( location == LOCATION_IN_ROOM ) {
+        async_retriveRoomInfo( curRoom, nPlayer );
+      }
+    } else {
+      if (location == LOCATION_IN_WORLD) {
+        async_movePlayerInWorld( nPlayer, coord, playerDirection );
+      } else if (location == LOCATION_IN_HALLWAY) {
+        async_movePlayerInHallway( curHallway, nPlayer, coord, playerDirection );
+      } else {
+        async_movePlayerInRoom( curRoom, nPlayer, coord, playerDirection );
+      }
+    }
+  }
+
+  async [Player<nPlayer>] infoReqReply( const uint32_t nPlayer, const uint32_t player_number) {
+    ADD_SELECTORS("TagAppSoloServer");
+    reqCount ++;
+    infoReqCount ++ ;
+    timePeriod += mace::getmtime() - curRequestLauchedTime;
+    
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg_latency = timePeriod / OUTPUT_COUNT;
+      maceout << "Player("<< nPlayer <<") avg="<< avg_latency<<" reqCount=" << reqCount << " moveReqCount=" << moveReqCount << " infoReqCount=" << infoReqCount << Log::endl;
+      moveReqCount = 0;
+      infoReqCount = 0;
+      timePeriod = 0;
+    }
+
+    uint16_t p = RandomUtil::randInt(100);
+    curRequestLauchedTime = mace::getmtime();
+    if( p < INFO_REQ_PERCENT) {
+      if( location == LOCATION_IN_WORLD ) {
+        async_retriveWorldInfo(nPlayer);
+      } else if( location == LOCATION_IN_HALLWAY ) {
+        async_retriveHallwayInfo( curHallway, nPlayer );
+      } else if( location == LOCATION_IN_ROOM ) {
+        async_retriveRoomInfo( curRoom, nPlayer );
+      }
+    } else {
+      if (location == LOCATION_IN_WORLD) {
+        async_movePlayerInWorld( nPlayer, coord, playerDirection );
+      } else if (location == LOCATION_IN_HALLWAY) {
+        async_movePlayerInHallway( curHallway, nPlayer, coord, playerDirection );
+      } else {
+        async_movePlayerInRoom( curRoom, nPlayer, coord, playerDirection );
+      }
+    }
+  }
+
+  async [Hallway<nHallway>] retriveHallwayInfo(const uint32_t nHallway, const uint32_t nPlayer ) {
+    async_infoReqReply( nPlayer, playersInHallway.size() );
+  }
+
+  async [Room<nRoom>] retriveRoomInfo( const uint32_t nRoom, const uint32_t nPlayer) {
+    async_infoReqReply( nPlayer, playersInRoom.size() );
+  }
+
+  async [World] retriveWorldInfo( const uint32_t nPlayer ) {
+    async_infoReqReply( nPlayer, playersInWorld.size() );
+  }
+
+  async [Building<nBuilding>] putInitPlayerInRoom(const uint32_t& nBuilding, const uint32_t& nPlayer) {
+    // uint32_t room_iter = RandomUtil::randInt(N_ROOMS);
+
+    uint32_t room_iter = nextRoomId % N_ROOMS;
+    nextRoomId ++;
+
+    uint32_t room_id = roomIds[room_iter];
+    Coordinate room_coord = movePlayerToRoom(room_id, nPlayer);
+    async_playerInitReply( nPlayer, LOCATION_IN_ROOM, room_coord, nBuilding, room_id);
+  }
+
+  async [World] putInitPlayerInWorld( const uint32_t& nPlayer ) {
+    ADD_SELECTORS("TagAppSoloServer");
+    playersInWorld.insert(nPlayer); 
+    
+    Coordinate coord(0, 0);
+    for (uint32_t i = 0; i < WORLD_SIZE; i++) {
+      for (uint32_t j = 0; j < WORLD_SIZE; j++) {
+        coord.x = i; coord.y = j;
+        if (worldMap[i][j] == -1 && buildings.find(coord) == buildings.end() ) {
+          async_playerInitReply(nPlayer, LOCATION_IN_WORLD, coord, 0, 0);
+          worldMap[i][j] = nPlayer;
+          return;
+        }
+      }
+    }
+
+    async_playerInitReply(nPlayer, LOCATION_ERROR, coord, 0, 0);
+  }
+
+  async [Room<nRoom>] movePlayerInRoom(const uint32_t& nRoom, const uint32_t& playerId, const Coordinate& coord, const uint16_t& direction) {
+    ADD_SELECTORS("TagAppSoloServer");
+    
+    ASSERT(playerId > 0); 
+    Coordinate newCoord;
+    newCoord.x = coord.x;
+    newCoord.y = coord.y;
+    
+    switch (direction) {
+      case DIRECTION_UP:
+        newCoord.y++;
+        break;
+      case DIRECTION_DOWN:
+        newCoord.y--;
+        break;
+      case DIRECTION_LEFT:
+        newCoord.x--;
+        break;
+      case DIRECTION_RIGHT:
+        newCoord.x++;
+        break;
+      default:
+        ABORT("Kid direction invalid!");
+    }
+
+    if( newCoord.x <0 || newCoord.x >= ROOM_SIZE || newCoord.y <0 || newCoord.y >= ROOM_SIZE || roomMap[newCoord.x][newCoord.y]!= -1) {
+      async_changeDirection(playerId);
+    } else {
+      roomMap[newCoord.x][newCoord.y] = playerId;
+      roomMap[coord.x][coord.y] = -1;
+      if( newCoord.x==0 && newCoord.y == 0) {
+        async_movePlayerFromRoomToHallway(buildingId, roomId, playerId, newCoord);
+      } else {
+        async_moveReqReply(playerId, buildingId, roomId, 0, newCoord, LOCATION_IN_ROOM);
+        
+      }
+    }
+  }
+
+  async [Hallway<nHallway>] movePlayerInHallway(const uint32_t& nHallway, const uint32_t& playerId, const Coordinate& coord, const uint16_t& direction) {
+    ADD_SELECTORS("TagAppSoloServer");
+    
+    ASSERT(playerId > 0); 
+    Coordinate newCoord;
+    newCoord.x = coord.x;
+    newCoord.y = coord.y;
+    
+    switch (direction) {
+      case DIRECTION_UP:
+        newCoord.y++;
+        break;
+      case DIRECTION_DOWN:
+        newCoord.y--;
+        break;
+      case DIRECTION_LEFT:
+        newCoord.x--;
+        break;
+      case DIRECTION_RIGHT:
+        newCoord.x++;
+        break;
+      default:
+        ABORT("Kid direction invalid!");
+    }
+
+    if( newCoord.x <0 || newCoord.x >= HALLWAY_SIZE || newCoord.y <0 || newCoord.y >= HALLWAY_SIZE || hallwayMap[newCoord.x][newCoord.y]!= -1) {
+      async_changeDirection(playerId);
+    } else {
+      hallwayMap[newCoord.x][newCoord.y] = playerId;
+      hallwayMap[coord.x][coord.y] = -1;
+      if( newCoord.x==0 && newCoord.y == 0) {
+        async_movePlayerFromBuildingToWorld(buildingId, playerId, newCoord);
+      } else if( doorway.find(newCoord)!=doorway.end() ){
+        async_movePlayerFromHallwayToRoom(buildingId, doorway[newCoord], playerId, newCoord );
+      } else {
+        async_moveReqReply(playerId, buildingId, 0, hallwayId, newCoord, LOCATION_IN_HALLWAY);
+      }
+    }
+  }
+
+  async [World] movePlayerInWorld(const uint32_t& playerId, const Coordinate& coord, const uint16_t& direction) {
+    ADD_SELECTORS("TagAppSoloServer");
+    ASSERT(playerId > 0); 
+    Coordinate newCoord;
+    newCoord.x = coord.x;
+    newCoord.y = coord.y;
+    
+    switch (direction) {
+      case DIRECTION_UP:
+        newCoord.y++;
+        break;
+      case DIRECTION_DOWN:
+        newCoord.y--;
+        break;
+      case DIRECTION_LEFT:
+        newCoord.x--;
+        break;
+      case DIRECTION_RIGHT:
+        newCoord.x++;
+        break;
+      default:
+        ABORT("Kid direction invalid!");
+    }
+
+    if( newCoord.x <0 || newCoord.x >= WORLD_SIZE || newCoord.y <0 || newCoord.y >= WORLD_SIZE || worldMap[newCoord.x][newCoord.y]!= -1) {
+      async_changeDirection(playerId);
+    } else {
+      worldMap[newCoord.x][newCoord.y] = playerId;
+      worldMap[coord.x][coord.y] = -1;
+      if( buildings.find(newCoord)!=buildings.end()) {
+        uint32_t nBuilding = buildings[newCoord];
+        Coordinate b_coord = movePlayerToBuilding(nBuilding, playerId);
+        uint32_t h_id = getHallwayID(nBuilding);
+        
+        //maceout << "Move Player(" << playerId << ") to Building["<< nBuilding <<"]Hallway["<< h_id <<"]. coord = "<< b_coord << Log::endl;
+        playersInWorld.erase(playerId);
+        worldMap[newCoord.x][newCoord.y] = -1;
+
+        async_moveReqReply(playerId, nBuilding, 0, h_id, b_coord, LOCATION_IN_HALLWAY);
+      } else {
+        async_moveReqReply(playerId, 0, 0, 0, newCoord, LOCATION_IN_WORLD);
+      }
+    }
+  }
+
+  async [Player<nPlayer>] changeDirection(const uint32_t& nPlayer) {
+    ADD_SELECTORS("TagAppSoloServer");
+
+    while(true) {
+      uint16_t d = RandomUtil::randInt(5);
+      if( d==0 ) d=1;
+      if( playerDirection!= d ) {
+        playerDirection = d;
+        break;
+      }
+    }
+
+    //maceout << "Change Player("<< nPlayer <<") direction to " << playerDirection << Log::endl;
+
+    if (location == LOCATION_IN_WORLD) {
+      async_movePlayerInWorld( nPlayer, coord, playerDirection );
+    } else if (location == LOCATION_IN_HALLWAY) {
+      async_movePlayerInHallway( curHallway, nPlayer, coord, playerDirection );
+    } else {
+      async_movePlayerInRoom( curRoom, nPlayer, coord, playerDirection );
+    }
+  }
+
+  async [Building<nBuilding>] movePlayerFromRoomToHallway(const uint32_t& nBuilding, const uint32_t& roomId, const uint32_t& playerId, const Coordinate& coord) {
+    ADD_SELECTORS("TagAppSoloServer");
+    //maceout<< "Move Player("<< playerId <<") from Room["<< roomId <<"] to Hallway["<< hallwayId <<"] in Building["<< nBuilding <<"]!" << Log::endl;
+    movePlayerFromRoom(roomId, playerId, coord);
+    Coordinate h_coord = movePlayerToHallway(hallwayId, playerId);
+    async_moveReqReply(playerId, nBuilding, 0, hallwayId, h_coord, LOCATION_IN_HALLWAY);
+  }
+
+  async [World] movePlayerFromBuildingToWorld(const uint32_t& nBuilding, const uint32_t& playerId, const Coordinate& h_coord) {
+    
+    ADD_SELECTORS("TagAppSoloServer");
+    //maceout<< "Move Player("<< playerId <<") from Building["<< nBuilding <<"] to World!" << Log::endl;
+    
+    Coordinate new_coord;
+    movePlayerFromBuilding(nBuilding, playerId, h_coord);
+     
+    for (uint32_t i = 0; i < WORLD_SIZE; i++) {
+      for (uint32_t j = 0; j < WORLD_SIZE; j++) {
+        new_coord.x = i; new_coord.y = j;
+        if (worldMap[i][j] == -1 ) {
+          new_coord.x = i; new_coord.y = j;
+
+          async_moveReqReply(playerId, 0, 0, 0, new_coord, LOCATION_IN_WORLD);
+          playersInWorld.insert(playerId);
+          worldMap[i][j] = playerId;
+          return;
+          
+        }
+      }
+    }
+    maceout<< "Fail to move Player("<< playerId <<") from Building["<< nBuilding <<"] to World!" << Log::endl;
+    return;
+  }
+
+  async [Building<nBuilding>] movePlayerFromHallwayToRoom(const uint32_t& nBuilding, const uint32_t& roomId, const uint32_t& playerId, const Coordinate& coord) {
+
+    ADD_SELECTORS("TagAppSoloServer");
+    //maceout<< "Move Player("<< playerId <<") from Hallway["<< hallwayId <<"] to Room["<< roomId <<"] in Building["<< nBuilding <<"]!" << Log::endl;
+    
+    movePlayerFromHallway(hallwayId, playerId, coord);
+    Coordinate r_coord = movePlayerToRoom(roomId, playerId);
+    async_moveReqReply(playerId, nBuilding, roomId, 0, r_coord, LOCATION_IN_ROOM);
+    
+  }
+}
+
+routines {
+  [Hallway<nHallway>] Coordinate movePlayerToHallway(const uint32_t& nHallway, const uint32_t& playerId ) {
+    ADD_SELECTORS("TagAppSoloServer");
+    //maceout << "Move Player("<< playerId <<") to Hallway("<< nHallway <<")!" << Log::endl;
+    Coordinate cd;
+
+    for (int i = HALLWAY_SIZE-1 ; i >= 0; i--) {
+      for (int j = HALLWAY_SIZE-1; j >= 0; j--) {
+        ASSERT( i>=0 && i<HALLWAY_SIZE && j>=0 && j<HALLWAY_SIZE );
+        cd.x = i; cd.y = j;
+        if (hallwayMap[i][j] == -1 ) {
+          hallwayMap[i][j] = playerId;
+          playersInHallway.insert(playerId);
+          //maceout << "Done Move Player("<< playerId <<") to Hallway("<< nHallway <<")!" << Log::endl;
+          return cd;
+        }
+      }
+    }
+    maceout << "Fail to move Player("<< playerId <<") to Hallway("<< nHallway <<")!" << Log::endl;
+    return cd;
+  }
+
+  [Hallway<nHallway>] void movePlayerFromHallway(const uint32_t& nHallway, const uint32_t& playerId, const Coordinate& coord ) {
+    ASSERT( hallwayMap[coord.x][coord.y] == (int)playerId);
+    hallwayMap[coord.x][coord.y] = -1;
+    playersInHallway.erase(playerId);
+  }
+
+  [Room<nRoom>] Coordinate movePlayerToRoom(const uint32_t& nRoom, const uint32_t& playerId ) {
+    ADD_SELECTORS("TagAppSoloServer");
+    //maceout << "Move Player("<< playerId <<") to Room("<< nRoom <<")!" << Log::endl;
+    Coordinate cd;
+
+    for (int i = ROOM_SIZE-1; i >= 0; i--) {
+      for (int j = ROOM_SIZE-1; j >= 0; j--) {
+        ASSERT( i>=0 && i<ROOM_SIZE && j>=0 && j<ROOM_SIZE );
+        cd.x = i; cd.y = j;
+        if (roomMap[i][j] == -1 ) {
+          roomMap[i][j] = playerId;
+          playersInRoom.insert(playerId);
+          //maceout << "Done Move Player("<< playerId <<") to Room("<< nRoom <<")!" << Log::endl;
+          return cd;
+        }
+      }
+    }
+    maceout << "Fail to move Player("<< playerId <<") to Room("<< nRoom <<")!" << Log::endl;
+    return cd;
+  }
+
+  [Room<nRoom>] void movePlayerFromRoom(const uint32_t& nRoom, const uint32_t& playerId, const Coordinate& coord ) {
+    ASSERT( roomMap[coord.x][coord.y] == (int)playerId);
+    roomMap[coord.x][coord.y] = -1;
+    playersInRoom.erase(playerId);
+  }
+
+  [Building<nBuilding>] Coordinate movePlayerToBuilding(const uint32_t& nBuilding, const uint32_t& playerId) {
+    return movePlayerToHallway(hallwayId, playerId);
+  }
+
+  [Building<nBuilding>] void movePlayerFromBuilding(const uint32_t& nBuilding, const uint32_t& playerId, const Coordinate& coord) {
+    return movePlayerFromHallway(hallwayId, playerId, coord );
+  }
+
+  [Building<nBuilding>] uint16_t getHallwayID(const uint32_t& nBuilding) {
+    return hallwayId;
+  }
+
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}

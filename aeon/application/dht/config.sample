@@ -1,0 +1,11 @@
+# to invoke the daemon, start the first one with:
+# ./dhtd config
+# then subsequent nodes need different listen and mace ports:
+# ./dhtd config -MACE_PORT 9010 -listen 6667
+
+
+listen = 6666
+MACE_ADDRESS_ALLOW_LOOPBACK = 1
+MACE_LOCAL_ADDRESS = localhost
+MACE_PORT = 9000
+MACE_AUTO_BOOTSTRAP_PEERS = localhost:9000

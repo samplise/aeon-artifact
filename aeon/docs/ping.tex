@@ -1,0 +1,184 @@
+% 
+% ping.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\section{Ping Revisited}
+\label{sec:ping}
+
+In this section, we revisit our Ping service, expanding it to make it
+considerably more flexible and to demonstrate more aspects of Mace.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Full Ping
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Revised Ping Implementation}
+\label{sec:ping-implementation}
+
+We are going to revise our Ping service to incorporate the following
+changes:
+
+\begin{enumerate}
+
+\item Use UDP packets for sending messages, since the reliable
+  byte-stream interface of TCP is unnecessary.
+
+\item Use a run-time configurable ping interval and timeout.
+
+\item Provide the ability to ping multiple hosts simultaneously.
+
+\item Ping monitored hosts indefinitely (as opposed to sending a
+  single message).
+
+\item Support multiple registered handlers.
+
+\end{enumerate}
+
+The implementation for our revised service
+\filename{services/Ping/Ping.mac} follows:
+
+\lgrindfile{Ping.mac}
+
+We discuss the details of the new implementation in
+\S~\ref{sec:pingdetail}.  Next, we will present the revised Ping
+application and usage.
+
+Since we've added a new file, we need to tell CMake to rescan the files,
+bu running \command{make rebuild\_cache} (in the \directory{builds}
+directory).  Then, compile your updated Ping service by running
+\command{make Ping} in the \directory{builds} directory.
+
+\subsection{Revised Ping Application}
+\label{sec:ping-application}
+
+We now present our revised ping application \filename{applications/ping/ping.cc} implementation:
+
+\lgrindfile{ping.cc}
+
+We have changed the implementation as follows:
+
+\begin{enumerate}
+
+\item Define \classname{PingLatencyHandler}, which reports the one-way
+  latency for successful ping messages.
+
+\item Remove calls to \function{exit()} in
+  \classname{PingResponseHandler}.
+
+\item In \function{main()}, instantiate a
+  \classname{PingLatencyHandler}.
+
+\item We now pass the values for \variablename{PING\_INTERVAL} and
+  \variablename{PING\_TIMEOUT} as constructor parameters when we
+  instantiate the Ping service object, overriding the defaults.
+
+\item We register both handles with our Ping service instance using
+  \function{registerHandler}, instead of
+  \function{registerUniqueHandler}, and we assign the resulting
+  registration uids to variables.
+
+\item We loop over the command line arguments, and call
+  \function{monitor}---once for each handler---with each host listed
+  on the command line.
+
+\end{enumerate}
+
+
+The program takes zero or more hosts as command line arguments,
+specified as either host names or IP addresses in the standard
+numbers-and-dots notation.  If any hosts are specified, we have our
+Ping service to monitor them.  If no hosts are specified, then the
+program will simply respond to ping requests from other hosts.
+
+To compile \filename{ping.cc}, add \literal{ping} to the list of
+applications specified by \variablename{APPS}, and \literal{Ping} to the
+list of services in the \variablename{SERVICES} variable in
+\filename{applications/ping/CMakeLists.txt} (all directly referenced
+services should be listed in that variable):
+
+\verbatiminput{CMakeLists.txt.ping}
+
+You can then run make in the builds directory to build the new
+executable \filename{ping}.
+
+Now try running the revised \command{ping} application.  Try passing
+it multiple hosts on the command line.  Begin monitoring a host; then
+kill the \command{ping} process, wait a few seconds, and restart it on
+the monitored host; watch the output on the monitoring host.
+
+%% \subsection{Running Revised Ping}
+%% \label{sec:running-ping}
+
+%% Copy the \filename{ping} executable to another machine.  Assuming your
+%% two machines are named \replaceable{alexander} and \replaceable{philip}, run the
+%% following commands.
+
+%% \noindent
+%% On \replaceable{philip}:
+
+%% \begin{screen}
+%% \command{philip$ ./ping}
+%% \end{screen}
+%% %$
+
+%% \noindent
+%% On \replaceable{alexander}:
+
+%% \begin{screen}
+%% \command{alexander$ ./ping philip
+%% }
+%% IPV4/philip(192.168.0.2) responded in 119001 usec
+%% IPV4/philip(192.168.0.2) responded in 331 usec
+%% IPV4/philip(192.168.0.2) responded in 344 usec
+%% ...
+%% \end{screen}
+%% %$
+
+%% \noindent
+%% Now kill the ping process on \replaceable{philip}.  Then
+%% \replaceable{alexander} will report:
+
+%% \small
+%% \begin{screen}
+%% ...
+%% IPV4/philip(192.168.0.2) responded in 344 usec
+%% did not receive response from IPV4/philip(192.168.0.2) pinged at Mon May  9 22:03:04 2005
+%% did not receive response from IPV4/philip(192.168.0.2) pinged at Mon May  9 22:03:06 2005
+%% did not receive response from IPV4/philip(192.168.0.2) pinged at Mon May  9 22:03:08 2005
+%% ...
+%% \end{screen}
+%% \normalsize
+
+%% Restarting ping on \replaceable{philip} will cause \replaceable{alexander} to
+%% resume reporting the latency.  You can further experiment with ping by
+%% having \replaceable{philip} and \replaceable{alexander} ping each other at the
+%% same time, and by pinging multiple hosts at the same time (i.e.:
+%% \command{\$~./ping~philip~illyria~thrace}).
+

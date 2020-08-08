@@ -1,0 +1,4 @@
+handler ServCompUpcall {
+  virtual void respond( uint32_t param );
+  virtual uint32_t ask( uint32_t param );
+}; // ServCompUpcall

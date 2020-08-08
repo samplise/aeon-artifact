@@ -1,0 +1,240 @@
+/* 
+ * BrokenTree.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Meg Walraed-Sullivan, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "lib/NodeCollection.h"
+#include "lib/Iterator.h"
+using mace::NodeCollection;
+
+service BrokenTree;
+
+provides Tree, Overlay;
+
+trace=med;
+
+constructor_parameters {
+  MaceKey root = MaceKey(ipv4, params::get<std::string>("root"));
+  int num_nodes = 3;
+}
+
+constants {       //The set of [global]  constants available to the protocol.
+  int MAX_CHILDREN = 12;
+
+  uint64_t REORG_INTERVAL = 5*1000*1000;
+  uint64_t DEBUG_INTERVAL = 4*1000*1000;
+}
+
+services {
+  Route control_ = auto(shared, [], [RouteTransportWrapper]); 
+}
+
+states {          //A semi-colon separated list of protocol state names.
+  joining;
+  joined;
+}
+
+auto_types {
+  child __attribute((node())) { }
+}
+
+typedefs {
+  typedef NodeCollection<child, MAX_CHILDREN> children;
+}
+
+state_variables {    
+  MaceKey papa;  
+  children kids;
+  timer printer __attribute((recur(DEBUG_INTERVAL)));
+  timer reorg __attribute((recur(REORG_INTERVAL;)));
+  MaceKey me; 
+  int nodesHeard;
+  //   MaceKey root; //Constructor Parameter
+}     
+
+messages {
+  Join { }
+  JoinReply { }
+  Remove { }
+  ReOrg { 
+    MaceKey gramps;
+    children brothers;
+  }
+}
+
+transitions {
+  downcall (state == init) maceInit() {
+      me = localAddress();
+      maceout << "me " << me << " root " << root << Log::endl;
+      if(root == me) { 
+        state_change(joined);
+        nodesHeard++;
+        //CK:TEMP only reorg at root
+        //         reorg.reschedule(REORG_INTERVAL);
+        papa = me;
+      } else {
+        state_change(joining);
+        downcall_route(root, Join());
+        papa = MaceKey::null;
+      }
+      //       reorg.reschedule(REORG_INTERVAL);
+      //       printer.reschedule(DEBUG_INTERVAL);
+      kids = children();
+  }
+
+  scheduler (state == joining && root != me) reorg() {
+    // Timer fired, retry join
+    //Update currentJoinParent and send new Join
+    downcall_route(root, Join());  
+  }
+
+  // Note: trigger this traesition when a message is received of type
+  // join and we are in the joined state.
+  upcall (state == joined && nexthop == me) forward(const MaceKey& source, const MaceKey& destination, MaceKey& nexthop, const Join& msg) {
+    //NOTE: Under this strategy, only the node which has space will verify this node.
+    if ( !kids.contains(source) && kids.space() ) { // built-in neighbor fns.
+      if( root == me ) {
+        nodesHeard++;
+        if(nodesHeard == num_nodes) {
+          reorg.reschedule(100 MSEC_IN_MICROS); // Fire timer to begin re-join
+        }
+      }
+      maceout << "accepted child " << source << Log::endl;
+      kids.add(source);
+      bool sendret = downcall_route(source, JoinReply());
+      maceout << "route_JoinReply to: " << source << " route status(" << sendret << ")" << Log::endl;
+      return false; //Accepted child, don't forward Join
+    }
+    else if ( kids.contains(source) ) {
+      macewarn << "child " << source << " was already a child" << Log::endl;
+      return false; //Previously accepted child, don't forward Join
+    }
+    else {   // choose random child to redirect join
+      child redir = (kids.random());
+      nexthop = redir.getId();
+      return true; //Didn't accept child -- forward to new node
+    }
+  }
+
+  upcall (state == joining) deliver(const MaceKey& source, const MaceKey& destination, const JoinReply& msg) {
+    // The join reached a destination
+    maceout << "JoinReply from: " << source << Log::endl;
+    if (!papa.isNullAddress() && papa != source) {
+      maceout << "removing myself from previous parent " << papa << Log::endl;
+      downcall_route(papa, Remove());  // remove yourself from the old parent
+    }
+    papa = source;
+    reorg.cancel();
+    state_change(joined);
+  }
+
+  upcall (state == joined) deliver(const MaceKey& source, const MaceKey& destination, const JoinReply& msg) {
+    maceout << "JoinReply from: " << source << Log::endl;
+    if(source != papa && !papa.isNullAddress()) {
+      maceout << "removing myself from previous parent " << papa << Log::endl;
+      downcall_route(papa, Remove());
+    }
+    papa = source;
+  }
+
+  upcall (state == joined) deliver(const MaceKey& source, const MaceKey& destination, const Remove& msg) { 
+    // Child is requesting to be removed
+    if (kids.contains(source)) {  // Only remove it if he is my child
+      maceout << "request to be removed from: " << source << Log::endl;
+      kids.erase(source);
+    }
+  }
+
+  upcall error(const MaceKey& nodeId, TransportError::type error_code, const std::string& m, registration_uid_t h) { /* NetworkErrorHandler::error */
+    macewarn << "Neighbor " << nodeId << " transport error " << error_code << " on service " << h << Log::endl;
+    if (papa == nodeId) {  // Is it my parent?
+      macewarn << "Parent " << nodeId << " transport error!" << Log::endl;
+      papa = MaceKey();
+      state_change(joining);  // Retry joining at the root
+      reorg.reschedule(100 MSEC_IN_MICROS); // Fire timer to begin re-join
+    }
+    else if(kids.contains(nodeId)) {  // Is it my child
+      maceout << "Child " << nodeId << " error_code " << error_code << Log::endl;
+      kids.erase(nodeId);
+    }
+    return;
+  }
+
+  scheduler printer() {
+    maceout << "state: " << getStateName(state) << Log::endl;
+    maceout << "parent: " << papa << Log::endl;
+    maceout << "kids: " << kids << Log::endl;
+  }
+
+  scheduler (state == joined && root == me) reorg() {
+    MaceKey kid;
+    for(children::map_iterator i = kids.mapIterator(); i.hasNext(); ) {
+      i.next(kid);
+      downcall_route(kid, ReOrg(papa, kids));
+    }
+  }
+
+  upcall (state == joined && source == papa) deliver(const MaceKey& source, const MaceKey& dest, const ReOrg& msg) {
+    MaceKey kid;
+    for(children::map_iterator i = kids.mapIterator(); i.hasNext(); ) {
+      i.next(kid);
+      downcall_route(kid, ReOrg(papa, kids));
+    }
+    if(RandomUtil::randInt(5) < 2) { //XXX: For the simulator -- someone could reason this is a 1 of 2, not 2 of 5!
+      children siblings = msg.brothers;
+      if(!msg.gramps.isNullAddress()) { siblings.add(msg.gramps); }
+      siblings.erase(me);
+      if(!siblings.empty()) {
+        child toJoin = siblings.random();
+        downcall_route(toJoin.getId(), Join());
+      }
+    }
+  }
+
+  upcall (true /*i.e. else*/) deliver(const MaceKey& source, const MaceKey& dest, const ReOrg& msg) {
+    macewarn << "Received erroneous reorg message; ignoring." << Log::endl;
+  }
+
+downcall getParent(const MaceKey& gid) {
+  return papa;
+}
+downcall getChildren(const MaceKey& gid) {
+  return kids.nodeSet();
+}
+downcall isRoot(const MaceKey& gid) {
+  return papa == me;
+}
+downcall getOverlayJoinStatus() {
+  switch(state) {
+    case joining: return JOINING;
+    case joined: return JOINED;
+    default: return NONE;
+  }
+}
+
+}

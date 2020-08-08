@@ -1,0 +1,280 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service TagItemShareAppClient;
+ 
+provides Null;
+
+
+services {
+  Transport t;
+}
+ 
+constants {
+  uint8_t ITEM_ACCESS_REQUEST = 0;
+  uint8_t ITEM_CHANGE_REQUEST = 1;
+  uint8_t MOVE_IN_BUILDING_REQUEST = 2;
+}
+ 
+constructor_parameters {
+  uint32_t N_CLIENTS = 1;
+	NodeSet TagServer = NodeSet();
+
+  uint32_t ITEM_ACCESS_REQ_PERCENT = 100;
+  uint32_t ITEM_CHANGE_REQ_PERCENT = 100;
+  uint32_t MOVE_IN_BUILDING_REQ_PERCENT = 100;
+
+  uint32_t WAITING_TIME_PERIOD = 3;
+
+  uint64_t OUTPUT_COUNT = 100;
+  uint32_t CONTROLLER_CHECK_TIME = 2;
+  uint32_t RESTART_PERIOD = 1000000;
+
+  uint32_t TO_SHARE_ITEM = 0;
+}
+
+#minclude "TagItemShareAppMessages.mi"
+
+state_variables {
+  context Client <uint32_t clientId> {
+    uint32_t clientId;
+    uint32_t playerId;
+    MaceKey serverAddr;
+    uint32_t roomId;
+    uint32_t buildingId;
+
+    uint64_t lastRequestTime;
+    uint8_t lastRequestType;
+    
+    uint64_t reqCount;
+    uint64_t requestTimePeriod;
+    
+    uint64_t itemAccessReqCount;
+    uint64_t itemAccessReqTimePeriod;
+
+    uint64_t itemChangeReqCount;
+    uint64_t itemChangeReqTimePeriod;
+
+    uint64_t moveInBuildingReqCount;
+    uint64_t moveInBuildingReqTimePeriod;
+  }
+
+  context Controller {
+    mace::set<uint32_t> clientIds;
+  }
+}
+ 
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("TagItemShareAppClient");
+    maceout << "Start TagItemShareAppClient!" << Log::endl;
+    ASSERT( TagServer.size() == 1 );
+    for( uint32_t i=0; i<N_CLIENTS; i++) {
+      uint32_t clientId = createNewContext("Client");
+      mace::string clientCtxName = generateContextName("Client", clientId);
+      createNewOwnership("globalContext", clientCtxName);
+      async_initClient(clientId);
+    }
+
+    /*
+    createNewOwnership("globalContext", "Controller");
+    async_initController();
+    maceout << "maceInit done!" << Log::endl;
+    */
+  }
+
+  async [Controller] initController() {
+    ADD_SELECTORS("TagItemShareAppClient");
+    maceout << "To initialize Controller!" << Log::endl;
+    clientIds.clear();
+  }
+
+  async [Controller] clientIsReady( const uint32_t& cId ){
+    ADD_SELECTORS("TagItemShareAppClient");
+    if( clientIds.count(cId) == 0 ){
+      clientIds.insert( cId );
+
+      if( clientIds.size() == N_CLIENTS ){
+        maceout << "All clients are ready!!" << Log::endl;
+        sleep(WAITING_TIME_PERIOD);
+
+        for( mace::set<uint32_t>::iterator iter=clientIds.begin(); iter!=clientIds.end(); iter++ ){
+          async_launchRequest(*iter);
+        }
+      }
+    }
+  }
+
+/*
+  async [Controller] startController() {
+    ADD_SELECTORS("TagItemShareAppClient");
+    maceout << "To start Controller!" << Log::endl;
+    sleep(10);
+    async_checkClients();
+  }
+
+  async [Controller] checkClients() {
+    sleep(CONTROLLER_CHECK_TIME);
+
+    for( uint32_t i=1; i<=N_CLIENTS; i++ ){
+      async_checkClient(i);
+    }
+    async_checkClients();
+  }
+
+  async [Client<nClient>] checkClient(const uint32_t& nClient) {
+    ADD_SELECTORS("TagItemShareAppClient");
+
+    uint64_t period = mace::getmtime()-lastRequestTime;
+    if( period > RESTART_PERIOD ){
+      maceout << "To restart Client " << nClient << Log::endl;
+      lastRequestTime = mace::getmtime();
+      uint16_t p = RandomUtil::randInt(100);
+      if( p < MOVE_REQ_PERCENT) {
+        moveReqCount ++;
+        downcall_route(serverAddr, MoveRequest(clientId, playerId, currRoomId) );
+      } else {
+        itemReqCount ++;
+        // downcall_route(serverAddr, ItemRequest(clientId, playerId) );
+      } 
+    } 
+  }
+*/
+  async [Client<nClient>] initClient(const uint32_t& nClient) {
+    ADD_SELECTORS("TagItemShareAppClient");
+    maceout << "To initialize Client("<< nClient <<")!" << Log::endl;
+
+    clientId = nClient;
+    playerId = 0;
+    roomId = 0;
+    buildingId = 0;
+
+    reqCount = 0;
+    requestTimePeriod = 0;
+    
+    itemAccessReqCount = 0;
+    itemAccessReqTimePeriod = 0;
+    
+    itemChangeReqCount = 0;
+    itemChangeReqTimePeriod = 0;
+
+    moveInBuildingReqCount = 0;
+    moveInBuildingReqTimePeriod = 0;
+
+    downcall_route( *( TagServer.begin() ), ConnectionRequest(clientId) );
+  }
+
+  async [Client<nClient>] launchRequest( const uint32_t& nClient ){
+    ADD_SELECTORS("TagItemShareAppClient");
+
+    // maceout << "Client("<< clientId <<") send request["<< reqCount <<"]!" << Log::endl;
+    lastRequestTime = mace::getmtime();
+    uint16_t p = RandomUtil::randInt(100);
+    if( p < ITEM_ACCESS_REQ_PERCENT ) {
+      lastRequestType = ITEM_ACCESS_REQUEST;
+      itemAccessReqCount ++;
+      downcall_route(serverAddr, ItemAccessRequest(clientId, playerId, reqCount) );
+    } else if( p < ITEM_CHANGE_REQ_PERCENT ) {
+      lastRequestType = ITEM_CHANGE_REQUEST;
+      itemChangeReqCount ++;
+      downcall_route(serverAddr, ItemChangeRequest(clientId, playerId, roomId, reqCount) );
+    } else {
+      lastRequestType = MOVE_IN_BUILDING_REQUEST;
+      moveInBuildingReqCount ++;
+      downcall_route(serverAddr, MoveInBuildingRequest(clientId, playerId, buildingId, roomId, reqCount) );
+    }
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("TagItemShareAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+    sleep(3);
+    downcall_route(serverAddr, PlayerInitRequest(clientId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const PlayerInitReply& msg) {
+    ADD_SELECTORS("TagItemShareAppClient");
+    maceout << "Client("<< clientId <<") get player("<< msg.playerId<<")!" << Log::endl;
+    playerId = msg.playerId;
+    buildingId = msg.buildingId;
+    roomId = msg.roomId;
+    sleep(3);
+    async_launchRequest(msg.clientId);
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const RequestReply& msg) {
+    ADD_SELECTORS("TagItemShareAppClient");
+    
+    reqCount ++;
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    requestTimePeriod += latency;
+
+    if( lastRequestType == MOVE_IN_BUILDING_REQUEST ){
+      roomId = msg.roomId;
+      moveInBuildingReqTimePeriod += latency;
+    } else if( lastRequestType == ITEM_ACCESS_REQUEST ){
+      itemAccessReqTimePeriod += latency;
+    } else if( lastRequestType == ITEM_CHANGE_REQUEST ){
+      itemChangeReqTimePeriod += latency;
+    } else {
+      ASSERT(false);
+    }
+
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg = requestTimePeriod / OUTPUT_COUNT;
+
+      double itemAccessReqAvgLatency = 0;
+      if( itemAccessReqCount > 0 ) {
+        itemAccessReqAvgLatency = itemAccessReqTimePeriod / itemAccessReqCount;
+      }
+
+      double itemChangeReqAvgLatency = 0;
+      if( itemChangeReqCount > 0 ) {
+        itemChangeReqAvgLatency = itemChangeReqTimePeriod / itemChangeReqCount;
+      }
+
+      double moveInBuildingReqAvgLatency = 0;
+      if( moveInBuildingReqCount > 0 ) {
+        moveInBuildingReqAvgLatency = moveInBuildingReqTimePeriod / moveInBuildingReqCount;
+      }
+      
+      maceout<< "Client("<< clientId<<") avg="<< avg << " reqCount="<< reqCount 
+                                    << " itemAccessReqCount="<< itemAccessReqCount << " itemAccessReqAvgLatency="<< itemAccessReqAvgLatency
+                                    << " itemChangeReqCount="<< itemChangeReqCount << " itemChangeReqAvgLatency="<< itemChangeReqAvgLatency
+                                    << " moveInBuildingReqCount="<< moveInBuildingReqCount 
+                                    << " moveInBuildingReqAvgLatency="<< moveInBuildingReqAvgLatency
+                                    << Log::endl;
+      
+      reqCount = 0;
+      requestTimePeriod = 0;
+    
+      itemAccessReqCount = 0;
+      itemAccessReqTimePeriod = 0;
+    
+      itemChangeReqCount = 0;
+      itemChangeReqTimePeriod = 0;
+
+      moveInBuildingReqCount = 0;
+      moveInBuildingReqTimePeriod = 0;
+    }
+
+    async_launchRequest( clientId );
+  }
+
+  
+
+}
+
+routines {
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}

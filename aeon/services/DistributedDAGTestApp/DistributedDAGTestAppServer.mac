@@ -1,0 +1,104 @@
+#include "marray.h"
+#include "m_map.h"
+#include "RandomUtil.h"
+#include "mace-macros.h"
+
+service DistributedDAGTestAppServer;
+
+provides Null;
+
+ 
+services {
+  Transport t;
+}
+
+constants {
+  
+}
+ 
+constructor_parameters {
+  
+}
+
+typedefs {
+  
+}
+
+auto_types {
+  
+}
+
+#minclude "DistributedDAGTestAppMessages.mi"
+
+state_variables {
+  context Node <uint32_t nId> {
+  	mace::vector<uint32_t> children;
+  }
+}
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("DistributedDAGTestAppServer");
+    maceout << "Start DistributedDAGTestAppServer!" << Log::endl;
+    uint32_t nId = 1;
+    mace::string node_ctx_name = Util::generateContextName("Node", nId);
+    addNewContextName(node_ctx_name);
+    createNewOwnership("globalContext", node_ctx_name);
+  }
+
+  upcall [Node<msg.nodeId>] deliver(const MaceKey& src, const MaceKey& dest, const AddOwnershipRequest& msg) {
+    async_addNewOwnership(  msg.nodeId, msg.targetNodeId, msg.isNewNode, msg.clientId, src );
+  }
+
+  async [Node<nodeId>] addNewOwnership( const uint32_t& nodeId, const uint32_t& targetNodeId, const bool& isNewNode, const uint32_t clientId,
+      const  MaceKey& src )  [ locking=ownership ] {
+    ADD_SELECTORS("DistributedDAGTestAppServer");
+    maceout << "To create ownership between Node("<< nodeId <<") and Node("<< targetNodeId <<")!" << Log::endl;
+
+    mace::string my_ctx_name = Util::generateContextName("Node", nodeId);
+    mace::string target_ctx_name = Util::generateContextName("Node", targetNodeId);
+    if( isNewNode ) {
+      addNewContextName(target_ctx_name);
+    }
+
+    createNewOwnership(my_ctx_name, target_ctx_name);
+    children.push_back(targetNodeId);
+    downcall_route( src, RequestReply(clientId) );
+  }
+
+  upcall [Node<msg.nodeId>] deliver(const MaceKey& src, const MaceKey& dest, const AddOwnershipRequest2& msg) {
+    async_addNewOwnership2(  msg.nodeId, msg.clientId, src );
+  }
+
+  async [Node<nodeId>] addNewOwnership2( const uint32_t& nodeId, const uint32_t clientId, const  MaceKey& src )  [ locking=ownership ] {
+    ADD_SELECTORS("DistributedDAGTestAppServer");
+    lockNode(2, 6);
+
+    addNewChildContext(3, 5, 6);
+    downcall_route( src, RequestReply(clientId) );
+  }
+
+}
+
+routines {
+  [Node<nNode>] void lockNode( const uint32_t& nNode, const uint32_t& tNode ){
+    if( nNode == tNode ){
+      return;
+    }
+    ASSERT( children.size() == 1 );
+    lockNode( children[0], tNode );
+  }
+
+  [Node<nNode>] void addNewChildContext(const uint32_t& nNode, const uint32_t& pNode, const uint32_t& cNode ) {
+    if( nNode == pNode ){
+      mace::string my_ctx_name = Util::generateContextName("Node", pNode);
+      mace::string target_ctx_name = Util::generateContextName("Node", cNode);
+      
+      createNewOwnership(my_ctx_name, target_ctx_name);
+      children.push_back(cNode);
+    } else {
+      ASSERT( children.size() == 1 );
+      addNewChildContext( children[0], pNode, cNode);
+    }
+  }
+}

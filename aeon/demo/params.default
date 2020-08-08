@@ -1,0 +1,34 @@
+run_time = 0
+#MACE_LOG_LEVEL = 1
+#MACE_LOG_AUTO_ALL = 1
+MACE_LOG_AUTO_SELECTORS = GameApp
+
+#MACE_ADDRESS_ALLOW_LOOPBACK = 1
+
+NUM_ASYNC_THREADS = 4
+MAX_ASYNC_THREADS = 8
+
+MAX_TRANSPORT_THREADS = 8
+
+MIN_CONTEXT_THREADS = 4
+MAX_CONTEXT_THREADS = 8
+
+MACE_PORT = 6501
+
+service = GameApp
+
+mapping = 0:Root
+
+ownership = globalContext:Root
+
+lib.ContextJobApplication.nodeset = IPV4/172.17.0.2:6501
+nodeset = 172.17.0.2:6501
+lib.ContextJobApplication.nodeset = IPV4/172.17.0.3:6501
+nodeset = 172.17.0.3:6501
+
+NUM_EXTERNAL_COMMUNICATION_CONTEXT = 4
+
+mapping = 0:Client[1]
+mapping = 1:Client[2]
+mapping = 0:Client[3]
+mapping = 1:Client[4]

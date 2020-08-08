@@ -1,0 +1,613 @@
+#include "mset.h"
+#include "marray.h"
+
+service MaceTagckcomments;
+ 
+provides MaceTag;
+
+// CK: suggest logging:
+trace=med;
+ 
+services {
+  //CK: Curiosity -- why abandon the auto notation in favor of the TcpTransport?
+  //Transport t::9000 = auto(shared,[reliable,inorder],[]);
+  Transport tcp::9000 = TcpTransport();
+}
+ 
+constants {
+  //the maximum time that a child can stay in the same spot
+  uint64_t MOVEMENT_PERIOD = 1000 * 1000;
+  //the maximum size that a room can have
+  uint16_t MAXIMUMSIZE = 20;
+
+  //CK: I have moved nRoom, nBuildling, and nKid here instead of ad-hoc in the maceInit transition.
+  //Alternately, you could make them part of the constructor_parameters block
+  //if you want to set it at runtime.
+  int NBUILDING = 5;
+  int NROOM = 6;
+  int NKID = 10; // <-- This really shouldn't be in the code at all -- we should be working with remote client players.
+
+  //CK for code readibility - these would go away if you use a boolean instead
+  //so the code is readable.
+  int LOCATION_IN_ROOM = 0;
+  int LOCATION_IN_AISLE = 1;
+
+  //CK for code readability
+  int ROLE_NOTIT = 0;
+  int ROLE_IT = 1;
+
+  //CK for code readability
+  uint16_t DIRECTION_STATIONARY = 0;
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+
+  //CK hard coded numbers in the .mac file are prone to problems.
+  uint16_t DEFAULT_ROOM_LENGTH = 10;
+  uint16_t DEFAULT_ROOM_WIDTH = 10;
+}
+ 
+states {
+  //after all the contexts have been initialized, the state change to ready
+  ready;
+}
+ 
+#minclude "MaceTagMessage.mi"
+
+typedefs {
+  typedef mace::map<uint16_t, Building> BuildingContainer;
+  typedef mace::map<uint16_t, Room> RoomContainer;
+  typedef mace::map<uint16_t, Kid> KidContainer;
+}
+
+auto_types {
+
+  //CK - it is not harmful, but there is no need to declare Aisle as comparable, since you are not comparing it to anything.
+  //   - I suggest removing the attribute if is it not used -- it can always be
+  //   added later, and for now just means extra generated code.
+  Aisle __attribute((comparable(equals=default; lessthan=default))) {
+    //CK - not sure what editor you are using, but tabbing/indentation was all
+    //screwed up for me, so I am re-indenting it when I edit something...  For
+    //reference, when editing C-like code, my personal preference is a 2-space
+    //indent, using spaces rather than tabs.  I recognize that many
+    //users/clients do other things, so any sensible format is fine.
+    //uint16_t aisleID;  // CK: what will aisleID be used for?  It doesn't seem necessary, as buildings only have a single aisle.
+    //a set keeps track of the ID of the kids
+    mace::set<uint16_t> kidsInAisle;
+  }
+  
+  //CK - again comparable is not necessary for rooms, as you are not comparing them to anything.
+  //   - I suggest removing the attribute if is it not used -- it can always be
+  //   added later, and for now just means extra generated code.
+  Room __attribute((comparable(equals=default; lessthan=default))) {
+    uint16_t roomID;
+    mace::set<uint16_t> kidsInRoom;
+    uint16_t length;
+    uint16_t width;
+    mace::array<mace::array<int, MAXIMUMSIZE>, MAXIMUMSIZE> kidsMap;
+  }
+
+  //CK - again comparable is not necessary for buildings, as you are not comparing them to anything.
+  //   - I suggest removing the attribute if is it not used -- it can always be
+  //   added later, and for now just means extra generated code.
+  Building __attribute((comparable(equals=default; lessthan=default))) {
+    uint16_t buildingID;
+    RoomContainer rooms;
+    Aisle aisle;
+  }
+
+  //CK - again comparable is not necessary for kids, as you are not comparing them to anything.
+  //   - I suggest removing the attribute if is it not used -- it can always be
+  //   added later, and for now just means extra generated code.
+  Kid __attribute((comparable(equals=default; lessthan=default))) {
+    //indicates the ID of a kid
+    uint16_t kidID;
+    //indicate that if the kid is "it", '1' is "it"
+    //CK: suggest this be a boolean.
+    uint16_t roleStatus;
+    //indicate if the kid is in the aisle or in the room
+    //0 represent the "Room", 1 represent the "Aisle"
+    //CK: suggest this be a boolean, and be named something like isInAisle.
+    int location;
+    //indicates the location of the kids
+    uint16_t currentBuilding;
+    uint16_t currentRoom;
+    uint16_t x_coordinate;
+    uint16_t y_coordinate;
+    //indicates the boudary of the room that the kid currently stayed
+    uint16_t xBoundary;
+    uint16_t yBoundary;
+    //indicates the direction that a kid runs
+    //'0' is not move, '1','2','3','4' means up, down, left, right
+    //CK: suggest a uint8_t for this, as there are only 5 values.
+    uint16_t kidDirection;
+  }
+}
+
+state_variables {
+  BuildingContainer buildings;
+  KidContainer kids;
+  timer kidRun; 
+  // CK: ^^^ If you _want_ this to be a per-kid timer, then you can do:
+  // timer<int> kidRun __attribute((multi(yes)));  
+  // Then you can schedule it independently for each kidId. 
+  // Otherwise, it looks like a recursive timer.  In that case, you should define:
+  // timer kidRun __attribute((recur(MOVEMENT_PERIOD)));
+  // Then not reschedule the timer manually.
+}
+
+transitions {
+  downcall (state == init) maceInit() {
+    //CK: I strongly suggest you learn to use the mace logging infrastructure.
+    //    see http://www.macesystems.org/wiki/documentation:logging for info.
+    //    In particular, you should not use std::cout, and moreover, most
+    //    logging is auto-generated so there would be no need to add much logging.
+    std::cout << localAddress() << std::endl;
+    std::cout << "==============================================================" << std::endl;
+    std::cout << "Calling maceInit now" << std::endl;
+    std::cout << "==============================================================" << std::endl;
+    //initial buildings and rooms
+    std::cout << "Initializing " << NBUILDING << " buildings and " << NROOM << " rooms." << std::endl;
+    worldInit(NBUILDING, NROOM);
+    std::cout << "Initializing " << NKID << " kids." << std::endl; 
+    kidInit(NKID);
+    std::cout << "==============================================================" << std::endl;
+    std::cout << "Initialization done" << std::endl;
+    std::cout << "==============================================================" << std::endl;
+    kidRun.schedule(MOVEMENT_PERIOD);
+    state = ready;
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ChangeRoom& msg) {
+    //CK: This is a great example of a message that is auto logged with logging enabled.
+    std::cout << "A change room request has been received." << std::endl;
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(msg.kidID);
+    //CK - you always need error checking.  I cannot stress how important this
+    //is -- how much time it will save you overall.
+    ASSERTMSG(itrKid != kids.end(), "Kid not registered with given kidId");
+    if (itrKid->second.location == LOCATION_IN_AISLE) {
+      changeRoom(msg.srcBuilding, msg.destBuilding, msg.destRoom, msg.kidID);      
+    }
+    else {
+      //suppose send back a invalid message
+      std::cout << "Kid No." << msg.kidID << " is not in aisle." << std::endl;
+      std::cout << "Movement canceled." << std::endl;
+    }
+    //CK: you may have explained before, but what is the messaging protocol?
+    //What does RequireInitial mean? 
+    dumpKidInfo(msg.kidID);
+  }
+
+  //What is the purpose of this being triggered by message delivery?
+  /*upcall deliver(const MaceKey& src, const MaceKey& dest, const DumpKidInfo& msg) [locking=read] {
+    std::cout << "A dumpKidInfo message has been received." << std::endl;
+    dumpKidInfo(msg.kidID);
+  }*/
+
+  //CK: why would the server receive a SetToIt message?  In other words, how
+  //can a player change its own status to it?  Doesn't a player become it
+  //either by being the first player in a building, or being tagged by the
+  //current it player?  
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const SetToIt& msg) {
+    std::cout << "A setToIt message has been received." << std::endl;
+    //This should be called from kidRun, not from an external message...
+    setToIt(msg.kidID);
+  }
+  
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequireRoomInfo& msg) [locking=read] {
+    //CK: This is a great example of a message that is auto logged with logging enabled.
+    std::cout << "A RequireInfo message has been received." << std::endl;
+    BuildingContainer::const_iterator itrBuilding;
+    RoomContainer::const_iterator itrRoom;
+    itrBuilding = buildings.find(msg.nBuilding);
+    ASSERTMSG(itrBuilding != buildings.end(), "RequireRoomInfo referenced non-existant building.");
+    itrRoom = itrBuilding->second.rooms.find(msg.nRoom);
+    ASSERTMSG(itrRoom != itrBuilding->second.rooms.end(), "RequireRoomInfo referenced non-existant room.");
+    downcall_route(src, ReceiveRoomInfo(msg.kidID, itrRoom->second.length, 
+          itrRoom->second.width, itrRoom->second.kidsMap));
+    //This would also be auto-logged with logging enabled.
+    std::cout << "A room information message has been send." << std::endl;
+  }
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const SetDirection& msg) {
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(msg.kidID);
+    //Note - I'm adding ASSERTs for rudimentary error checking.  Obviously for
+    //a real deployment we would need real error handling -- the server
+    //shouldn't crash on a bad input.
+    ASSERTMSG(itrKid != kids.end(), "SetDirection message received for unregistered kid!");
+    itrKid->second.kidDirection = msg.newDirection;
+    //CK: comment - in a per-kid timer model, we shoud be careful to make sure
+    //the timer is set for the kid if the direction goes from stationary to
+    //non-stationary.  In a global timer, it won't matter, so this is for future reference.
+  }
+  //CK: ???
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const RequireInitial& msg) [locking=none]{
+    downcall_route(src, RequireInitial());
+  }
+  scheduler kidRun() {
+    //move all the kids except those who are in aisles 
+    //if the kid is aisle, then do nothing
+    //else if the kid is room then move the kid if it doesn't bump into anything
+/*    std::cout << "==============================================================" << std::endl;
+    std::cout << "Timer Expires. Movement Period begins." << std::endl;
+    std::cout << "==============================================================" << std::endl;*/
+
+    int tmpX, tmpY;
+    //CK: This loop is rather inefficient. 
+    //     for (uint32_t i = 1; i < kids.size() + 1; i++) {
+    //       KidContainer::iterator itrKid;
+    //       itrKid = kids.find(i);
+    //Instead:
+    for (KidContainer::iterator itrKid = kids.begin(); itrKid != kids.end(); itrKid++) {
+      Kid& kid = itrKid->second; //CK: convenience.
+      tmpX = kid.x_coordinate;
+      tmpY = kid.y_coordinate;
+
+      if (itrKid->second.location == LOCATION_IN_AISLE) {
+        /*std::cout << "Kid No." << itrKid->second.kidID << " is in aisle." << std::endl;
+        std::cout << "Movement canceled." << std::endl;*/
+        continue;
+      }
+      else {
+
+        //CK: as a rule of thumb switches are more efficient than if/else's
+        switch (kid.kidDirection) {
+          case DIRECTION_STATIONARY: 
+            continue;
+          case DIRECTION_UP:
+            tmpY++;
+            break;
+          case DIRECTION_DOWN:
+            tmpY--;
+            break;
+          case DIRECTION_LEFT:
+            tmpX--;
+            break;
+          case DIRECTION_RIGHT:
+            tmpX++;
+            break;
+          default:
+            ABORT("Kid direction invalid!");
+        }
+        // if(kidDirection == 1) {
+        //   tmpY++;
+        // }
+        // else if (kidDirection == 2) {
+        //   tmpY--;
+        // }
+        // else if (kidDirection == 3) {
+        //   tmpX--;
+        // }
+        // else if (kidDirection == 4) {
+        //   tmpX++;
+        // }
+        // else {
+        //   //if the direction is set to 0 which means not move
+        //   //this really should have been a continue;
+        //   return;
+        // }
+
+        //check if this attempt step is cross the boundary
+        if (tmpX >= kid.xBoundary || tmpY >= kid.yBoundary 
+            || tmpX < 0 || tmpY < 0) {
+          //the kid won't move until the direction has been changed
+          /*std::cout<<"here is check point."<<std::endl;
+          for (int length = 0; length < 10; length++) {
+            for (int width = 0; width < 10; width++) {
+              BuildingContainer::iterator itrBuilding;
+              RoomContainer::iterator itrRoom;
+              itrBuilding = buildings.find(itrKid->second.currentBuilding);
+              itrRoom = itrBuilding->second.rooms.find(itrKid->second.currentRoom);
+              std::cout << itrRoom->second.kidsMap[length][width] << " ";
+            }
+            std::cout << std::endl;
+          }*/ 
+          continue;
+        }
+        else if (tmpX == 0 && tmpY == 0) {
+          //teleport to aisle
+          BuildingContainer::iterator itrBuilding;
+          RoomContainer::iterator itrRoom;
+          itrBuilding = buildings.find(kid.currentBuilding);
+          ASSERT(itrBuilding != buildings.end()); // Just for safety.  
+          itrRoom = itrBuilding->second.rooms.find(kid.currentRoom);
+          ASSERT(itrRoom != itrBuilding->second.rooms.end());
+          ASSERT(itrRoom->second.kidsInRoom.containsKey(kid.kidID)); // just for safety
+          //add the kid to the aisle in that building
+          itrBuilding->second.aisle.kidsInAisle.insert(kid.kidID); 
+          //remove the kid from the room
+          itrRoom->second.kidsInRoom.erase(kid.kidID);
+          itrRoom->second.kidsMap[kid.x_coordinate][kid.y_coordinate] = 0;
+
+//          std::cout << "Kid No." << kid.kidID << " running from room"
+//            << kid.currentRoom << " to aisle." << std::endl; 
+          kid.currentRoom = 0;
+          kid.location = LOCATION_IN_AISLE; 
+          kid.x_coordinate = 0;
+          kid.y_coordinate = 0;
+          kid.xBoundary = 0;
+          kid.yBoundary = 0;
+          kid.kidDirection = DIRECTION_STATIONARY;
+        }
+        else {
+          //move within the room
+          BuildingContainer::iterator itrBuilding;
+          RoomContainer::iterator itrRoom;
+          itrBuilding = buildings.find(kid.currentBuilding);
+          ASSERT(itrBuilding != buildings.end());
+          //if there is no one block him, then move
+          itrRoom = itrBuilding->second.rooms.find(kid.currentRoom);
+          ASSERT(itrRoom != itrBuilding->second.rooms.end());
+          ASSERT(itrRoom->second.kidsInRoom.containsKey(kid.kidID));
+          if (itrRoom->second.kidsMap[tmpX][tmpY] == 0) {
+            //remove the kid from the previous spot 
+            itrRoom->second.kidsMap[kid.x_coordinate][kid.y_coordinate]=0;
+            kid.x_coordinate = tmpX;
+            kid.y_coordinate = tmpY;
+            itrRoom->second.kidsMap[tmpX][tmpY] = kid.kidID; 
+          }
+          else {
+            if (itrKid->second.roleStatus == ROLE_IT) {
+              setToNormal(kid.kidID);
+              std::cout << "When bumping " << tmpX << "," << tmpY << " ";
+              std::cout << "is kid No." << itrRoom->second.kidsMap[tmpX][tmpY] << std::endl;
+              setToIt(itrRoom->second.kidsMap[tmpX][tmpY]);
+              teleportToAisle(itrRoom->second.kidsMap[tmpX][tmpY], tmpX, tmpY);              
+            }
+            //CK: I think it should not matter who bumps into whom - if the
+            //player you bump into is it, you should become it.  Please an an
+            //else if here for that case.
+            else {
+              std::cout << "Kid No." << itrKid->second.kidID << "has been blocked "
+                << "by Kid No." << itrRoom->second.kidsMap[tmpX][tmpY] << std::endl;
+            }
+          }
+
+        }
+      }
+    }
+/*    std::cout << "==============================================================" << std::endl;
+    std::cout << "Movement period ends. Reschedule the timer." << std::endl;
+    std::cout << "==============================================================" << std::endl;*/
+
+    kidRun.schedule(MOVEMENT_PERIOD);
+  }
+}
+
+routines {
+  //initial the building and the room
+  bool worldInit(int nBuilding, int nRoom) {
+    for (int i = 0; i < nBuilding; i++) {
+      //Changing to be slightly more efficient -- the original code required extra memory copies..
+      Building& tmpBuilding = buildings[i+1];
+      tmpBuilding.buildingID = i + 1;
+      for (int j = 0; j < nRoom; j++) {
+        Room& tmpRoom = tmpBuilding.rooms[j+1];
+        tmpRoom.roomID = j + 1;
+        tmpRoom.length = DEFAULT_ROOM_LENGTH;
+        tmpRoom.width = DEFAULT_ROOM_WIDTH;
+      }
+    }
+    std::cout << "There are " << buildings.size() << " buildings have been initialized." 
+      << std::endl;
+    for (BuildingContainer::iterator it = buildings.begin(); it != buildings.end(); it++) {
+      std::cout << "Building No." << (*it).first << " has " 
+        << (*it).second.rooms.size() << " rooms." << std::endl;   
+    }
+    return true;
+  }
+  //CK: This really shouldn't happen - kid init should occur when a new player enrolls.
+  bool kidInit(uint16_t nKid) {
+    for (int i = 0; i < nKid; i++) {
+      Kid &tmpKid = kids[i+1];
+      BuildingContainer::iterator itrBuilding;
+      KidContainer::iterator itrKid;
+
+      tmpKid.kidID = i + 1; tmpKid.roleStatus = ROLE_NOTIT; tmpKid.location = LOCATION_IN_AISLE;
+      tmpKid.currentBuilding = 1; tmpKid.currentRoom = 1; // CK < why did currentRoom change to 1?
+      itrBuilding = buildings.find(1);
+      ASSERT(itrBuilding != buildings.end());
+      itrBuilding->second.aisle.kidsInAisle.insert(tmpKid.kidID);
+      tmpKid.x_coordinate = 0; tmpKid.y_coordinate = 0;
+      // Elsewhere, when a kid moves to an aisle - these are set to 0!  I'm changing it for consistency
+      //       tmpKid.xBoundary = 10; tmpKid.yBoundary = 10;
+      tmpKid.xBoundary = 0; tmpKid.yBoundary = 0;
+      tmpKid.kidDirection = DIRECTION_STATIONARY;
+    }
+    std::cout << "There are " << kids.size() << " kids have been initialized." << std::endl;
+    return true; 
+  }
+  bool changeRoom(uint16_t srcBuilding, uint16_t destBuilding, uint16_t destRoom, 
+      uint16_t kidID) {
+    std::cout << "Kid No." << kidID << " is changing from building" << srcBuilding << " " 
+      << "to building" << destBuilding << " room" << destRoom << std::endl;  
+    //change a kid from an aisle to a specified room
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(kidID);
+    ASSERT(itrKid != kids.end());
+    ASSERT(itrKid->second.currentBuilding == srcBuilding); // CK: you can never trust the inputs from a message.  It is too easy for state to be come unsynchronized.
+    //remove the kids from the previous aisle 
+    BuildingContainer::iterator itrBuilding;
+    RoomContainer::iterator itrRoom;
+    itrBuilding = buildings.find(srcBuilding);
+    ASSERT(itrBuilding != buildings.end());
+    ASSERT(itrBuilding->second.aisle.kidsInAisle.containsKey(kidID)); // CK - more efficient would be to assert that erase returned true - but I think it might return a pair so I need to check the signature.
+    itrBuilding->second.aisle.kidsInAisle.erase(kidID);
+
+    //change the status of the kids
+
+    //CK: A kid cannot probably go straight from one building to a room in
+    //another building.  It probably needs to move to the aisle of another
+    //building.  I would prefer it actually go "outside" (works like an aisle,
+    //but connects buildings together).  But I can live with moving aisle to
+    //aisle.
+    itrKid->second.location = LOCATION_IN_ROOM;
+    itrKid->second.currentBuilding = destBuilding;
+    itrKid->second.currentRoom = destRoom;
+    itrKid->second.kidDirection = 0;
+    itrBuilding = buildings.find(destBuilding);
+    ASSERT(itrBuilding != buildings.end());
+    itrRoom = itrBuilding->second.rooms.find(destRoom);
+    ASSERT(itrRoom != itrBuilding->second.rooms.end());
+    //put the kids into the new room
+    itrRoom->second.kidsInRoom.insert(kidID);
+    uint16_t newLength = itrRoom->second.length;
+    uint16_t newWidth = itrRoom->second.width;
+    itrKid->second.xBoundary = newLength;
+    itrKid->second.yBoundary = newWidth;
+    std::cout << "Haha, this is a check point" << std::endl;
+    //put the kid to a place which is not occupied right now
+
+    //CK - see - here already is a problem with the inconsistent boundaries.
+    //You are checking < newWidth, but allowing a player to move as long as the
+    //position is not greater than newWidth.  So you will "lose" some players
+    //on the map.
+    bool placed = false;
+    for (uint16_t i = 0; i < newWidth && !placed; i++) {
+      for (uint16_t j = 0; j < newLength && !placed; j++) {
+        if (itrRoom->second.kidsMap[i][j] == 0 && ((i + j) != 0)) {
+          itrRoom->second.kidsMap[i][j] = kidID;
+          itrKid->second.x_coordinate = i;
+          itrKid->second.y_coordinate = j;
+          //CK I strongly urge you not to use goto statements.
+          placed = true; 
+        }
+      }
+    }
+    if (!placed) {
+      //if the room is full, then put the kid in the aisle
+      std::cout << "Room is full, try another room." << std::endl;
+      std::cout << "The kid is currently being put in the aisle." << std::endl;
+      itrKid->second.location = LOCATION_IN_AISLE;
+      itrKid->second.currentRoom = 0;
+      itrKid->second.xBoundary = 0;
+      itrKid->second.yBoundary = 0;
+      itrKid->second.x_coordinate = 0;
+      itrKid->second.y_coordinate = 0;
+      itrRoom->second.kidsInRoom.erase(kidID); // consider only inserting if spot below is reached.
+      //CK: forgot to add kid to aisle!
+      itrBuilding->second.aisle.kidsInAisle.insert(kidID);
+      CHECK_SAFETY(); // temporary safety check
+      return false;
+    }
+    std::cout << "Room changing done." << std::endl;
+    CHECK_SAFETY(); // temporary safety check
+    return true;
+  }
+  bool setToIt(uint16_t nKid) {
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(nKid);
+    ASSERT(itrKid != kids.end());
+    if (itrKid->second.roleStatus == ROLE_NOTIT) {
+      itrKid->second.roleStatus = ROLE_IT;
+      return true;
+    }
+    else {
+      //This would probably be a macewarn << ...
+      std::cout << "The kid is \"it\" already. Can't be changed to \"it\" again." << std::endl; 
+      return false;
+    }
+  }
+  bool setToNormal(uint16_t nKid) {
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(nKid);
+    ASSERT(itrKid != kids.end());
+    if (itrKid->second.roleStatus == ROLE_IT) {
+      itrKid->second.roleStatus = ROLE_NOTIT;
+      return true;
+    }
+    else {
+      //This would probably be a macewarn << ...
+      std::cout << "The kid is \"normal\" already. Can't be changed to \"normal\" again." << std::endl; 
+      return false;
+    }
+  }
+  bool teleportToAisle (uint16_t nKid, uint16_t x, uint16_t y) {
+    BuildingContainer::iterator itrBuilding;
+    RoomContainer::iterator itrRoom;
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(nKid);
+    ASSERT(itrKid != kids.end());
+    //first remove the kid from the room
+    itrBuilding = buildings.find(itrKid->second.currentBuilding);
+    ASSERT(itrBuilding != buildings.end());
+    itrRoom = itrBuilding->second.rooms.find(itrKid->second.currentRoom);
+    ASSERT(itrRoom != itrBuilding->second.rooms.end());
+    ASSERT(itrRoom->second.kidsInRoom.containsKey(nKid)); // just a safety check
+    itrRoom->second.kidsInRoom.erase(nKid);
+    //erase the kid from the map
+    ASSERT(itrRoom->second.kidsMap[x][y] == nKid); // just a safety check
+    itrRoom->second.kidsMap[x][y] = 0;
+    //add the kid to aisle
+    itrBuilding->second.aisle.kidsInAisle.insert(nKid);
+    return true;
+  }
+  bool dumpKidInfo(uint16_t nKid) {
+    KidContainer::iterator itrKid;
+    itrKid = kids.find(nKid);
+    std::cout << "Now dump all the information for kid No." << itrKid->second.kidID << std::endl;
+    std::cout << "KidID is " << itrKid->second.kidID << std::endl;
+    std::cout << "Kid roleStatus is " << itrKid->second.roleStatus << std::endl;
+    std::cout << "Kid location is " << itrKid->second.location << std::endl;
+    std::cout << "Kid direction is " << itrKid->second.kidDirection << std::endl;
+    std::cout << "Kid currentBuilding is " << itrKid->second.currentBuilding << std::endl;  
+    std::cout << "Kid currentRoom is " << itrKid->second.currentRoom << std::endl;
+    std::cout << "Kid x_coordinate is " << itrKid->second.x_coordinate << std::endl;
+    std::cout << "Kid y_coordinate is " << itrKid->second.y_coordinate << std::endl;
+    return true;
+  }
+  /**
+   * Performs a sanity check on the state - make sure kid state and room state matches...
+   *
+   * Recommend calling this function occasionally to test the state.
+   */
+  void CHECK_SAFETY() const {
+    //First, make sure the kids state matches the room state...
+    for (KidContainer::const_iterator itrKid = kids.begin(); itrKid != kids.end(); itrKid++) {
+      const Kid& kid = itrKid->second;
+      ASSERT(kid.kidID == itrKid->first);
+      BuildingContainer::const_iterator itrBuilding = buildings.find(kid.currentBuilding); 
+      ASSERT(itrBuilding != buildings.end());
+      const Building& building = itrBuilding->second;
+      if (kid.location == LOCATION_IN_AISLE) {
+        ASSERT(building.aisle.kidsInAisle.containsKey(kid.kidID));
+      } else {
+        RoomContainer::const_iterator itrRoom = building.rooms.find(kid.currentRoom);
+        ASSERT(itrRoom != building.rooms.end());
+        const Room& room = itrRoom->second;
+        ASSERT(room.kidsInRoom.containsKey(kid.kidID));
+        ASSERT(room.kidsMap[kid.x_coordinate][kid.y_coordinate] == kid.kidID);
+        ASSERT(kid.x_coordinate < room.length);
+        ASSERT(kid.xBoundary == room.length);
+        ASSERT(kid.y_coordinate < room.width);
+        ASSERT(kid.yBoundary == room.width);
+      }
+    }
+
+    //Next, check to make sure the non-empty room spots match to the right kids...
+    for (BuildingContainer::const_iterator itrBuilding = buildings.begin(); itrBuilding != buildings.end(); itrBuilding++) {
+      ASSERT(itrBuilding->first == itrBuilding->second.buildingID);
+      for (RoomContainer::const_iterator itrRoom = itrBuilding->second.rooms.begin(); itrRoom != itrBuilding->second.rooms.end(); itrRoom++) {
+        const Room& room = itrRoom->second;
+        ASSERT(itrRoom->first == room.roomID);
+        ASSERT(room.length <= MAXIMUMSIZE);
+        ASSERT(room.width <= MAXIMUMSIZE);
+        for (int x = 0; x < MAXIMUMSIZE; x++) {
+          for (int y = 0; y < MAXIMUMSIZE; y++) {
+            uint16_t kidID = room.kidsMap[x][y];
+            if (kidID > 0) {
+              KidContainer::const_iterator itrKid = kids.find(kidID);
+              ASSERT(itrKid != kids.end());
+              ASSERT(itrKid->second.currentBuilding == itrBuilding->second.buildingID);
+              ASSERT(itrKid->second.currentRoom == room.roomID);
+              ASSERT(itrKid->second.x_coordinate == x);
+              ASSERT(itrKid->second.y_coordinate == y);
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,142 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Getopt::Long;
+use Sys::Hostname;
+
+my $CA = "openssl ca ";
+my $REQ = "openssl req";
+my $X509 = "openssl x509";
+my $DAYS = "-days 1095";
+
+# my $genCACert = 0;
+# my $genCert = 0;
+# my $sign = 0;
+# GetOptions("newca" => \$genCACert,
+# 	   "cert" => \$genCert,
+# 	   "sign" => \$sign);
+
+
+if ((scalar(@ARGV) == 0) or ($ARGV[0] eq "-h") or ($ARGV[0] eq "--help")) {
+    printUsage();
+}
+
+my $command = shift(@ARGV);
+my $host = hostname();
+
+if ($command eq "cacert") {
+    my $key = `mktemp key.XXXXXXX`;
+    chomp($key);
+#     my $cmd = ("$REQ -newkey rsa:1024 -subj '/CN=$host' " .
+    my $cmd = ("$REQ -newkey rsa:1024 -subj '/' " .
+	       "-keyout $key -nodes -x509 $DAYS -out $key 2>/dev/null");
+    system($cmd);
+    system(qq{cat $key});
+    unlink($key);
+}
+elsif ($command eq "show") {
+    my $in = shift(@ARGV) || "";
+    unless (-f $in) {
+	printUsage();
+    }
+    system(qq{$X509 -text -in $in});
+}
+elsif ($command eq "verify") {
+    my $cacert = shift(@ARGV) || "";
+    my $cert = shift(@ARGV) || "";
+    unless (-f $cert && -f $cacert) {
+	printUsage();
+    }
+    system(qq{openssl verify -CAfile $cacert $cert});
+}
+elsif ($command eq "certreq") {
+}
+elsif ($command eq "sign") {
+}
+elsif ($command eq "signedcert") {
+    my $cert = shift(@ARGV) || "";
+    unless (-f $cert) {
+	printUsage();
+    }
+    my $cnhost = shift(@ARGV) || $host;
+    my $csr = `mktemp csr.XXXXXXX`;
+    chomp($csr);
+    my $key = `mktemp key.XXXXXXX`;
+    chomp($key);
+    my $cmd = ("$REQ -new $DAYS -nodes -subj '/CN=$cnhost' " .
+ 	       "-keyout $key -out $csr 2>/dev/null");
+
+#     print "$cmd\n";
+    system($cmd);
+    my $crt = `mktemp crt.XXXXXXX`;
+    chomp($crt);
+
+    my ($dir, $config) = setupCA();
+
+    $cmd = ("$CA -config $config $DAYS -batch -in $csr -cert $cert " .
+ 	    "-keyfile $cert -out $crt -outdir $dir 2>/dev/null");
+
+#     print "$cmd\n";
+    system($cmd);
+    system(qq{cat $crt; echo ""; cat $key});
+
+    removeCA($dir);
+    unlink($key);
+    unlink($csr);
+    unlink($crt);
+}
+else {
+    printUsage();
+}
+
+sub setupCA {
+    my $dir = `mktemp -d cadir.XXXXXXX`;
+    chomp($dir);
+    my $config = "$dir/config";
+
+    open(OUT, ">$config") or die "cannot open $config: $!\n";
+
+    print OUT <<EOF;
+[ca]
+default_ca = CA_default
+
+[CA_default]
+serial = $dir/serial
+database = $dir/index.txt
+default_md = md5
+
+policy = policy_anything
+
+[ policy_anything ]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = optional
+emailAddress            = optional
+
+EOF
+
+    close(OUT);
+    system("echo 00 > $dir/serial");
+    system("touch $dir/index.txt");
+    return ($dir, $config);
+} # setupCA
+
+sub removeCA {
+    my $dir = shift;
+    system("rm -R $dir");
+} # removeCA
+
+sub printUsage {
+    my $usage = <<EOF;
+usage: $0 <command> [<options>]
+    cacert
+    signedcert <cacert> [hostname]
+    verify <cacert> <cert>
+    show <cert>
+
+EOF
+    die $usage;
+} # printUsage

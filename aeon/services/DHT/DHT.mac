@@ -1,0 +1,362 @@
+/* 
+ * DHT.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, James W. Anderson, Charles Killian
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "m_map.h"
+#include "mhash_map.h"
+#include "mdeque.h"
+
+using std::ostringstream;
+using std::endl;
+using std::string;
+
+service;
+
+provides DHT;
+
+trace = med;
+
+constants {
+  uint64_t DEBUG_INTERVAL = 10*1000*1000;
+} // constants
+
+services {
+
+  OverlayRouter router = auto(shared, [], []);
+
+  Transport recursive_ = auto(shared, [hopbyhop,sharedrouter], []);
+  Transport direct_ = auto(shared, [direct,sharedrouter], []);
+
+} // services
+
+states {      
+  ready;
+} // states
+
+typedefs {
+  typedef mace::hash_map<MaceKey, string> DataMap;
+  typedef mace::deque<MaceKey> KeyList;
+} // typedefs
+
+method_remappings {
+  uses {
+    downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t regId);
+    downcall_route(const MaceKey&, const Lookup&, registration_uid_t regId = recursive_);
+    downcall_route(const MaceKey&, const LookupReply&, registration_uid_t regId = direct_);
+    downcall_route(const MaceKey&, const SetKey&, registration_uid_t regId = recursive_);
+    downcall_route(const MaceKey&, const SetKeyRange&, registration_uid_t regId = direct_);
+    downcall_route(const MaceKey&, const DeleteKey&, registration_uid_t regId = recursive_);
+  } // uses
+
+  implements {
+    upcalls {
+      deliver(const MaceKey&, const MaceKey&, const Message& <- const std::string&);
+    } // upcalls
+  } // implements
+} // method_remappings
+
+messages {
+  Lookup {
+    MaceKey key;
+    bool get;
+    registration_uid_t rid;
+  }
+  
+  LookupReply {
+    MaceKey key;
+    bool found;
+    bool get;
+    string payload __attribute((dump(no)));
+    registration_uid_t rid;
+  }
+
+  SetKey {
+    MaceKey key;
+    string payload __attribute((dump(no)));
+  }
+
+  SetKeyRange {
+    DataMap m __attribute((dump(no)));
+  }
+
+  DeleteKey {
+    MaceKey key;
+  }
+
+  //XXX: Unused
+  DeleteKeyRange {
+    KeyRange range;
+  }
+} // messages
+
+state_variables {
+  DataMap primary;
+  DataMap secondary;
+
+  timer printer __attribute((recur(DEBUG_INTERVAL)));
+} // state_variables
+
+transitions {
+  downcall (state == init) maceInit() {
+    state = ready;
+    maceout << localAddress() << " ready" << Log::endl;
+
+    printer.schedule(DEBUG_INTERVAL);
+  } // maceInit
+
+  (state == ready) {
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const Lookup& msg) {
+      maceout << "src " << src << " key=" << msg.key
+	      << " get=" << msg.get << Log::endl;
+      if (!downcall_idSpaceContains(msg.key)) {
+	maceout << localAddress() << " received request for " << msg.key
+		<< ", not in id space" << Log::endl;
+// 	downcall_route(msg.key, Lookup(msg.from, msg.key, msg.get));
+	// XXX fix this
+        ABORT("received request for address not in id space");
+	return;
+      }
+      bool found = (primary.find(msg.key) != primary.end());
+      string value = "";
+      if (found && msg.get) {
+	value = primary[msg.key];
+      }
+      maceout << "replying found=" << found << " value=" << value << Log::endl;
+      downcall_route(src, LookupReply(msg.key, found, msg.get, value, msg.rid));
+    } // deliver Lookup
+
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const LookupReply& msg) {
+      maceout << "key=" << msg.key << " value=" << msg.payload
+	      << " found=" << msg.found << " get=" << msg.get << Log::endl;
+      if (msg.get) {
+	upcall_dhtGetResult(msg.key, msg.payload, msg.found, msg.rid);
+      }
+      else {
+	upcall_dhtContainsKeyResult(msg.key, msg.found, msg.rid);
+      }
+    } // deliver LookupReply
+
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const SetKey& msg) {
+      maceout << "key=" << msg.key << " value=" << msg.payload << Log::endl;
+      if (downcall_idSpaceContains(msg.key)) {
+	primary[msg.key] = msg.payload;
+	updateSuccessorsSetKey(msg.key, msg.payload);
+      }
+      else {
+	secondary[msg.key] = msg.payload;
+      }
+    } // deliver SetKey
+
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const SetKeyRange& msg) {
+      // this _usually_ only affects secondary keys
+      maceout << dest << " setting (expected) secondary key range from " << src << Log::endl;
+      for (DataMap::const_iterator i = msg.m.begin(); i != msg.m.end(); i++) {
+        EXPECT(!downcall_idSpaceContains(i->first));
+        if (downcall_idSpaceContains(i->first)) {
+          primary[i->first] = i->second;
+          updateSuccessorsSetKey(i->first, i->second);
+        }
+        else {
+          secondary[i->first] = i->second;
+        }
+      }
+    } // SetKeyRange
+
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const DeleteKey& msg) {
+      maceout << "deleting " << msg.key << Log::endl;
+      if (downcall_idSpaceContains(msg.key)) {
+	deletePrimaryKey(msg.key);
+      }
+      else {
+	secondary.erase(msg.key);
+      }
+    } // DeleteKey
+
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const DeleteKeyRange& msg) {
+      // this only affects secondary keys
+      maceout << "deleting secondary key range" << Log::endl;
+      KeyList del;
+      for (DataMap::const_iterator i = secondary.begin(); i != secondary.end(); i++) {
+	if (msg.range.containsKey(i->first)) {
+	  del.push_back(i->first);
+	}
+      }
+
+      for (KeyList::const_iterator i = del.begin(); i != del.end(); i++) {
+	secondary.erase(*i);
+      }
+    } // deleteKeyRange
+
+    upcall notifySuccessorAdded(const MaceKey& id) {
+      maceout << "id " << id << " primary.size=" << primary.size() << Log::endl;
+      downcall_route(id, SetKeyRange(primary));
+    } // notifySuccessorAdded
+
+    upcall notifySuccessorRemoved(const MaceKey& id) {
+      maceout << "id " << id << Log::endl;
+      // do nothing (?)
+    } // notifySuccessorRemoved
+
+    upcall notifyIdSpaceChanged(const KeyRange& range) {
+      maceout << "start=" << range.first << " end=" << range.second << Log::endl;
+
+      KeyList del;
+
+      // send the keys we no longer manage
+      for (DataMap::const_iterator i = primary.begin(); i != primary.end(); i++) {
+	if (!range.containsKey(i->first)) {
+	  maceout << "sending " << i->second << " to " << i->first << Log::endl;
+	  downcall_route(i->first, SetKey(i->first, i->second));
+	  del.push_back(i->first);
+	}
+      }
+
+      for (KeyList::const_iterator i = del.begin(); i != del.end(); i++) {
+	maceout << "erasing " << *i << Log::endl;
+	primary.erase(*i);
+      }
+
+      // add keys from our secondary into our primary
+      del.clear();
+
+      for (DataMap::const_iterator i = secondary.begin(); i != secondary.end(); i++) {
+	maceout << "checking secondary " << i->first << " = " << i->second << Log::endl;
+	if (range.containsKey(i->first)) {
+	  maceout << "moving " << i->first << " to primary" << Log::endl;
+	  primary[i->first] = i->second;
+	  del.push_back(i->first);
+	  updateSuccessorsSetKey(i->first, i->second);
+	}
+      }
+
+      for (KeyList::const_iterator i = del.begin(); i != del.end(); i++) {
+	maceout << "erasing secondary " << *i << Log::endl;
+	secondary.erase(*i);
+      }
+
+    } // notifyIdSpaceChanged
+
+    downcall containsKey(const MaceKey& key,
+			 registration_uid_t rid) {
+      maceout << "key " << key << Log::endl;
+      if (downcall_idSpaceContains(key)) {
+	bool found = (primary.find(key) != primary.end());
+	defer_upcall_dhtContainsKeyResult(key, found, rid);
+	return;
+      }
+
+      downcall_route(key, Lookup(key, false, rid));
+    } // containsKey
+
+    downcall get(const MaceKey& key, registration_uid_t rid) {
+      maceout << "key " << key << Log::endl;
+      if (downcall_idSpaceContains(key)) {
+	string value;
+	bool found = false;
+	if (primary.find(key) != primary.end()) {
+	  found = true;
+	  value = primary[key];
+	}
+	defer_upcall_dhtGetResult(key, value, found, rid);
+	return;
+      }
+
+      downcall_route(key, Lookup(key, true, rid));
+    } // get
+
+    downcall put(const MaceKey& key, const string& value) {
+      maceout << "key " << key << " value " << value << Log::endl;
+      if (downcall_idSpaceContains(key)) {
+	primary[key] = value;
+	updateSuccessorsSetKey(key, value);
+      }
+      else {
+	downcall_route(key, SetKey(key, value));
+      }
+    } // put
+
+    downcall remove(const MaceKey& key) {
+      maceout << "key " << key << Log::endl;
+      if (downcall_idSpaceContains(key)) {
+	deletePrimaryKey(key);
+      }
+      else {
+	downcall_route(key, DeleteKey(key));
+      }
+    } // remove
+
+  } // state == ready
+
+  scheduler printer() {
+    KeyRange kr = downcall_getIdSpace();
+
+    //     maceout << "\nkeyspace = " << kr.first << " - " << kr.second << endl;
+    macedbg(1) << "\nkeyspace = " << kr.first << " - " << kr.second << "\n";
+    
+    for (DataMap::const_iterator i = primary.begin(); i != primary.end(); i++) {
+      //       maceout << "primary[" << i->first << "]=" << i->second << endl;
+      macedbg(1) << "primary[" << i->first << "]=" << i->second << "\n";
+    }
+
+    for (DataMap::const_iterator i = secondary.begin(); i != secondary.end(); i++) {
+      //       maceout << "secondary[" << i->first << "]=" << i->second << endl;
+      macedbg(1) << "secondary[" << i->first << "]=" << i->second << "\n";
+    }
+
+    macedbg(1) << Log::endl;
+    //printer.reschedule(DEBUG_INTERVAL);
+
+  } // timer printer
+
+} // transitions
+
+routines {
+
+  void deletePrimaryKey(const MaceKey& key) {
+    if (primary.find(key) != primary.end()) {
+      primary.erase(key);
+      updateSuccessorsDeleteKey(key);
+    }
+  } // deletePrimaryKey
+
+  void updateSuccessorsSetKey(const MaceKey& key, const string& value) {
+    NodeSet s = downcall_getSuccessors();
+    for (NodeSet::const_iterator i = s.begin(); i != s.end(); i++) {
+      downcall_route(*i, SetKey(key, value), direct_);
+    }
+  } // updateSuccessorsSetKey
+
+  void updateSuccessorsDeleteKey(const MaceKey& key) {
+    NodeSet s = downcall_getSuccessors();
+    for (NodeSet::const_iterator i = s.begin(); i != s.end(); i++) {
+      downcall_route(*i, DeleteKey(key), direct_);
+    }
+  } // updateSuccessorsDeleteKey
+
+} // routines

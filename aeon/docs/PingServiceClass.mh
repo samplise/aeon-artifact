@@ -1,0 +1,5 @@
+serviceclass Ping {
+  virtual void monitor(const MaceKey& host);
+  virtual uint64_t getLastResponseTime(const MaceKey& host) { return 0; }
+  handlers PingData;
+}; // PingServiceClass

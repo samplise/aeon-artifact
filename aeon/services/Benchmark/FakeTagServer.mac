@@ -1,0 +1,85 @@
+service FakeTagServer;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  uint32_t NUM_ROOMS = 10;
+}
+
+services {
+  Transport t;
+}
+
+
+messages {
+  Join __attribute((number(0))){
+    MaceKey player_id;
+    uint32_t room_id;
+  }
+
+  JoinReply { } 
+
+  Play {
+    uint32_t room_id;
+    uint32_t burden;  /* P value of num_primes */
+  }
+
+  PlayReply { }
+
+  Leave { 
+    MaceKey player_id;
+    uint32_t room_id;
+  }
+}
+
+state_variables {
+  context Room<uint32_t room_id> {
+    mace::set< MaceKey > players;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+  }
+
+  upcall [Room<msg.room_id>] deliver(const MaceKey& src, const MaceKey& dest, const Join& msg) {
+    ASSERT( players.find(src) == players.end() );
+    players.insert(msg.player_id);
+    downcall_route( src, JoinReply() );
+  }
+
+  upcall [Room<msg.room_id>] deliver(const MaceKey& src, const MaceKey& dest, const Play& msg) {
+    ASSERT( players.find(src) != players.end() );
+    do_primes(msg.burden);
+    downcall_route( src, PlayReply() );
+  }
+
+  upcall [Room<msg.room_id>] deliver(const MaceKey& src, const MaceKey& dest, const Leave& msg) {
+    ASSERT( players.find(src) != players.end() );
+    players.erase(players.find(msg.player_id));
+  }
+}
+
+routines {
+  [__null] void do_primes( uint64_t nprimes) {
+    uint64_t i, num=1, primes = 0;
+    //std::cout << curtime << " do_primes()" << std::endl;
+    while(1) {
+      ++num;
+      for (i = 2; (i <= num) && (num % i != 0); ++i);
+      if (i == num)
+        ++primes;
+      if( primes > nprimes ) {
+        return;
+      }
+    }
+    //printf("Calculated %d primes.\n", primes);
+  }
+}

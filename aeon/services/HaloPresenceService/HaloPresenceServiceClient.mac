@@ -1,0 +1,250 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service HaloPresenceServiceClient;
+ 
+provides Null;
+
+
+services {
+  Transport t;
+}
+ 
+constants {
+  
+
+}
+ 
+constructor_parameters {
+  uint32_t N_CLIENT = 1;
+  uint32_t START_CLIENT_ID = 1;
+	NodeSet HaloServer = NodeSet();
+
+  uint32_t N_SESSION = 16;
+
+  uint64_t OUTPUT_COUNT = 100;
+  uint32_t START_CONTROLLER = 0;
+
+  uint32_t N_ROUND = 2;
+  uint64_t ACTIVATE_CLIENT_PERIOD = 10;
+  uint64_t TIME_PERIOD = 10;
+}
+
+#minclude "HaloPresenceServiceMessages.mi"
+
+state_variables {
+  context Client <uint32_t clientId> {
+    uint32_t clientId;
+    uint32_t routerId;
+    uint32_t gsId;
+    uint32_t playerId;
+    uint32_t joinedTimes;
+    MaceKey serverAddr;
+
+    uint64_t lastRequestTime;
+    uint64_t requestTimePeriod;
+
+    uint64_t reqCount;
+    bool activateFlag;
+  }
+
+  context Controller {  
+    uint32_t curr_round;
+    mace::set<uint32_t> inactiveClientIds;
+    uint64_t nextSleepTimePeriod;
+  }
+}
+ 
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    ASSERT( HaloServer.size() == 1 );
+
+    RandomUtil::seedRandom( mace::getmtime() );
+    for( uint32_t i=0; i<N_CLIENT; i++) {
+      uint32_t clientId = i + START_CLIENT_ID;
+      mace::string clientCtxName = generateContextName("Client", clientId);
+      createNewOwnership("globalContext", clientCtxName);
+      async_initClient(clientId);
+    }
+    maceout << "Controller flag: " << (uint16_t)START_CONTROLLER << Log::endl; 
+    if( START_CONTROLLER > 0 ){
+      createNewOwnership("globalContext", "Controller");
+      async_startController();
+    }
+  }
+
+  async [Controller] startController() {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    maceout << "Initialize controller!" << Log::endl;
+    curr_round = 0;
+    nextSleepTimePeriod = TIME_PERIOD;
+    sleep(nextSleepTimePeriod);
+    async_inactivateClients();
+  }
+
+  async [Controller] inactivateClients() {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    uint32_t in_n_client = N_CLIENT/N_ROUND;
+    inactiveClientIds.clear();
+
+    uint32_t start_cId = START_CLIENT_ID + curr_round * in_n_client;
+    for( uint32_t i=0; i<in_n_client; i++ ) {
+      uint32_t clientId = start_cId + i;
+      if( clientId >= START_CLIENT_ID + N_CLIENT ) {
+        break;
+      }
+      async_setClientActiveFlag(clientId, false);
+      inactiveClientIds.insert(clientId);
+    }
+    maceout << "Inactivate clients: " << inactiveClientIds << Log::endl;
+
+    nextSleepTimePeriod = (uint64_t)( ACTIVATE_CLIENT_PERIOD/inactiveClientIds.size() );
+    async_activateNextClient();
+  }
+
+  async [Controller] activateNextClient() {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    sleep( nextSleepTimePeriod );
+    if( inactiveClientIds.size() > 0 ){
+      uint32_t clientId = *(inactiveClientIds.begin());
+      inactiveClientIds.erase(clientId);
+      maceout << "To activate client("<< clientId <<") in round("<< curr_round <<")!" << Log::endl;
+      async_setClientActiveFlag(clientId, true);
+      async_activateNextClient();
+    } else {
+      nextSleepTimePeriod = TIME_PERIOD;
+      curr_round ++;
+      if( curr_round < N_ROUND ){
+        sleep(nextSleepTimePeriod);
+        maceout << "To start round " << curr_round << Log::endl;
+        async_inactivateClients();
+      }
+    }
+  }
+
+  async [Client<nClient>] initClient(const uint32_t& nClient) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    clientId = nClient;
+    // gsId = nClient % N_SESSION + 1;
+    gsId = RandomUtil::randInt(N_SESSION) + 1;
+    maceout << "Client("<< clientId <<") session is " << gsId << Log::endl;
+    activateFlag = true;
+    joinedTimes = 0;
+    
+    requestTimePeriod = 0;
+    reqCount = 0;
+    downcall_route( *(HaloServer.begin()), ConnectionRequest(nClient) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const JoinGameSessionReply& msg) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    maceout << "Client("<< clientId <<") get player("<< msg.playerId<<") in session("<< msg.gsId <<") and router("<< msg.routerId<<")!" 
+            << Log::endl;
+    playerId = msg.playerId;
+    routerId = msg.routerId;
+    joinedTimes ++;
+
+    // sleep(WAITING_TIME_PERIOD);
+
+    lastRequestTime = mace::getmtime();
+    downcall_route(serverAddr, Heartbeat(clientId, routerId, gsId, playerId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const HeartbeatReply& msg) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+
+    if( !msg.succFlag ) {
+      maceout << "Client("<< clientId <<") fail to send heartbeat. Existing router is " << routerId << Log::endl;
+      downcall_route(serverAddr, GetRouterID(clientId) );
+      return;
+    }
+    
+    reqCount ++;
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    requestTimePeriod += latency;
+
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg = requestTimePeriod / OUTPUT_COUNT;
+
+      maceout<< "Client("<< clientId<<") avg="<< avg << " reqCount="<< reqCount << Log::endl;
+
+      requestTimePeriod = 0; 
+    }
+
+    if( !activateFlag ){
+      lastRequestTime = 0;
+      maceout << "Client("<< clientId <<") is leaving the game!" << Log::endl;
+      downcall_route(serverAddr, LeaveGameSession(clientId, gsId) );
+      return;
+    }
+
+    lastRequestTime = mace::getmtime();
+    downcall_route(serverAddr, Heartbeat(clientId, routerId, gsId, playerId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const UpdateRouterID& msg) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    routerId = msg.routerId;
+    maceout << "Client("<< clientId <<") gets new router " << routerId << Log::endl;
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const GetRouterIDReply& msg) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+
+    routerId = msg.routerId;
+    maceout << "Client("<< clientId <<")'s new router is " << routerId << Log::endl;
+
+    if( !activateFlag ){
+      return;
+    }
+
+    lastRequestTime = mace::getmtime();
+    downcall_route(serverAddr, Heartbeat(clientId, routerId, gsId, playerId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const LeaveGameSessionReply& msg) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    
+  }
+
+  async [Client<cId>] setClientActiveFlag(const uint32_t& cId, const bool flag ) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    if( flag ) {
+      maceout << "To activate client("<< clientId <<")!" << Log::endl;
+    } else {
+      maceout << "To inactivate client("<< clientId <<")!" << Log::endl;
+    }
+
+    if( flag && !activateFlag && lastRequestTime == 0 ) {
+      // gsId = cId % N_SESSION + 1;
+      gsId = RandomUtil::randInt(N_SESSION) + 1;
+      maceout << "Client("<< clientId <<")'s new session is " << gsId << Log::endl;
+      downcall_route(serverAddr, JoinGameSession(cId, gsId, joinedTimes) );
+    } 
+
+    activateFlag = flag;
+  }
+
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("HaloPresenceServiceClient");
+    sleep(1);
+    serverAddr = msg.proxyAddr;
+    maceout << "Client("<< clientId <<")'s proxy server is " << serverAddr << Log::endl;
+    downcall_route(serverAddr, JoinGameSession(clientId, gsId, joinedTimes) );
+  }
+}
+
+routines {
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}

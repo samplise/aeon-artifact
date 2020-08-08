@@ -1,0 +1,94 @@
+#include "RandomUtil.h"
+
+service HelloWorldApp;
+
+provides Null;
+
+typedefs {
+
+}
+
+services {
+  Transport t;
+}
+
+constants {
+	
+}
+
+constructor_parameters {
+	
+}
+
+state_variables {
+	context A<uint32_t x> {
+		mace::string var_msg;	
+		uint32_t count;
+
+	}
+
+	context B<uint32_t x> {
+		mace::string var_msg;
+		uint32_t count;
+	}
+
+}
+
+transitions {
+	downcall maceInit() {
+		async_initA(1);
+		async_initB(1);		
+	}	
+
+	async [A<id>] initA(const uint32_t& id) [locking = ownership] {
+		ADD_SELECTORS("HelloWorldApp");
+		mace::string p_ctx_name = Util::generateContextName("A", id);
+		mace::string c_ctx_name = Util::generateContextName("A", id+1);  
+		createNewOwnership(p_ctx_name, c_ctx_name);
+
+		count = 0;
+
+		broadcast_startA(id+1, id);
+		maceout << "Hello A!" << Log::endl;
+	}
+
+	broadcast [A<id>] startA(const uint32_t& id, const uint32_t& target){
+		count = 0;
+		async_sendMsgToA(target, "HelloWorld");
+	}
+
+	async [A<id>] sendMsgToA(const uint32_t& id, const mace::string& msg) {
+		ADD_SELECTORS("HelloWorldApp");
+		if( msg == "Ack"){
+			maceout << "Recv Ack!!" << Log::endl;
+		} else {
+			async_sendMsgToB(1, "HelloWorld", Util::generateContextName("A", id) );
+		}
+	}
+
+	async [B<id>] initB(const uint32_t& id) [locking = ownership] {
+		mace::string p_ctx_name = Util::generateContextName("B", id);
+		mace::string c_ctx_name = Util::generateContextName("B", id+1);  
+		createNewOwnership(p_ctx_name, c_ctx_name);
+
+		count = 0;
+
+		broadcast_startB(id+1, id);
+	}
+
+	broadcast [B<id>] startB(const uint32_t& id, const uint32_t& target){
+		count = 0;
+		async_sendMsgToB(target, "HelloWorld", Util::generateContextName("B", id));
+	}
+
+	async [B<id>] sendMsgToB(const uint32_t& id, const mace::string& msg, const mace::string& from_ctx_name) {
+		count ++;
+		if(count == 2){
+			async_sendMsgToA(1, "Ack");
+		}
+	}
+}
+
+routines {
+	
+}

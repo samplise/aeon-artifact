@@ -1,0 +1,80 @@
+/**
+chuangw: test case 3 tests performance of message delivery between two logical nodes 
+
+*/
+service TestCase3;
+trace=high;
+
+constructor_parameters {
+  uint32_t NCLIENTCONTEXTS = 8;
+  uint32_t NMESSAGES = 100;
+  
+  MaceKey ClientAddress = MaceKey::null;
+  MaceKey ServerAddress = MaceKey::null;
+}
+
+services {
+  Transport tcp = TcpTransport();
+}
+
+state_variables {
+  context ClientContext<uint32_t n>{
+  }
+
+  context ServerContext<uint32_t n>{
+    uint32_t count = 0;
+  }
+  
+}
+
+messages{
+  Request{ uint32_t n; }
+  Response{ uint32_t n; }
+}
+ 
+transitions {
+  downcall (state == init) maceInit()  {
+    if( downcall_localAddress() == ClientAddress ){
+      for(uint32_t n=0;n< NCLIENTCONTEXTS;n++){
+        async_sendMessage( n );
+      }
+    }
+  }
+
+  async [ClientContext<n>] sendMessage( uint32_t n ){
+    ASSERT( downcall_localAddress() == ClientAddress );
+
+    for(uint32_t k = 0; k< NMESSAGES; k++ ){
+      downcall_route( ServerAddress, Request( n  ) );
+    }
+  }
+
+  // client: in each of N contexts, send K messages per batch from M clients to one server
+
+  // server respond per K messages in a Contexts context
+
+  upcall [ ServerContext<msg.n> ] deliver(const MaceKey& from, const MaceKey& dest, const Request& msg) {
+    // TODO: invariant: from is the client head node address
+    //                  dest is the server head node address
+    ASSERT( downcall_localAddress() == ServerAddress );
+    ASSERT( dest == ServerAddress );
+
+    if( ++count == NMESSAGES ){
+      downcall_route( from, Response( msg.n ) );
+
+      count = 0;
+    }
+
+  }
+  upcall [ ClientContext<msg.n> ] deliver(const MaceKey& from, const MaceKey& dest, const Response& msg) {
+    ASSERT( downcall_localAddress() == ClientAddress );
+    for(uint32_t k = 0; k< NMESSAGES; k++ ){
+      downcall_route( ServerAddress, Request( msg.n ) );
+    }
+
+  }
+}
+
+routines {
+}
+

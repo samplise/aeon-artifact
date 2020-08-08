@@ -1,0 +1,141 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service TagClientRG;
+ 
+provides Null, TagClientRG;
+
+trace=low;
+
+services {
+  Transport t;
+}
+ 
+constants {
+  // Indicates the location that the kid stays in
+  uint16_t LOCATION_IN_WORLD = 0;
+  uint16_t LOCATION_IN_HALLWAY = 1;
+  uint16_t LOCATION_IN_ROOM = 2;
+
+  // Indicates the kid direction
+  uint16_t DIRECTION_STATIONARY = 0;
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+
+  // The size of a standard world, hallway and room. It's a 50 * 50 grid.
+  uint16_t WORLD_SIZE = 50;
+  uint16_t HALLWAY_SIZE = 50;
+  uint16_t ROOM_SIZE = 50;
+
+  uint16_t DEFAULT_COORD = 0;
+}
+ 
+constructor_parameters {
+  // The time interval to request the current room map
+  uint64_t MAP_REQUEST_PERIOD = 1 * 1000 * 1000;
+}
+
+states {
+  SLEEPING;
+  JOINING;
+  PLAYING;
+}
+
+auto_types {
+  coordinate __attribute((comparable(equals=default; lessthan=default))) {
+    uint16_t x;
+    uint16_t y;
+  }
+}
+
+#minclude "TagMessage.mi"
+
+state_variables {
+  // The timer to control the frequency of map request
+  timer mapRequest __attribute((recur(MAP_REQUEST_PERIOD)));
+
+  // The server's address
+  MaceKey serverAddr; 
+
+  //uint16_t msg_per_cycle;
+  uint16_t kidID;
+  uint16_t kidRole;
+  uint16_t kidLocation;
+  uint16_t curBuilding;
+  uint16_t curRoom;
+  coordinate coord;
+  uint16_t kidDirection;
+}
+ 
+transitions {
+  downcall (state == init) maceInit() {
+    //std::cout << "Initializing TagClient" << std::endl; 
+    serverAddr = MaceKey(ipv4, params::get<std::string>("SERVER_ADDR") );
+    // Send out the kid initial request
+    //std::cout << "Send RequireKidInit msg to server" << std::endl;
+    state = SLEEPING;
+  }
+
+  upcall (state == JOINING) deliver(const MaceKey& src, const MaceKey& dest, const ResponseKidInit& msg) {
+    //std::cout << "A ResponseKidInit msg has been received." << std::endl;
+    kidID = msg.kidID;
+    kidRole = msg.kidRole;
+    kidLocation = msg.kidLocation;
+    curBuilding = msg.kidBuilding;
+    curRoom = msg.kidRoom;
+    coord.x = DEFAULT_COORD;
+    coord.y = DEFAULT_COORD;
+    kidDirection = msg.kidDirection;
+    // Start the instruction timer and the map request timer
+    if( !mapRequest.isScheduled() )
+      mapRequest.schedule(MAP_REQUEST_PERIOD);
+    state = PLAYING;
+    std::cout << curtime << " playing" << std::endl;
+    //std::cout << "The client has been initialized." << std::endl;
+  }
+
+  //Receive the room Map
+  upcall (state == PLAYING) deliver(const MaceKey& src, const MaceKey& dest, const ReceiveMapInfo& msg) {
+    uint64_t currentTime = curtime;
+    std::cout << currentTime << " latency: " << currentTime - msg.timeStamp << std::endl;
+    std::cout << "Client received a room map" << std::endl;
+    upcall_roomMapResponseReceived(msg.kidLocation, msg.map);
+  }
+
+  // Send request to server to initialize a kid
+  downcall (state == SLEEPING) kidInit() {
+    std::cout << curtime << " joining" << std::endl;
+    downcall_route(serverAddr, RequireKidInit());
+    state = JOINING;
+  }
+
+  // Change the kid's location from the client side
+  downcall (state == PLAYING) changeDirection (uint16_t newDirection) {
+    std::cout << curtime << " move" << std::endl;
+    downcall_route(serverAddr, SetDirection(kidID, newDirection));
+  }
+
+  // Send request to server to remove a kid
+  downcall (state == PLAYING) kidLeave() {
+    std::cout << curtime << " leaving" << std::endl;
+    downcall_route(serverAddr, RequireKidLeave(kidID, kidLocation, curBuilding, curRoom));
+    mapRequest.cancel();
+    state = SLEEPING;
+    std::cout << curtime << " sleeping" << std::endl;
+  }
+
+  scheduler (state == PLAYING) mapRequest() {
+    // Constantly request the map from the server
+    //std::cout << "Send RequireMapInfo msg to server" << std::endl;
+    std::cout << curtime << " map_request" << std::endl;
+    downcall_route(serverAddr, RequireMapInfo(kidID, kidLocation, curBuilding, 
+          curRoom, curtime));
+  }
+}

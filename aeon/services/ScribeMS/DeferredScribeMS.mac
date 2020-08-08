@@ -1,0 +1,330 @@
+/* 
+ * DeferredScribeMS.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2007, Charles Killian, Adolfo Rodriguez, Sooraj Bhat
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in
+ *      the documentation and/or other materials provided with the
+ *      distribution.
+ *    * Neither the names of Duke University nor The University of
+ *      California, San Diego, nor the names of the authors or contributors
+ *      may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+/**
+ *  Implementation of the SCRIBE protocol
+ */
+
+#include "GlobalCommit.h"
+#include "ThreadStructure.h"
+
+service DeferredScribeMS;
+
+provides Tree, ScribeTree;
+
+trace=med;
+
+services {
+  ScribeTree scribe = ScribeMS();
+}
+
+auto_types {
+  // shyoo : deferred upcall support
+  Deferred_notifyChildAdded {
+    MaceKey groupId;
+    MaceKey childId;
+  }
+
+  Deferred_notifyChildren {
+    MaceKey groupId;
+    NodeSet children;
+  }
+
+  Deferred_notifyParent {
+    MaceKey groupId;
+    MaceKey parent;
+  }
+
+  Deferred_peerJoinedGroup {
+    MaceKey groupId;
+    MaceKey peer;
+  }
+}
+
+
+typedefs {
+  // shyoo : deferred upcall support
+  typedef mace::multimap<uint64_t, Deferred_notifyChildAdded> DeferredQueue_notifyChildAdded;
+  typedef mace::multimap<uint64_t, Deferred_notifyChildren> DeferredQueue_notifyChildren;
+  typedef mace::multimap<uint64_t, Deferred_notifyParent> DeferredQueue_notifyParent;
+  typedef mace::multimap<uint64_t, Deferred_peerJoinedGroup> DeferredQueue_peerJoinedGroup;
+}
+
+
+state_variables {
+  // shyoo : deferred upcall support
+  DeferredQueue_notifyChildAdded deferred_queue_notifyChildAdded;
+  DeferredQueue_notifyChildren deferred_queue_notifyChildren;
+  DeferredQueue_notifyParent deferred_queue_notifyParent;
+  DeferredQueue_peerJoinedGroup deferred_queue_peerJoinedGroup;
+
+  pthread_mutex_t deliverMutex1 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex2 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex3 __attribute((serialize(no)));
+  pthread_mutex_t deliverMutex4 __attribute((serialize(no)));
+
+}
+
+transitions {
+
+  //The automatic transition which occurs at the beginning.
+  downcall maceInit() {
+    // shyoo : deferred upcall support
+    mace::SpecificCommitWrapper<DeferredScribeMSService>* executor = new mace::SpecificCommitWrapper<DeferredScribeMSService>(this, &DeferredScribeMSService::commitCallBack);
+    mace::GlobalCommit::registerCommitExecutor(executor);
+    pthread_mutex_init(&deliverMutex1, 0);
+    pthread_mutex_init(&deliverMutex2, 0);
+    pthread_mutex_init(&deliverMutex3, 0);
+    pthread_mutex_init(&deliverMutex4, 0);
+
+  }
+
+  downcall setAuthoritativeGroupJoinHandler(registration_uid_t regId) [locking=none] {
+    downcall_setAuthoritativeGroupJoinHandler(regId);
+  }
+
+  downcall isRoot(const MaceKey& groupId) [locking=none] {
+    return downcall_isRoot(groupId);
+  }
+
+  downcall isMember(const MaceKey& groupId) [locking=none] {
+    return downcall_isMember(groupId);
+  }
+
+  downcall joinGroup(const MaceKey& groupId, registration_uid_t regId) [locking=none] {
+    downcall_joinGroup(groupId, regId);
+  }
+
+  downcall createGroup(const MaceKey& groupId) [locking=none] { 
+    downcall_createGroup(groupId);
+  }
+
+  downcall leaveGroup(const MaceKey& groupId) [locking=none] {
+    downcall_leaveGroup(groupId);
+  }
+
+  downcall pushdownChild(const MaceKey& groupId, const MaceKey& childId) [locking=none] {
+    return downcall_pushdownChild(groupId, childId);
+  }
+
+  downcall addChild(const MaceKey& groupId, const MaceKey& childId, int joinSeq) [locking=none] {
+    return downcall_addChild(groupId, childId, joinSeq);
+  }
+  
+  downcall getGroupJoinStatus(const MaceKey& groupId) [locking=none] {
+    return downcall_getGroupJoinStatus(groupId);
+  }
+  
+  downcall getParent(const MaceKey& groupId) [locking=none] {
+    return downcall_getParent(groupId);
+  }
+  
+  downcall getChildren(const MaceKey& groupId) [locking=none] {
+    return downcall_getChildren(groupId);
+  }
+
+
+  /*
+   * upcalls (non-deferrable)
+   * some of the following upcalls are actually deferrable, but was not implemented...
+   */
+
+  upcall verifyJoinGroup(const MaceKey& groupId, const MaceKey& source) [locking=none]
+  {
+    return upcall_verifyJoinGroup(groupId, source);
+  }
+
+  upcall joinResultGroup (const MaceKey& groupId, const MaceKey& source, join_status_t status)  [locking=none]
+  {
+     upcall_verifyJoinGroup(groupId, source);
+  }
+
+  upcall notifyJoinedGroups (NodeSet groups)  [locking=none]
+  {
+     upcall_notifyJoinedGroups(groups);
+
+  }
+  upcall notifySubscribedGroups (NodeSet groups)  [locking=none]
+  { 
+     upcall_notifySubscribedGroups(groups);
+
+  }
+  upcall selectParent (const MaceKey& groupId, const NodeSet& siblings, MaceKey& pushdownId, int joinSeq)  [locking=none]
+  { 
+    return upcall_selectParent(groupId, siblings, pushdownId, joinSeq );
+  }
+  upcall notifyChildRemoved (const MaceKey& groupId, const MaceKey& childId)  [locking=none]
+  { 
+     upcall_notifyChildRemoved(groupId, childId);
+  }
+  upcall notifyIsRootChanged (const MaceKey& groupId, bool isRoot)  [locking=none]
+  { 
+     upcall_notifyIsRootChanged(groupId, isRoot);
+  } 
+  upcall notifyIsMemberChanged (const MaceKey& groupId, bool isMember)  [locking=none]
+  { 
+     upcall_notifyIsMemberChanged(groupId, isMember);
+  } 
+  upcall notifyParentFailed (const MaceKey& groupId, const MaceKey& formerParent)  [locking=none]
+  { 
+     upcall_notifyParentFailed(groupId, formerParent);
+  }
+
+  /*
+   * upcalls (deferrable)
+   */
+
+  upcall notifyChildAdded (const MaceKey& groupId, const MaceKey& childId)  [locking=none]
+  { 
+     deferred_upcall_notifyChildAdded(groupId, childId);
+  }
+  upcall notifyChildren (const MaceKey& groupId, NodeSet children)  [locking=none]
+  { 
+     deferred_upcall_notifyChildren(groupId, children);
+  }
+  upcall notifyParent (const MaceKey& groupId, const MaceKey& parent)  [locking=none]
+  { 
+     deferred_upcall_notifyParent(groupId, parent);
+  }
+  upcall peerJoinedGroup (const MaceKey& groupId, const MaceKey& peer)  [locking=none]
+  { 
+     deferred_upcall_peerJoinedGroup(groupId, peer);
+  }
+}
+
+routines {
+
+  // shyoo : deferred upcall support
+  void commitCallBack(uint64_t myTicket) {
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifyChildAdded.size() << " messages." << Log::endl;
+      DeferredQueue_notifyChildAdded::iterator i;
+      for (i=deferred_queue_notifyChildAdded.begin(); i!= deferred_queue_notifyChildAdded.end(); i++) {
+        Deferred_notifyChildAdded m = i->second;
+        upcall_notifyChildAdded(m.groupId, m.childId);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifyChildren.size() << " messages." << Log::endl;
+      DeferredQueue_notifyChildren::iterator i;
+      for (i=deferred_queue_notifyChildren.begin(); i!= deferred_queue_notifyChildren.end(); i++) {
+        Deferred_notifyChildren m = i->second;
+        upcall_notifyChildren(m.groupId, m.children);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_notifyParent.size() << " messages." << Log::endl;
+      DeferredQueue_notifyParent::iterator i;
+      for (i=deferred_queue_notifyParent.begin(); i!= deferred_queue_notifyParent.end(); i++) {
+        Deferred_notifyParent m = i->second;
+        upcall_notifyParent(m.groupId, m.parent);
+      }
+    }
+
+    {
+      maceout << "commitCallback called. Processing outstanding " << deferred_queue_peerJoinedGroup.size() << " messages." << Log::endl;
+      DeferredQueue_peerJoinedGroup::iterator i;
+      for (i=deferred_queue_peerJoinedGroup.begin(); i!= deferred_queue_peerJoinedGroup.end(); i++) {
+        Deferred_peerJoinedGroup m = i->second;
+        upcall_peerJoinedGroup(m.groupId, m.peer);
+      }
+    }
+
+    deferred_queue_notifyChildAdded.clear();
+    deferred_queue_notifyChildren.clear();
+    deferred_queue_notifyParent.clear();
+    deferred_queue_peerJoinedGroup.clear();
+
+  }
+
+
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifyChildAdded(const MaceKey& groupId, const MaceKey& childId)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifyChildAdded(groupId, childId);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex1);
+      deferred_queue_notifyChildAdded.insert(mace::pair<uint64_t, Deferred_notifyChildAdded>(ThreadStructure::myTicket(), Deferred_notifyChildAdded(groupId, childId)));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifyChildren(const MaceKey& groupId, NodeSet children)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifyChildren(groupId, children);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex2);
+      deferred_queue_notifyChildren.insert(mace::pair<uint64_t, Deferred_notifyChildren>(ThreadStructure::myTicket(), Deferred_notifyChildren(groupId, children)));    // queue else
+    }
+  }
+
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifyParent(const MaceKey& groupId, const MaceKey& parent)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifyParent(groupId, parent);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex3);
+      deferred_queue_notifyParent.insert(mace::pair<uint64_t, Deferred_notifyParent>(ThreadStructure::myTicket(), Deferred_notifyParent(groupId, parent)));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_peerJoinedGroup(const MaceKey& groupId, const MaceKey& peer)
+  {
+    maceout << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_peerJoinedGroup(groupId, peer);    // deliver immediately
+    } else {
+      ScopedLock sl(deliverMutex4);
+      deferred_queue_peerJoinedGroup.insert(mace::pair<uint64_t, Deferred_peerJoinedGroup>(ThreadStructure::myTicket(), Deferred_peerJoinedGroup(groupId, peer)));    // queue else
+    }
+  }
+}
+

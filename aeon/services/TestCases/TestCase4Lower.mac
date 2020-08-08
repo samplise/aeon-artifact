@@ -1,0 +1,65 @@
+/**
+chuangw: test case 4 lower service. The upper service makes a downcall transition into this service.
+
+Purpose: make sure the runtime executes properly in the minimalist fashion.
+*/
+service TestCase4Lower;
+provides ServComp;
+trace=high;
+typedefs {
+}
+services {
+
+}
+
+constructor_parameters {
+  registration_uid_t HANDLER_RID = 0;
+  uint32_t NCONTEXTS = 100;
+}
+
+constants {
+}
+ 
+state_variables {
+  //registration_uid_t upcallRid;
+  context Contexts<uint32_t n>{
+  }
+}
+
+messages {
+}
+method_remappings {
+  uses {
+    /*downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t regId = control_);
+    downcall_route(const MaceKey&, const probe& , registration_uid_t regId = ping_);
+    downcall_route(const MaceKey&, const probe_reply& , registration_uid_t regId = ping_);*/
+    upcall_respond( uint32_t n, registration_uid_t regId = HANDLER_RID); 
+    upcall_ask( uint32_t n, registration_uid_t regId = HANDLER_RID); 
+  }
+}
+ 
+transitions {
+  downcall (state == init)maceInit()  {
+    for(uint32_t n =0; n< NCONTEXTS; n++ ){
+      async_initContexts(n);
+    }
+  }
+
+  async [Contexts<n>] initContexts(uint32_t n ){
+    //async_createEvent(n);
+  }
+
+  downcall [Contexts<n>] request( uint32_t n ){
+    async_createEvent(n ); 
+
+    return 0;
+  }
+
+  async [Contexts<n>] createEvent(uint32_t n ){
+    uint32_t v = upcall_ask(n);
+
+    ASSERT( v == n );
+  }
+
+}
+

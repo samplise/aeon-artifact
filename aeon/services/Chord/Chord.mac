@@ -1,0 +1,693 @@
+/* 
+ * Chord.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, Adolfo Rodriguez
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+/**
+XXX: old comment
+   Implementation of the Chord protocol
+   Adolfo Rodriguez
+
+   Notes:
+   This implementation currently only supports:
+   - 32-bit hash addresses
+   - Fixed stabilize and fix-finger timeouts
+   - Recursive forwarding
+   
+   Notes by Chip (4/25/06):
+   - Naming of things largely based on SigComm paper, but protocol seems
+     to be updated based on TON paper.
+
+**/
+
+#include "marray.h"
+#include "NodeCollection.h"
+using mace::MaceKeyDiff;
+
+service Chord;
+
+provides OverlayRouter, Overlay;
+//XXX: Handlers not done!
+
+trace=high;
+
+// time = MaceTime;
+
+constants {
+  //   int ADDRESS_FAMILY = SHA32;
+  int ADDRESS_FAMILY = SHA160;
+  int BITS = 32;  // Number of bits in the address
+  //   int BITS = 160;  // Number of bits in the address
+  uint64_t STABLE_TIMEOUT = 100*1000; //300*1000;  // stabilize timer
+  uint64_t FIX_TIMEOUT = 200*1000; //1*1000*1000; // fix_fingers timer
+  uint64_t JOIN_TIMEOUT = 500*1000;  // initial join timer
+  uint64_t RECOVERY_TIMEOUT = 60*1000*1000;  // initial join timer
+  uint64_t PRINT_TIMEOUT = 2000000; // for debugging
+  int MAX_SUCCESSORS = 4; // size of successor_list
+}
+
+constructor_parameters {
+  bool FIX_FINGERS_EXPECTATION = true;
+}
+
+states {
+  joining;
+  joined;
+}
+
+auto_types {
+  finger __attribute((node())) {
+    MaceKey hashId; //the node's hash id.
+    MaceKey hashIdPlusOne __attribute((serialize(no), dump(no; state=no))) = MaceKey::null; //plus one, for range comparisons...
+    //MaceKey start; //the beginning of the node's id space
+
+    const MaceKey& getHashIdPlusOne() {
+      if(hashIdPlusOne.isNullAddress()) {
+        ASSERT(!hashId.isNullAddress());
+        hashIdPlusOne = hashId + 1;
+      }
+      return hashIdPlusOne;
+    }
+    MaceKey getHashIdPlusOne() const {
+      if(hashIdPlusOne.isNullAddress()) {
+        ASSERT(!hashId.isNullAddress());
+        return hashId + 1;
+      }
+      return hashIdPlusOne;
+    }
+  }
+}
+
+method_remappings {
+  uses {
+    downcall_route(const MaceKey&, const Message& -> const std::string&);
+  }
+  implements {
+    upcalls {
+      deliver(const MaceKey&, const MaceKey&, const Message& <- const std::string&);
+    }
+  }
+}
+
+services {
+  Transport route = auto(shared,[reliable,inorder],[]);
+  //   Transport route = TcpTransport();
+}
+
+messages {
+  //May wish to use the forwarding service for this message to make it "prettier"
+  //used for joining, and for "fix fingers"
+  find_pred {  // used to find the predecessor and successor of an ID (sometimes called find successor.  Here find predecessor, because it is responded to by the predecessor, with info about the successor
+    MaceKey id;  // the hash in question (the one whose predecessor we want)
+    MaceKey who; // who originated the query (IP)
+    bool joining;
+  }
+  //returns the successor of the id requested
+  find_pred_reply {  // response to find_pred
+    MaceKey predId;  // the hash of the predecessor
+    MaceKey echoId;  // the hash finding the predecessor for.
+    finger successor;  // my routing table
+  }
+  //used for stabilization
+  get_pred { // queries a node for its predecessor and successor
+    MaceKey id;
+  }	 
+  get_pred_reply { // returns the requested information
+    finger predecessor;
+    NodeList successors; 
+    finger likelySuccessor;
+  }
+  update_pred { // instructs a node to potentially update its predecessor
+    MaceKey id;  // hash of the sending node
+  }
+  remove { } //used to instruct a node to remove the sender from its routing tables.
+}
+
+typedefs {
+  typedef mace::deque<mace::string> StringQueue;
+  typedef mace::NodeCollection<finger, MAX_SUCCESSORS> NodeList;
+}
+
+state_variables {	 
+  MaceKey source_;
+  MaceKey me;
+  MaceKey myhash;
+  MaceKey myhashplusone;
+  // disable failure detection for now
+  //  fail_detect finger myfinger BITS;
+  //  fail_detect finger predecessor;
+  mace::array<MaceKey, BITS> fingerKeys; //the hash id of the space the finger should manage
+  mace::array<finger, BITS> myfinger; // routing table
+  finger predecessor; // predecessor entry
+  //   finger successors_succ; // for error recovery
+
+  NodeList successor_list;
+  NodeSet succesor_hash_list;
+  NodeSet notifySuccessorAddedSet;
+  NodeSet notifySuccessorRemovedSet;
+  finger max_successor;
+
+  timer stabilize __attribute((recur(STABLE_TIMEOUT)));
+  timer fix_fingers __attribute((recur(FIX_TIMEOUT)));
+  timer recovery __attribute((recur(RECOVERY_TIMEOUT)));
+  timer printer __attribute((recur(PRINT_TIMEOUT)));
+  timer join;
+  StringQueue findQueue;
+  KeyRange myRange;
+}	  
+
+local_address {
+    MaceKey tmp = downcall_localAddress();
+    // derive bytes for sha from bamboo
+    std::string buf;
+    uint16_t p = htons(tmp.getMaceAddr().local.port);
+    buf.append((const char*)&p, sizeof(p));
+    char len = 4;
+    buf.append((const char*)&len, sizeof(len));
+    int i = tmp.getMaceAddr().local.addr;
+    buf.append((const char*)&i, sizeof(i));
+    //     maceout << "hashing " << Log::toHex(buf) << Log::endl;
+    if(ADDRESS_FAMILY == SHA160) {
+      return MaceKey(sha160, buf);
+    } else if(ADDRESS_FAMILY == SHA32) {
+      return MaceKey(sha32, buf);
+    }
+    ABORT("Exception: ADDRESS_FAMILY must be either SHA32 or SHA160");
+    return MaceKey::null;
+}
+
+transitions {
+
+  downcall (state == init) maceInit() {  // called to initialize protocol
+    me = downcall_localAddress();
+    myhash = localAddress();
+    myhashplusone = myhash + 1;
+    maceout << "myhash=" << myhash << Log::endl;
+    ASSERT(!myhash.isNullAddress());
+
+    //set up the fingerKeys
+    MaceKeyDiff diff = myhashplusone - myhash; //diff = 1
+    for(int i = 0; i < BITS; i++) {
+      fingerKeys[i] = myhash + diff;
+      diff = diff + diff; //doubling diff has the effect of creating the next biggest offset
+    }
+
+    predecessor = finger(me, myhash, myhashplusone);
+    myRange = KeyRange(myhashplusone, myhashplusone); //Fix thanks to bug report from HP(Kelley + Cho, Hyoun Kyu) -- bug diagnosed by Karthik (knagara)
+    ASSERT(!predecessor.hashId.isNullAddress());
+
+    for (int i=0; i<BITS; i++) {  // initializes all finger entries to me
+      myfinger[i] = predecessor;
+    }
+    ANNOTATE_SET_PATH_ID_STR(NULL, 0, "printer-%s", me.toString().c_str());
+    //     printer.reschedule(PRINT_TIMEOUT); //for debugging
+    defer_doNotifyIdSpaceChanged(myRange);
+  }
+
+  downcall (state == init) joinOverlay(const NodeSet& peerSet) {
+    if (peerSet.empty()) {
+      source_ = me;
+    } else {
+      source_ = *peerSet.begin();
+    }
+    if (source_ == me) { // i am the bootstrap
+      state = joined; // consider self joined
+      ANNOTATE_SET_PATH_ID_STR(NULL, 0, "stabilize-%s", me.toString().c_str());
+      stabilize.reschedule(STABLE_TIMEOUT); //schedule maintenance
+      ANNOTATE_SET_PATH_ID_STR(NULL, 0, "fix_fingers-%s", me.toString().c_str());
+      fix_fingers.reschedule(FIX_TIMEOUT);
+    }
+    else { // not the bootstrap
+      state = joining;  // just joining
+      downcall_route(source_, find_pred(myhash/*plusone*/, me, true));
+      join.reschedule(JOIN_TIMEOUT); // my request could get lost
+    }
+    //     upcall_notify(predecessor,NBR_TYPE_PEER);
+  }
+
+  scheduler (state == joining) join() { // retry if my request was lost
+    downcall_route(source_, find_pred(myhash/*plusone*/, me, true));
+    join.reschedule(JOIN_TIMEOUT); // my request could get lost
+  }
+
+  scheduler (state == joined && source_ != me) recovery() {
+    downcall_route(source_, find_pred(myhash, me, false));
+  }
+
+  //XXX: check how this plays with cached joins
+  upcall (state != joined && (!msg.joining || msg.who != src)) deliver(const MaceKey& src, const MaceKey& dest, const find_pred& msg) {
+    downcall_route(src, remove());
+  }
+
+  upcall (state == joined) deliver(const MaceKey& src, const MaceKey& dest, const find_pred& msg) {
+    //consider using forward...
+    MaceKey pred = nexthop(msg.id, true);
+    ASSERT(!pred.isNullAddress());
+    if (pred == me) { // arrived at destination
+      if (msg.who != me) { // i did not originate request
+        downcall_route(msg.who, find_pred_reply(myhash, msg.id, myfinger[0]));
+      }
+      // Note that this node's successor field is updated via stabilize timers
+      //      else { // update entries if needed
+      //	register_knowledge(succ, succ_hash);
+      //      }  Adolfo: Probably not needed.
+      return;
+    }
+    // route the find_pred
+    downcall_route(pred, msg);
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const remove& m) {
+    error(src, -1, "Asked to be removed", -1);
+  }
+
+  upcall (state != joined) deliver(const MaceKey& src, const MaceKey& dest, const find_pred& msg) {
+    mace::string s;
+    src.serialize(s);
+    msg.serialize(s);
+    findQueue.push_back(s);
+  }
+
+  upcall (state == joining && !msg.predId.isNullAddress()) deliver(const MaceKey& src, const MaceKey& dest, const find_pred_reply& msg) {
+    // my predecessor's old successor may suit me as route entry
+    register_knowledge(msg.successor);
+    // update p's old successor
+    downcall_route(msg.successor.getId(), update_pred(myhash)); 
+    ASSERT(!msg.predId.isNullAddress());
+    predecessor = finger(src, msg.predId, MaceKey::null);
+    register_knowledge(predecessor); //Chord8 -- add predecessor to state, instead of just as predecessor. :: NOTE: Not found without MC
+    myRange.first = predecessor.getHashIdPlusOne();
+    state = joined; //now joined
+    ANNOTATE_SET_PATH_ID_STR(NULL, 0, "stabilize-%s", me.toString().c_str());
+    recovery.reschedule(RECOVERY_TIMEOUT); //for fixing partitions
+    stabilize.reschedule(STABLE_TIMEOUT);// schedule maintenance
+    ANNOTATE_SET_PATH_ID_STR(NULL, 0, "fix_fingers-%s", me.toString().c_str());
+    fix_fingers.reschedule(FIX_TIMEOUT);
+    for(StringQueue::iterator i = findQueue.begin(); i != findQueue.end(); i++) {
+      MaceKey k;
+      std::istringstream in(*i);
+      size_t pos = k.deserialize(in);
+      ANNOTATE_PUSH_PATH_ID_STR(NULL, 0, "joinOverlay-%s", k.toString().c_str());
+      std::string s = (*i).substr(pos);
+      deliver(me, me, s, route);
+      ANNOTATE_POP_PATH_ID(NULL, 0);
+    }
+    //     upcall_notify(predecessor,NBR_TYPE_PEER);
+    defer_doNotifyIdSpaceChanged(myRange);
+  }
+
+  scheduler (state == joined && getSuccessor().getId() != me) stabilize() { // stabilize timer
+    // responsible for correcting predecessor and successor values
+    downcall_route(myfinger[0].getId(), get_pred(myhash));  // query successor for predecessor
+  }
+
+  scheduler (state == joined && getSuccessor().getId() == me && predecessor.hashId.isNullAddress()) stabilize() { // stabilize timer
+    // Self loop - need to update pred and myrange.  Perform after error...  (Don't fix as part of error because...?)
+    predecessor = finger(me, myhash, myhashplusone);
+    myRange.first = predecessor.getHashIdPlusOne();
+    defer_doNotifyIdSpaceChanged(myRange);
+  }
+
+  upcall (state == joined) deliver(const MaceKey& src, const MaceKey& dest, const get_pred& msg) {
+    //     register_knowledge(finger(src, msg.id)); // update fingers more aggressively
+    downcall_route(src, get_pred_reply(predecessor, successor_list, getLikelySuccessor(msg.id))); // let querying node know whom my successor
+    // and predecessor are
+  }
+
+  upcall (state == joined && src == getSuccessor().getId()) deliver(const MaceKey& src, const MaceKey& dest, const get_pred_reply& msg) {
+    NodeList::const_map_iterator i  = msg.successors.mapIterator();
+    while(i.hasNext()) {
+      register_knowledge(i.next());
+    }
+    if (msg.predecessor.getId() == me) { //FYI: Used to check the hash, not the IP (CK)
+      return;  // if he thinks i am his predecessor, we are done
+    }
+
+    if(!msg.likelySuccessor.hashId.isNullAddress()) {
+      register_knowledge(msg.likelySuccessor); // update fingers
+    }
+    if(!msg.predecessor.hashId.isNullAddress()) {
+      register_knowledge(msg.predecessor); // update fingers
+    }
+    // successor has likely changed: either old successor doesn't likely know of me yet, or my successor has changed.
+    downcall_route(myfinger[0].getId(), update_pred(myhash)); // let him know of me
+  }
+
+  // check to see if sending node should be our predecessor
+  upcall (state == joined && (predecessor.hashId.isNullAddress() || KeyRange::containsKey(msg.id, predecessor.getHashIdPlusOne(), myhash))) deliver(const MaceKey& src, const MaceKey& dest, const update_pred& msg) {
+    maceout << "change predecessor: old " << predecessor << " ";
+    finger f(src, msg.id);
+    ASSERT(!msg.id.isNullAddress());
+    if (!predecessor.hashId.isNullAddress()) {
+      downcall_route(predecessor.getId(), get_pred_reply(f, successor_list, getLikelySuccessor(predecessor.hashId)));
+    }
+    predecessor = f; //Chord2
+    myRange.first = predecessor.getHashIdPlusOne();
+    register_knowledge(f); /* Broken initially -- based on update to TON protocol */
+    maceout << "new " << predecessor << Log::endl;
+    //       upcall_notify(predecessor,NBR_TYPE_PEER);
+    defer_doNotifyIdSpaceChanged(myRange);
+  }
+
+  scheduler (state == joined && !(predecessor.getId() == me || getSuccessor().getId() == me)) fix_fingers() {
+    int myrand = randint(BITS); // select a random finger entry
+    MaceKey pred = nexthop(fingerKeys[myrand], true);
+    ASSERT(!pred.isNullAddress());
+
+    EXPECT(!FIX_FINGERS_EXPECTATION || pred != me); //Note: in rings with few numbers of nodes this will be more common, since your successor may be a ways away.
+    if(pred != me) {
+      downcall_route(pred, find_pred(fingerKeys[myrand], me, false));
+    }
+  }
+
+  upcall (state == joined) deliver(const MaceKey& src, const MaceKey& dest, const find_pred_reply& msg) {
+    //NOTE: though most of this is recovery related, note that the need to sometimes register knowledge on your predecessor was only found in modelchecking
+    //Moved for Chord13
+    //Removed for Chord16
+    if(!msg.predId.isNullAddress()) {
+      finger f(src, msg.predId, MaceKey::null);
+      if(predecessor.getId() == me) { //Chord17 -- clear pred when adding a successor
+        predecessor = finger();
+      }
+      register_knowledge(f);
+    }
+    if(msg.echoId == myhash) {
+      if(msg.successor.hashId == myhash) {
+        return; // All's well.  Did a lookup for my key, and found myself.
+      } else {
+        downcall_route(src, find_pred_reply(MaceKey::null,myhash,finger(me, myhash)));
+      }
+    }
+    // when attempting to fix my finger table, I will get replies from nodes
+    // to consider
+    if(predecessor.getId() == me && msg.successor.getId() != me) {
+      predecessor = finger(); //Chord17 -- clear pred when adding a successor
+      register_knowledge(msg.successor); // update fingers
+    }
+  }
+
+  scheduler printer() {
+    dumpState(maceout);
+    maceout << Log::endl;
+  }
+
+  upcall (true) error(const MaceKey& nodeId, TransportError::type error_code, const std::string& m, registration_uid_t registrationUid) {
+    int loopbit;
+    maceout << "Neighbor " << nodeId << " died! " << m << Log::endl;
+    bool registerPredecessor = true;
+    if(predecessor.getId() == nodeId) {
+      predecessor = finger();
+      registerPredecessor = false;
+    }
+    NodeList::iterator i = successor_list.find(nodeId);
+    if (i != successor_list.end()) {
+      prepNotifyRemoved(i->second.hashId);
+      successor_list.erase(nodeId);
+    }
+    if(myfinger[BITS-1].getId() == nodeId) {
+      myfinger[BITS-1] = finger(me, myhash, myhashplusone);
+    }
+    for (loopbit = BITS-2; loopbit>=0; loopbit--) {
+      if (nodeId == myfinger[loopbit].getId()) {
+        myfinger[loopbit] = myfinger[loopbit+1];
+        //         } else if (predecessor.getId().isNullAddress() && myfinger[loopbit].getId() != me) {
+        //           predecessor = myfinger[loopbit];
+        //           ASSERT(!predecessor.hashId.isNullAddress());
+    }
+    }
+    if(registerPredecessor && !predecessor.hashId.isNullAddress()) {
+      register_knowledge(predecessor);
+    }
+    //XXX: update successor list with one removed
+    if(successor_list.space()) {
+      for (loopbit = 0; loopbit < BITS && myfinger[loopbit].getId() != me && successor_list.space(); loopbit++) {
+        if (!successor_list.containsKey(myfinger[loopbit].getId())) {
+          successor_list.add(myfinger[loopbit]);
+          prepNotifyAdded(myfinger[loopbit].hashId);
+        }
+      }
+      update_successor_list_state();
+    }
+    NodeList::map_iterator mi = successor_list.mapIterator();
+    while(mi.hasNext()) {
+      register_knowledge(mi.next());
+    }
+  }
+
+  downcall idSpaceContains(const MaceKey& id) {
+    if(state != joined) {
+      return true;
+    }
+    else {
+      return myRange.containsKey(id);
+    }
+  }
+
+  downcall getSuccessors() {
+    if(state != joined) {
+      static const NodeSet n;
+      return n;
+    }
+    else {
+      return succesor_hash_list;
+    }
+  }
+
+  downcall getIdSpace() {
+    if(state != joined) {
+      static const KeyRange k;
+      return k;
+    } else {
+      return myRange;
+    }
+  }
+
+  downcall getNextHop(const MaceKey& id) {
+    if(state == joined) {
+      return nexthop(id, false);
+    }
+    else {
+      return me;
+    }
+  }
+
+  downcall getNextHop(const MaceKey& id, MaceKey& ovId) {
+    if(state == joined) {
+      return nexthop(id, false, &ovId);
+    }
+    else {
+      ovId = myhash;
+      return me;
+    }
+  }
+  
+}
+
+routines {
+  const finger& getLikelySuccessor(const MaceKey& hashId) const {
+    const finger* f = &predecessor;
+
+    int loopbit = BITS-1;
+    while (loopbit >= 0 && (f->hashId.isNullAddress() || KeyRange::containsKey(hashId, f->hashId, myfinger[loopbit].hashId))) {
+      f = &myfinger[loopbit];
+      loopbit--;
+    }
+
+    return *f;
+  }
+
+  // XXX: setting ovId seems broken if strictlyPred is set.  Adding assertion to check.
+  MaceKey nexthop (const MaceKey& target, bool strictlyPred = false, MaceKey* ovId = NULL) const [trace=off] {
+    ASSERT(!strictlyPred || ovId == NULL);
+    //Rem: KeyRange::containsKey is left inclusive, right exclusive -- so the need for plusone
+    if(myRange.containsKey(target)) {
+      //If its in my range, then I'm the destination
+      if(ovId != NULL) { *ovId = myhash; }
+      if(strictlyPred) {
+        if(!predecessor.getId().isNullAddress()) {
+          return predecessor.getId();
+        } else {
+          for(int i = BITS-1; i >= 0; i--) {
+            if(myfinger[i].getId() != me) {
+              return myfinger[i].getId();
+            }
+          }
+        }
+        return me; //Chord18: nexthop returning null when the ring is just me.  MaceKey::null;
+      }
+      //Note -- this case is kinda funny for Chord -- which is really a node location service not a routing service...
+      return me;
+    }
+    else if(KeyRange::containsKey(target, myhashplusone, myfinger[0].getHashIdPlusOne())) {
+      if(ovId != NULL) { *ovId = myfinger[0].hashId; }
+      if(strictlyPred) {
+        return me;
+      }
+      return myfinger[0].getId();
+    }
+    //XXX: Optimize on successor list?
+  
+    //else it must be in our finger table somewhere.
+    KeyRange keyRange(myhashplusone, target); //Note: using target gives us strictly a predecessor, since an exact match would not match due to right exclusivity.  What's the right thing to do?  Chord status will nearly require that the predecessor be found, but still...
+    //NOTE: MUCH Simpler than prior MACEDON code.
+    for(int i = BITS-1; i >= 0; i--) {
+      if(keyRange.containsKey(myfinger[i].hashId)) {
+        if(ovId != NULL) { *ovId = myfinger[i].hashId; }
+        return myfinger[i].getId();
+      }
+    }
+    ASSERT(false);
+    if(ovId != NULL) { *ovId = myhash; }
+    return me;
+  }
+
+  int register_knowledge (const finger& peer) {
+    // updates the appropriate finger table entr(ies)
+    // returns 1 if an update occurred
+    ASSERT(!peer.hashId.isNullAddress());
+    update_successor_list(peer);
+    bool change=false;
+    KeyRange keyRange(myhashplusone, peer.getHashIdPlusOne());
+    for (int loopbit = 0; loopbit < BITS && keyRange.containsKey(fingerKeys[loopbit]); loopbit++) {
+      //XXX: Need to also exlcude when the fingerKeys[loopbit] == myfinger[loopbit].hashId.  Thanks Aimin!
+      if(KeyRange::containsKey(peer.hashId, fingerKeys[loopbit], myfinger[loopbit].hashId/*getHashIdPlusOne() before*/)) {
+        //then peer.hashId is a better match than myfinger[loopbit]
+        maceout << "change finger " << loopbit << ": old " << myfinger[loopbit];
+        myfinger[loopbit] = peer;
+        maceout << " new " << myfinger[loopbit] << Log::endl;
+        change = true;
+      }
+    }
+    return change;
+  } 
+
+  void update_successor_list(const finger& peer) {
+    if (peer.getId() == me) { return; } //Fix for HP reported problems.  A node should not be in its own successor list.
+    if(successor_list.space() && !successor_list.contains(peer.getId())) {
+      prepNotifyAdded(peer.hashId);
+      successor_list.add(peer);
+      update_successor_list_state();
+      if(max_successor.hashId.isNullAddress() || !KeyRange::containsKey(peer.hashId, myhashplusone, max_successor.getHashIdPlusOne())) {
+        max_successor = peer;
+      }
+    }
+    else if(KeyRange::containsKey(peer.hashId, myhashplusone, max_successor.hashId) && !successor_list.contains(peer.getId())) {
+      prepNotifyRemoved(max_successor.hashId);
+      prepNotifyAdded(peer.hashId);
+
+      successor_list.erase(max_successor);
+      successor_list.add(peer);
+      update_successor_list_state();
+    }
+  }
+
+  /// Updates both max_successor and successor_hash_list
+  void update_successor_list_state() {
+    succesor_hash_list.clear();
+    max_successor = finger();
+    NodeList::map_iterator i = successor_list.mapIterator();
+    while(i.hasNext()) {
+      const finger& f = i.next();
+      succesor_hash_list.insert(f.hashId);
+      if(max_successor.getId().isNullAddress() || !KeyRange::containsKey(f.hashId, myhashplusone, max_successor.getHashIdPlusOne())) {
+        max_successor = f;
+      }
+    }
+  }
+
+  const finger& getSuccessor() const {
+    return myfinger[0];
+  }
+  
+  void doNotifyIdSpaceChanged(const KeyRange& k) {
+    upcallAllVoid(notifyIdSpaceChanged,k);
+  }
+
+  void prepNotifyAdded(const MaceKey& k) {
+    if (notifySuccessorAddedSet.insert(k).second) {
+      defer_notifySuccessorChanges();
+    }
+  }
+  void prepNotifyRemoved(const MaceKey& k) {
+    if (notifySuccessorRemovedSet.insert(k).second) {
+      defer_notifySuccessorChanges();
+    }
+  }
+  void notifySuccessorChanges() {
+    bool didNotify = false;
+    macedbg(0) << "notifySuccessorAddedSet: " << notifySuccessorAddedSet << Log::endl;
+    macedbg(0) << "notifySuccessorRemovedSet: " << notifySuccessorRemovedSet << Log::endl;
+    macedbg(0) << "succesor_hash_list: " << succesor_hash_list << Log::endl;
+    while (!(notifySuccessorAddedSet.empty() && notifySuccessorRemovedSet.empty())) {
+      NodeSet nsr;
+      nsr.swap(notifySuccessorRemovedSet);
+      for (NodeSet::const_iterator i = nsr.begin(); i != nsr.end(); i++) {
+        if (!succesor_hash_list.containsKey(*i)) {
+          upcallAllVoid(notifySuccessorRemoved, *i);
+          didNotify = true;
+        }
+      }
+      NodeSet nsa;
+      nsa.swap(notifySuccessorAddedSet);
+      macedbg(0) << "nsa: " << nsa << " (new notifySuccessorAddedSet: " << notifySuccessorAddedSet << " )" << Log::endl;
+      for (NodeSet::const_iterator i = nsa.begin(); i != nsa.end(); i++) {
+        macedbg(0) << "nsa - considering: " << *i << Log::endl;
+        if (succesor_hash_list.containsKey(*i)) {
+          macedbg(0) << "    - contained.  Doing upcall." << Log::endl;
+          upcallAllVoid(notifySuccessorAdded, *i);
+          didNotify = true;
+        }
+        else {
+          macedbg(0) << "    - not contained.  Node has been removed already." << Log::endl;
+        }
+      }
+    }
+    if (didNotify) {
+      upcallAllVoid(notifySuccessors, succesor_hash_list);
+    }
+  }
+}
+
+properties
+{
+  safety {
+    //     predecessorNonNullSafety: \forall n \in \nodes: { n.state = init \or \not n.predecessor.hashId.isNullAddress() }; //Take away when move to "current"
+    selfRouting: \forall n \in \nodes: { n.state = init \or n.getNextHop(n.myhash, -1) = n };  //Added safety property to avoid future problems reported by HP
+    notInSuccessorList: \forall n \in \nodes: { \not n.successor_list.containsKey(n.me) };
+    successorAndPredecessor: \forall n \in \nodes: { n.predecessor.getId() = n.me \implies n.getSuccessor().getId() = n.me }; //pred = me if and only if succ = me
+    predecessorNonNullSafety: \forall n \in \nodes: { n.state = init \or n.predecessor.hashId.isNullAddress() \or n.predecessor.getId() = n.me \or n.predecessor.getHashIdPlusOne() = n.myRange.first }; 
+  }
+  liveness {
+    nodesJoined : \forall n \in \nodes : { n.state = joined };
+    allNodes : \forall n \in \nodes : { n.(getSuccessor().getId())* \eq \nodes };
+    predecessorNonNull: \forall n \in \nodes : \not n.predecessor.getId().isNullAddress();
+    successorReflexive : \forall n \in \nodes : n.getSuccessor().getId().predecessor.getId() = n;
+    allNodesReachable : \forall n \in \nodes : \forall m \in \nodes : { m \in n.(getNextHop(m.myhash, -1))* };
+    //     logPath : \forall n \in \nodes : \forall m \in \nodes : { |n.(getNextHop(m.myhash, -1))*| \leq MAX_ROUTE_DIST };
+  }
+}

@@ -1,0 +1,265 @@
+#include "Event.h"
+#include "mace.h"
+#include "HeadEventDispatch.h"
+#include "ThreadStructure.h"
+#include "ContextMapping.h"
+#include "SpecialMessage.h"
+
+uint64_t mace::Event::nextTicketNumber = 1;
+uint64_t mace::Event::lastWriteContextMapping = 0;
+bool mace::Event::isExit = false;
+uint64_t mace::Event::exitEventID = std::numeric_limits<uint64_t>::max();
+
+bool mace::operator==( mace::EventMessageRecord const& r1, mace::EventMessageRecord const& r2){
+  if( r1.sid == r2.sid && r1.dest == r2.dest && r1.message == r2.message && r1.rid == r2.rid ){
+    return true;
+  }
+  return false;
+}
+
+////////////////// EventRequestWrapper ///////////////
+
+mace::EventRequestWrapper & mace::EventRequestWrapper::operator=( mace::EventRequestWrapper const& right ){
+#ifndef EVENTREQUEST_USE_SHARED_PTR
+  /*if( this != &right ){
+    delete request;
+    if( right.request == NULL ){
+      request = NULL;
+      sid = 0;
+    }else{
+      request = right.request->clone();
+      sid = right.sid;
+    }
+  } 
+  */
+  sid = right.sid;
+  request = right.request;
+#else
+  sid = right.sid;
+  request = right.request;
+
+#endif
+  return *this;
+}
+mace::EventRequestWrapper::EventRequestWrapper( mace::EventRequestWrapper const& right ): sid( right.sid ), request(){
+
+    //ADD_SELECTORS("ContextService::(copyconstructor)");
+#ifndef EVENTREQUEST_USE_SHARED_PTR
+  /*if( right.request != NULL ){
+    request = right.request->clone();
+  }*/
+  request = right.request;
+#else
+  request = right.request;
+#endif
+}
+mace::EventRequestWrapper::~EventRequestWrapper(){
+  //ADD_SELECTORS("ContextService::(destructor)");
+#ifndef EVENTREQUEST_USE_SHARED_PTR
+  //delete request;
+#endif
+  //maceout<< "0x"<< (uint64_t)request.get() << " unique? " << request.unique() << Log::endl;
+}
+void mace::EventRequestWrapper::print(std::ostream& out) const {
+  out<< "EventRequestWrapper(";
+  out<< "sid="; mace::printItem(out, &(sid) ); out<<", ";
+  out<< "request="<< (*request) ;
+  out<< ")";
+}
+void mace::EventRequestWrapper::printNode(PrintNode& pr, const std::string& name) const {
+  mace::PrintNode printer(name, "EventRequestWrapper" );
+  mace::printItem( printer, "sid", &sid );
+  mace::printItem( printer, "request", &request );
+  pr.addChild( printer );
+}
+void mace::EventRequestWrapper::serialize(std::string& str) const{
+    mace::serialize( str, &sid );
+    request->serialize( str );
+}
+int mace::EventRequestWrapper::deserialize(std::istream & is) throw (mace::SerializationException){
+    int serializedByteSize = 0;
+    serializedByteSize += mace::deserialize( is, &sid );
+
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( sid );
+    mace::Message* ptr;
+    serializedByteSize += serviceInstance->deserializeMethod( is, ptr );
+    request = RequestType(ptr);
+
+    return serializedByteSize;
+}
+
+
+
+////////////////// EventUpcallWrapper ///////////////
+
+mace::EventUpcallWrapper & mace::EventUpcallWrapper::operator=( mace::EventUpcallWrapper const& right ){
+  sid = right.sid;
+  upcall = right.upcall;
+  return *this;
+}
+mace::EventUpcallWrapper::EventUpcallWrapper( mace::EventUpcallWrapper const& right ): sid( right.sid ), upcall(){
+
+  upcall = right.upcall;
+}
+mace::EventUpcallWrapper::~EventUpcallWrapper(){
+}
+void mace::EventUpcallWrapper::print(std::ostream& out) const {
+  out<< "EventUpcallWrapper(";
+  out<< "sid="; mace::printItem(out, &(sid) ); out<<", ";
+  out<< "upcall="<< (*upcall) ;
+  out<< ")";
+}
+void mace::EventUpcallWrapper::printNode(PrintNode& pr, const std::string& name) const {
+  mace::PrintNode printer(name, "EventUpcallWrapper" );
+  mace::printItem( printer, "sid", &sid );
+  mace::printItem( printer, "upcall", &upcall );
+  pr.addChild( printer );
+}
+void mace::EventUpcallWrapper::serialize(std::string& str) const{
+    mace::serialize( str, &sid );
+    upcall->serialize( str );
+}
+int mace::EventUpcallWrapper::deserialize(std::istream & is) throw (mace::SerializationException){
+    int serializedByteSize = 0;
+    serializedByteSize += mace::deserialize( is, &sid );
+
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( sid );
+    mace::Message* ptr;
+    serializedByteSize += serviceInstance->deserializeMethod( is, ptr );
+    upcall = ptr;
+
+    return serializedByteSize;
+}
+
+////////////////// EventSkipRecord ///////////////
+
+void mace::EventSkipRecord::print(std::ostream& out) const {
+  out<< "EventSkipRecord(";
+  out<< "contextID="; mace::printItem(out, &(contextID) ); out<<", ";
+  out<< "skipID="; mace::printItem(out, &(skipID) ); out<<", ";
+  if( childContextRecord != NULL ){
+    out<< "childContextRecord="; mace::printItem(out, childContextRecord ); out<<")";
+  }
+}
+void mace::EventSkipRecord::printNode(PrintNode& pr, const std::string& name) const {
+  mace::PrintNode printer(name, "EventSkipRecord" );
+  
+  mace::printItem( printer, "contextID", &contextID );
+  mace::printItem( printer, "skipID", &skipID );
+  if( childContextRecord != NULL ){
+    mace::printItem( printer, "childContextRecord", childContextRecord );
+  }
+  pr.addChild( printer );
+}
+void mace::EventSkipRecord::serialize(std::string& str) const{
+  mace::serialize( str, &contextID );
+  mace::serialize( str, &skipID );
+  if( childContextRecord != NULL ){
+    mace::serialize( str, childContextRecord );
+  }
+}
+int mace::EventSkipRecord::deserialize(std::istream & is) throw (mace::SerializationException){
+  int serializedByteSize = 0;
+  serializedByteSize += mace::deserialize( is, &contextID );
+  serializedByteSize += mace::deserialize( is, &skipID );
+  if( childContextRecord != NULL ){
+    serializedByteSize += mace::deserialize( is, childContextRecord );
+  }
+  return serializedByteSize;
+}
+
+
+
+////////////////// Event ///////////////
+void mace::Event::print(std::ostream& out) const {
+  out<< "Event(";
+  out<< "eventId="; mace::printItem(out, &(eventId) ); out<<", ";
+  out<< "eventType="; 
+  
+  switch( eventType ){
+    case STARTEVENT: out<<"STARTEVENT"; break;
+    case ENDEVENT: out<<"ENDEVENT"; break;
+    case TIMEREVENT: out<<"TIMEREVENT"; break;
+    case ASYNCEVENT: out<<"ASYNCEVENT"; break;
+    case UPCALLEVENT: out<<"UPCALLEVENT"; break;
+    case DOWNCALLEVENT: out<<"DOWNCALLEVENT"; break;
+    case MIGRATIONEVENT: out<<"MIGRATIONEVENT"; break;
+    case NEWCONTEXTEVENT: out<<"NEWCONTEXTEVENT"; break;
+    case UNDEFEVENT: out<<"UNDEFEVENT"; break;
+    default: mace::printItem(out, &(eventType) ); break;
+  }
+  
+  out<<", ";
+
+  out<< "eventContexts="; mace::printItem(out, &(eventContexts) ); out<<", ";
+  out<< "eventSnapshotContexts="; mace::printItem(out, &(eventSnapshotContexts) ); out<<", ";
+  out<< "eventContextMappingVersion="; mace::printItem(out, &(eventContextMappingVersion) ); out<<", ";
+  out<< "eventSkipID="; mace::printItem(out, &(eventSkipID) ); out<<", ";
+  out<< "subevents="; mace::printItem(out, &subevents); out<<", ";
+  out<< "eventMessages="; mace::printItem(out, &eventMessages); out<<", ";
+  out<< "eventUpcalls="; mace::printItem(out, &eventUpcalls);
+  out<< ")";
+
+} // print
+
+void mace::Event::printNode(PrintNode& pr, const std::string& name) const {
+  mace::PrintNode printer(name, "Event" );
+  
+  mace::printItem( printer, "eventId", &eventId );
+  mace::printItem( printer, "eventType", &eventType );
+  mace::printItem( printer, "eventContexts", &eventContexts );
+  mace::printItem( printer, "eventSnapshotContexts", &eventSnapshotContexts );
+  mace::printItem( printer, "eventContextMappingVersion", &eventContextMappingVersion );
+  mace::printItem( printer, "eventSkipID", &eventSkipID );
+  mace::printItem( printer, "subevents", &subevents );
+  mace::printItem( printer, "eventMessages", &eventMessages );
+  mace::printItem( printer, "eventUpcalls", &eventUpcalls );
+  pr.addChild( printer );
+}
+void mace::Event::sendDeferredMessages(){
+  ThreadStructure::ScopedContextID sc( ContextMapping::getHeadContextID() );
+  for( DeferredMessageType::iterator msgIt = eventMessages.begin(); msgIt != eventMessages.end(); msgIt++ ){
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( msgIt->sid );
+    serviceInstance->dispatchDeferredMessages( msgIt->dest, msgIt->message, msgIt->rid );
+  }
+}
+bool mace::Event::deferExternalMessage( uint8_t instanceUniqueID, MaceKey const& dest,  std::string const&  message, registration_uid_t const rid ){
+  ADD_SELECTORS("Event::deferExternalMessage");
+  macedbg(1)<<"defer an external message sid="<<(uint16_t)instanceUniqueID<<", dest="<<dest<<", rid="<<rid<<Log::endl;
+  EventMessageRecord emr(instanceUniqueID, dest, message, rid );
+  eventMessages.push_back( emr );
+  return true;
+
+}
+void mace::Event::executeApplicationUpcalls(){
+  mace::string dummyString;
+  for( DeferredUpcallType::iterator msgIt = eventUpcalls.begin(); msgIt != eventUpcalls.end(); msgIt++ ){
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( msgIt->sid );
+
+    mace::ApplicationUpcall_Message* upcall = static_cast< mace::ApplicationUpcall_Message* >( msgIt->upcall );
+    serviceInstance->executeDeferredUpcall( upcall, dummyString );
+  }
+  clearEventUpcalls();
+}
+void mace::Event::enqueueDeferredEvents(){
+  createToken();
+
+  HeadEventDispatch::HeadEventTP::executeEvent((HeadEventDispatch::eventfunc)&BaseMaceService::createEvent, subevents , false );
+}
+void mace::Event::newEventID( const int8_t type){
+  ADD_SELECTORS("Event::newEventID");
+  static uint32_t eventCreateIncrement = params::get("EVENT_CREATE_INCREMENT", 1);
+  // if end event is generated, raise a flag
+  if( type == ENDEVENT ){
+    isExit = true;
+  }
+  eventId = ThreadStructure::myTicket();
+
+  //Accumulator::Instance(Accumulator::EVENT_CREATE_COUNT)->accumulate(1); // increment committed event number
+  if( eventId.create_eventId %eventCreateIncrement ==0){
+    Accumulator::Instance(Accumulator::EVENT_CREATE_COUNT)->accumulate(eventCreateIncrement); // increment committed event number
+  }
+
+  eventType = type;
+  //macedbg(1) << "Event ticket " << eventID << " sold! "<< Log::endl;//<< *this << Log::endl;
+}

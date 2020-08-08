@@ -1,0 +1,419 @@
+#include "SysUtil.h"
+#include <gsl/gsl_rng.h>
+
+service GOL;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  NodeSet CHAT_NODES = NodeSet();
+  uint64_t NUM_ROWS = 0;
+  uint64_t NUM_COLS = 0;
+  uint64_t SEED = 0;
+  uint32_t ROUNDS = 0;
+
+  uint64_t INITIAL_WAIT_TIME = 3 *1000*1000; // How long should wait until start (for worker)
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  Border {
+    uint32_t node_id;
+    uint32_t round;
+    mace::vector<uint8_t> border;
+  }
+  Join {}
+  ComputeStart {}
+  Finish {
+    double compute_time;
+  }
+}
+
+typedefs {
+  typedef mace::vector<MaceKey> NodeVector;
+  typedef mace::vector< mace::vector<uint8_t> > VectorList;
+}
+
+states {
+  initiator;
+  worker;
+  finishing;
+}
+
+state_variables {
+  context Empty { }
+  NodeVector node_list;
+  MaceKey me;
+  MaceKey master;
+  uint32_t my_id;
+  
+  mace::vector<uint8_t> map;
+  mace::vector<uint8_t> neighbors;
+
+  uint64_t num_rows;
+  uint64_t num_cols;
+  uint64_t num_mycols;
+
+  // master-specific information
+  double ts_start;
+  double ts_gen;
+  double ts_end;
+
+  double ts_compute_start;
+  double ts_compute_all;
+  double ts_compute_total;
+
+  // version map
+  int32_t num_expected_messages;
+  int32_t num_received_messages;
+  uint32_t num_rounds;
+
+  timer finish_timer;
+
+}
+
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("GOL::start");
+    me = localAddress();
+
+    uint32_t id = 0;
+
+    maceout << "CHAT_NODES = " << CHAT_NODES << Log::endl;
+    for(NodeSet::const_iterator i = CHAT_NODES.begin(); i != CHAT_NODES.end(); i++ )
+    {
+      node_list.push_back(*i);
+      if( *i == me ) {
+        my_id = id;
+      }
+      id++;
+    }
+
+    ASSERT(node_list.size() > 0);
+    master = node_list[0];
+    
+    //num_sent_messages = 0;
+
+    SysUtil::sleepu(INITIAL_WAIT_TIME); // sleep some seconds to wait for other nodes to be booted.
+
+    /* initialize join */
+    if( master == me )
+    {
+      state = initiator;
+      std::cout << curtime << " " << me << " initiator" << std::endl;
+    }
+    else
+    {
+      state = worker;
+      std::cout << curtime << " " << me << " worker" << std::endl;
+    }
+
+    downcall_route(master, Join());
+    //num_remaining_nodes = node_list.size();
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Join& msg) { 
+    ASSERT(me==master);
+    num_received_messages++;
+
+    if( (uint32_t) num_received_messages >= node_list.size()) {
+      std::cout << curtime << " sending ComputeStart" << std::endl;
+      ts_start = (double)TimeUtil::timeu();
+
+      for( uint32_t i=0; i<node_list.size(); i++) {
+        downcall_route(node_list[i], ComputeStart());
+      }
+      num_received_messages = 0;
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ComputeStart& msg) { 
+
+    /* initialize map */
+
+    std::cout << curtime << " initializing map" << std::endl;
+
+    num_rows = NUM_ROWS;
+    num_cols = NUM_COLS - NUM_COLS % node_list.size(); // make it integer. We divide it by column.
+    num_mycols = num_cols / node_list.size();
+
+    ASSERT(0 < num_rows && 0 < num_cols && 0 < num_mycols);
+    ASSERT(num_cols >= node_list.size());
+    ASSERT(std::numeric_limits<uint32_t>::max() > num_rows);
+    ASSERT(std::numeric_limits<uint32_t>::max() > num_cols);
+    ASSERT(0 < SEED);
+    ASSERT(std::numeric_limits<uint64_t>::max() > SEED);
+
+    maceout << "report " << me << " cols_per_current_node = " << num_mycols << Log::endl;
+
+    gsl_rng * GSL_RNG = gsl_rng_alloc(gsl_rng_mt19937);
+    gsl_rng_set(GSL_RNG, (unsigned long int)SEED);
+
+    for (uint64_t i=0; i < num_rows; i++)
+    {
+      for(uint64_t j=0; j < num_mycols+2; j++)
+      {
+        if( j == 0 || j == num_mycols+1 ) {
+          map.push_back(0);
+        } else {
+          map.push_back( (uint8_t)gsl_rng_uniform_int(GSL_RNG, 2) );
+        }
+
+        neighbors.push_back(0);
+      }
+    }
+
+    //print_set();
+    //print_neighbors();
+
+    num_rounds = 0;
+
+    ts_gen = (double)TimeUtil::timeu();
+    ts_compute_all = 0;
+    ts_compute_total = 0;
+
+    std::cout.setf(std::ios::fixed);
+    std::cout << curtime << std::setprecision(0) << " gen_time = " << (ts_gen-ts_start) << std::endl;
+
+    //ASSERT(0);
+    num_expected_messages = 2;
+    if( my_id == 0 ) {
+      num_expected_messages--;
+    } 
+    if( my_id == node_list.size()-1) {
+      num_expected_messages--;
+    }
+
+    std::cout << curtime << " compute start" << std::endl;
+
+    if( node_list.size() > 1 ) {
+      compute(false); /* send the border */
+    } else {
+      compute(true);  // in case of single node
+    }
+
+    num_received_messages = 0;
+  }
+
+  upcall (state != finishing) deliver(const MaceKey& src, const MaceKey& dest, const Border& msg) {
+    ADD_SELECTORS("GOL::deliver::Border");
+
+    //maceout << "Border received. msg = " << msg << Log::endl;
+
+    num_received_messages++;
+
+    // update border information
+    ASSERT(msg.node_id == my_id+1 || msg.node_id == my_id-1);
+    ASSERT(msg.border.size() == num_rows);
+
+    if( msg.node_id == my_id-1 ) {
+      for( uint64_t i = 0; i < msg.border.size(); i++ ) {
+        map[i * (num_mycols+2) + 0] = msg.border[i];
+      }
+    } else {
+      for( uint64_t i = 0; i < msg.border.size(); i++ ) {
+        map[i * (num_mycols+2) + (num_mycols+1)] = msg.border[i];
+      }
+    }
+
+    //maceout << "num_rounds = " << num_rounds << " num_received_message = " << num_received_messages << " num_expected_messages = " << num_expected_messages << Log::endl;
+
+    if( num_received_messages >= num_expected_messages ) {
+      num_received_messages = 0;
+      num_rounds++;
+      compute(true);
+    }
+
+    std::cout << "num_rounds = " << num_rounds << " num_received_message = " << num_received_messages << " num_expected_messages = " << num_expected_messages << std::endl;
+    
+    if( num_rounds > ROUNDS ) {
+      //std::cout.setf(std::ios::fixed);
+      std::cout << "finished rounds = " << num_rounds << std::endl;
+      //std::cout << curtime << std::setprecision(0) << " compute_all = " << ts_compute_all << std::endl;
+      downcall_route(master, Finish(ts_compute_all));
+      state = finishing;
+      num_received_messages = 0;
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Finish& msg) {
+    ADD_SELECTORS("GOL::deliver::Finish");
+    maceout << "received Finish() from " << src << Log::endl;
+    ASSERT(me == master);
+    ts_compute_total += msg.compute_time;
+    num_received_messages++;
+    if( num_received_messages == (int32_t) node_list.size() ) {
+      ts_end = (double)TimeUtil::timeu();
+      std::cout.setf(std::ios::fixed);
+      std::cout << curtime << std::setprecision(0) << " statistics " << " gen_delay = " << (ts_gen-ts_start) << " gol_delay = " << (ts_end-ts_gen) << " compute_all = " << (ts_compute_total / node_list.size()) << " num_rounds = " << num_rounds << std::endl;
+      usleep(10*1000*1000);
+      exit(0);
+    }
+  }
+
+}
+
+
+routines {
+  void compute(bool is_compute)
+  {
+    ADD_SELECTORS("GOL::compute");
+
+    ts_compute_start = (double)TimeUtil::timeu();
+    maceout << "my_cols = " << num_mycols << Log::endl;
+    if( is_compute ) {
+
+      //print_set();
+
+      /* compute neighbors */
+      /* NOTE : Be careful of the borders */
+      for (uint64_t i=0; i < num_rows; i++)
+      {
+        for(uint64_t j=0; j < num_mycols+2; j++)
+        {
+          /* exception 1) leftmost node */
+          if( my_id == 0 && j == 0 ) {
+            ASSERT(map[i * (num_mycols+2) + j] == 0);
+          }
+
+          /* exception 2) rightmost node */
+          if( my_id == node_list.size()-1 && j == num_mycols+1 ) {
+            ASSERT(map[i * (num_mycols+2) + j] == 0);
+          }
+
+          /* now compute for each */
+          if( map[i * (num_mycols+2) + j] > 0 ) {
+            for(int64_t di=-1;di<=1;di++) {
+              for(int64_t dj=-1;dj<=1;dj++ ) {
+                /* skip if necessary */
+                if( di == 0 && dj == 0 )
+                  continue;
+                uint64_t ni = (uint64_t)((int64_t)i + di);
+                uint64_t nj = (uint64_t)((int64_t)j + dj);
+                if( ni < 0 || ni >= num_rows )
+                  continue;
+                if( nj < 0 || nj >= num_mycols+2 )
+                  continue;
+                //maceout << "(" << i << "," << j << ") -> (" << ni << "," << nj << ") = " << (ni * (num_mycols+2) + nj) << Log::endl;
+                neighbors[ ni * (num_mycols+2) + nj ]++;
+                //maceout << neighbors << Log::endl;
+              }
+            }
+          }
+        }
+      }
+
+      //print_neighbors();
+
+      /* compute new map from neighbors */
+      for (uint64_t i=0; i < num_rows; i++)
+      {
+        for(uint64_t j=0; j < num_mycols+2; j++)
+        {
+          if( j == 0 || j == num_mycols+1 ) {
+            neighbors[i*(num_mycols+2)+j] = 0;
+            continue;
+          }
+
+          uint8_t nn = neighbors[ i * (num_mycols+2) + j ];
+ 
+          if( map[i * (num_mycols+2) + j] == 1 ) {
+            if( nn < 2 ) {
+              map[i * (num_mycols+2) + j] = 0;
+            } else if ( nn == 2 || nn == 3 ) {
+              map[i * (num_mycols+2) + j] = 1;
+            } else {
+              map[i * (num_mycols+2) + j] = 0;
+            }
+          } else {
+            if( nn == 3 ) {
+              map[i * (num_mycols+2) + j] = 1;
+            }
+          }
+          neighbors[i*(num_mycols+2)+j] = 0;
+        }
+      }
+    }
+
+    ts_compute_all += (double)TimeUtil::timeu() - ts_compute_start;
+    //print_set();
+
+    /* send out borders */
+    if( my_id > 0 ) {
+      // send leftmost border
+      mace::vector<uint8_t> border;
+      //border.reserve(num_rows);
+      maceout << "num_rows = " << num_rows << Log::endl;
+      for( uint64_t i=0; i<num_rows; i++ ) {
+        border.push_back(map[i * (num_mycols+2) + 1]);
+      }
+      maceout << border << Log::endl;
+      downcall_route(node_list[my_id-1], Border(my_id, num_rounds, border));
+    }
+
+    if( my_id < node_list.size()-1 ) {
+    
+      // send rightmost border
+      mace::vector<uint8_t> border;
+      //border.reserve(num_rows);
+      maceout << "num_rows = " << num_rows << Log::endl;
+      for( uint64_t i=0; i<num_rows; i++ ) {
+        border.push_back(map[i * (num_mycols+2) + (num_mycols)]);
+      }
+      maceout << border << Log::endl;
+      downcall_route(node_list[my_id+1], Border(my_id, num_rounds, border));
+    }
+
+    // what should we do for the only set?
+    //print_set();
+  }
+
+  void print_set()
+  {
+    ADD_SELECTORS("MIS::print_set");
+
+    for (uint64_t i=0; i < num_rows; i++)
+    {
+      std::stringstream ss;
+      for(uint64_t j=0; j < num_mycols+2; j++)
+      {
+        if(map[i*(num_mycols+2)+j] == 0) {
+          ss << " 0";
+        } else {
+          ss << " 1";
+        }
+      }
+      maceout << ss.str() << Log::endl;
+    }
+  }
+
+  void print_neighbors()
+  {
+    ADD_SELECTORS("MIS::print_neighbors");
+
+    for (uint64_t i=0; i < num_rows; i++)
+    {
+      std::stringstream ss;
+      for(uint64_t j=0; j < num_mycols+2; j++)
+      {
+        ss << " " << (uint32_t) neighbors[i*(num_mycols+2)+j];
+      }
+      //std::cout << std::endl;
+      maceout << ss.str() << Log::endl;
+    }
+  }
+}
+
+

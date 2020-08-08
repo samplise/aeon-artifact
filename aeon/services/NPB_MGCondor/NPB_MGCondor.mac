@@ -1,0 +1,1033 @@
+/* 
+ * GameOfLifeStencil.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2012, Bo Sang
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- 
+*/
+
+#include "mlist.h"
+#include "marray.h"
+#include "mdeque.h"
+#include "m_map.h"
+#include "mvector.h"
+
+#include <sys/time.h>
+#include <time.h>
+#include <math.h>
+
+service NPB_MGCondor;
+provides MG;
+
+trace = med;
+
+constants {
+	int LEFT = 1;
+	int RIGHT = 2;
+
+	int mg3P_loop1_rprj3 = 3;
+	int mg3P_psinv1 = 4;
+	int mg3P_loop2_interp = 5;
+	int mg3P_loop2_resid = 6;
+	int mg3P_loop2_psinv = 7;
+	int mg3P_interp1 = 8;
+	int mg3P_resid1 = 9;
+
+	int resid1 = 10;
+	int mg3P1 = 11;
+	int resid2 = 12;
+	int resid3 = 13;
+	int loop1_mg3P = 14;
+	int loop1_resid = 15;
+
+	int zran3_1 = 16;
+	int zran3_2 = 17;
+	int VERIFY = 18;
+
+}
+
+services {
+    Transport tcp = TcpTransport();
+}
+
+states {
+
+}
+
+method_remappings {
+
+}
+
+constructor_parameters {
+	int nxyz_default = 256;
+	int nit_default = 4;
+	int lm = 8;
+	int lt_default = 8;
+	int unit_num = 4;
+}
+
+auto_types {
+	Scale {
+		int Xmin;
+		int Xmax;
+		int Ymin;
+		int Ymax;
+		int Zmin;
+		int Zmax;
+	}
+
+	Position __attribute((comparable(equals=default; lessthan=default))){
+		int x;
+		int y;
+		int z;
+	}
+
+}
+
+typedefs {
+	typedef mace::vector<int> IntArray;
+	typedef mace::vector<double> DoubleArray;
+	typedef mace::vector< mace::vector<int> > Int2DMatrix;
+	typedef mace::vector< mace::vector< mace::vector<double> > > Double3DMatrix;
+	typedef mace::vector< mace::vector< mace::vector<int> > > Int3DMatrix;
+}
+
+state_variables {
+		context Unit<int x, int y, int z> {
+			mace::vector<Double3DMatrix> u;
+			mace::vector<Double3DMatrix> r;
+			mace::vector<Double3DMatrix> v;
+
+			Double3DMatrix allU;
+			int allN1, allN2, allN3;
+
+      int nit;
+			int lt;
+
+			IntArray nx;
+			IntArray ny;
+			IntArray nz;
+			
+			IntArray m1;
+			IntArray m2;
+			IntArray m3;
+			
+      int is1;
+      int is2; 
+      int is3; 
+      int ie1;
+      int ie2;
+      int ie3;
+
+      int n1;
+      int n2;
+      int n3;
+
+      DoubleArray a;
+			DoubleArray c;
+			
+			double verify_value;
+
+			mace::vector<Position> left_neighbors;
+			mace::vector<Position> right_neighbors;
+
+			Position left_barrier;
+			Position right_barrier;
+			int left_barrier_flag, right_barrier_flag;
+			Double2DMatrix left_matrix;
+			Double2DMatrix right_matrix;
+			bool recv_left, recv_right;
+
+			int cur_state;
+			int mg3P_state;
+			int cur_iter;
+			mace::deque<int> loop_indicator;
+
+			int gather_count;
+		}
+}
+
+messages {
+				
+}
+
+transitions {
+	downcall (state=init) maceInit(){
+		for(int i=0; i<unit_num; i++){
+			initialize(0, 0, i);	
+		}
+	}
+
+	async [Unit<x, y, z>] initialize(int& x, int& y, int& z){
+			a.resize(4);
+			a[0] = -8/3;
+			a[1] = 0;
+			a[2] = 1/6;
+			a[3] = 1/12;
+
+			c.resize(4);
+			c[0] = -3/8;
+			c[1] = 1/32;
+			c[2] = -1/64;
+			c[3] = 0;
+
+			nx.resize(lt);
+			ny.resize(lt);
+			nz.resize(lt);
+
+			m1.resize(lt);
+			m2.resize(lt);
+			m3.resize(lt);
+
+			lt = lt_default;
+			nit = nit_default;
+			nx[lt-1] = ny[lt-1] = nz[lt-1] = nxyz_default;
+
+			u.resize(lt);
+			v.resize(lt);
+			z.resize(lt);
+
+			gather_count = 0;
+			IntArray nsizes;
+			nsizes.resize(3);
+			setup(nsizes, x, y, z);
+
+			allN1 = nsize[0];
+			allN2 = nsize[1];
+			allN3 = nsize[2];
+
+			n1 = allN1;
+			n2 = allN2;
+			n3 = (allN3-2)/unit_num+2;
+
+			left_neighbors.resize(lt);
+			right_neighbors.resize(lt);
+
+			int interval = 1;
+			for(int i=lt-1; i>=0; i--){
+				int total = m3[i] - 2;
+				if(total>=unit_num){
+					m3[i] = total/unit_num + 2;	
+				}else{
+					m3[i] = 3;
+					interval *= 2;
+				}
+
+				Position left_pos, right_pos;
+				left_pos.x = right_pos.x = x;
+				left_pos.y = right_pos.y = y;
+				left_pos.z = (z-interval)%unit_num;
+				right_pos.z = (z+interval)%unit_num;
+
+				left_neighbors[i] = left_pos;
+				right_neighbors[i] = right_pos;
+			}
+			
+
+			initlize_uvr(x, y, z);
+			zero3(u[0], pos, n1, n2, n3);
+			
+			cur_state = zran3_1;
+			Position pos;
+			pos.x = x;
+			pos.y = y;
+			pos.z = z;
+			async_master_gather(0, 0, 0, cur_state, u[lt-1], pos);
+
+	}
+
+	async [Unit<x, y, z>] neighbor_notice(int& x, int& y, int& z, int& flag, Position& src_pos, Double2DMatrix& matrix, int& direct){
+		if(direct == LEFT){
+			left_barrier = src_pos;
+			left_barrier_flag = flag;
+			left_matrix = matrix;
+			recv_left = true;
+		}else if(direct == RIGHT){
+			right_barrier = src_pos;
+			right_barrier_flag = flag;
+			right_matrix = matrix;
+			recv_right = true;
+		}
+
+		if(recv_left && recv_right){
+				check_and_run(x, y, z);
+		}
+	}
+
+	async [Unit<x, y, z>] master_gather(int& x, int& y, int& z, int& flag, Double3DMatrix& matrix, Position& src_pos){
+		if(x!=0 || y!=0 || z!=0){
+			return;	
+		}	
+
+		gather_count++;
+		int scl = (allN3-2)/unit_num;
+		int start = src_pos.z*scl+1;
+		int end = start+scl-1;
+		
+		for(int i1=1; i1<allN1-1; i1++){
+			for(int i2=1; i2<allN2-1; i2++){
+				int src_iter = 1;
+				for(int i3=start; i3<=end; i3++){
+					allU[i1][i2][i3] = matrix[i1][i2][src_iter++];	
+				}	
+			}	
+		}
+
+		if(gather_count>=unit_num){
+			if(cur_state==zran3_1 || cur_state==zran3_2){
+				zran3(allU, allN1, allN2, allN3);
+
+				for(int i=0; i<unit_num; i++){
+					Double3DMatrix scatter_matrix;
+					scatter_matrix.resize(allN1);
+					for(int i1=0; i1<allN1; i1++){
+						scatter_matrix[i1].resize(allN2);
+						for(int i2=0; i2<allN2; i2++){
+							scatter_matrix.resize(scl+2);	
+						}
+					}
+
+					start = i*scl+1;
+					int end = start+scl-1;
+		
+					for(int i1=1; i1<allN1-1; i1++){
+						for(int i2=1; i2<allN2-1; i2++){
+							int src_iter = 1;
+							for(int i3=start; i3<=end; i3++){
+								scatter_matrix[i1][i2][src_iter++] = allU[i1][i2][i3];
+							}	
+						}
+					}
+
+					async_scatter(0, 0, i, cur_state, scatter_matrix);
+				}
+			}else if(cur_state == VERIFY){
+				double rnmu;
+				double rnm2 = norm2u3(allU[lt-1], n1, n2, n3, rnmu, nx[lt-1], ny[lt-1], nz[lt-1]);
+				verify(rnm2);
+			}	
+		}
+	}
+
+	async [Unit<x, y, z>] scatter(int& x, int& y, int& z, int& flag, Double3DMatrix& matrix){
+		u[lt-1] = matrix;	
+		if(cur_state == zran3_1){
+			barrier(x, y, z, resid1, u[lt-1], n1, n2, n3, lt-1);	
+		}else if(cur_state == zran3_2){
+			barrier(x, y, z, resid3, u[lt-1], n1, n2, n3, lt-1);	
+		}
+	}
+
+}
+
+routines {
+	[Unit<x, y, z>] void setup(IntArray& nsizes, int& x, int& y, int& z){
+			int k;
+			int d, i, j;
+
+			int ax;
+			int size1=3, size2=10;
+			IntArray mi, ng;
+			mi.resize(size1*size2);
+			ng.resize(size1*size2);
+			int s,  dir;
+			int lb = 1;
+			
+			ng[  (lt-1)*size1]=nx[lt-1];
+			ng[1+(lt-1)*size1]=ny[lt-1];
+			ng[2+(lt-1)*size1]=nz[lt-1];
+														
+			for(ax=0;ax<size1;ax++)
+				for(k=lt-2;k>=0;k--)
+					ng[ax+k*size1]=ng[ax+(k+1)*size1]/2;
+																	
+			for(k=lt-2;k>=0;k--){
+				nx[k]=ng[  k*size1];
+				ny[k]=ng[1+k*size1];
+				nz[k]=ng[2+k*size1];
+			}
+																																							
+			for(k=lt-1;k>=0;k--){
+				for(ax=0;ax<size1;ax++){
+					mi[ax+k*size1] = 2 + ng[ax+k*size1];
+				}
+				m1[k]=mi[k*size1];
+				m2[k]=mi[1+k*size1];
+				m3[k]=mi[2+k*size1];
+			}
+			
+			k = lt-1;
+			is1 = 2 + ng[k*size1] - ng[k*size1];
+			ie1 = 1 + ng[k*size1];
+			n1=nsizes[0] = 3 + ie1 - is1;
+			is2 = 2 + ng[1+k*size1] - ng[1+k*size1];
+			ie2 = 1 + ng[1+k*size1]; 
+			n2=nsizes[1] = 3 + ie2 - is2;
+			is3 = 2 + ng[2+k*size1] - ng[2+k*size1];
+			ie3 = 1 + ng[2+k*size1];
+			n3=nsizes[2] = 3 + ie3 - is3;
+
+	}
+
+	[Unit<x, y, z>] void initialize_uvr(int& x, int& y, int& z){
+		u.resize(lt);
+		v.resize(lt);
+		r.resize(lt);
+
+		for(int i=0; i<lt; i++){
+			int i1_num = m1[i];
+			u[i].resize(i1_num);
+			v[i].resize(i1_num);
+			r[i].resize(i1_num);
+
+			for(int i1=0; i1<i1_num; i1++){
+				int i2_num = m2[i];
+				u[i][i1].resize(i2_num);
+				v[i][i1].resize(i2_num);
+				r[i][i1].resize(i2_num);
+
+				for(int i2=0; i2<i2_num; i2++){
+					int i3_num = m3[i];
+					u[i][i1][i2].resize(i3_num);
+					v[i][i1][i2].resize(i3_num);
+					r[i][i1][i2].resize(i3_num);
+				}
+			}
+		}
+
+		allU.resize(allN1);
+		for(int i1=0; i1<allN1; i1++){
+			allU[i1].resize(allN2);
+			for(int i2=0; i2<allN2; i2++){
+				allU[i1][i2].resize(allN3);	
+			}
+		}
+	}
+
+	[__null] void zero3(Double3DMatrix& matrix, Position& pos, int& n1, int& n2, int& n3){
+		for(int i=pos.x; i<n1; i++){
+			for(int j=pos.y; j<n2; j++){
+				for(int k=pos.z; k<n3; k++){
+					matrix[i][j][k] = 0;	
+				}	
+			}	
+		}	
+	}
+
+	[__null] void local_comm(int& x, int& y, int& z, Double3DMatrix& u, int& n1, int& n2, int& n3, 
+														Double2DMatrix& left, Double2DMatrix& right){
+		for(int i3=1;i3<n3-1;i3++)
+	  	for(int i2=1;i2<n2-1;i2++){
+				u[0][i2][i3] = u[n1-2][i2][i3];
+				u[n1-1][i2][i3] = u[1][i2][i3];
+			}
+																							
+		for(int i3=1;i3<n3-1;i3++)
+			for(int i1=0;i1<n1;i1++){
+				u[i1][0][i3] = u[i1][n2-2][i3];
+				u[i1][n2-2][i3] = u[i1][1][i3];
+		}
+																																																	
+		for(i2=0;i2<n2;i2++)
+			for(i1=0;i1<n1;i1++){
+				u[i1][i2][0] = u[i1][i2][n3-2];
+				u[i1][i2][n3-1] = u[i1][i2][1];
+			}
+
+			
+		/*****************z-axle************************/
+		Double2DMatrix zMatrix0, zMatrix1;
+		zMatrix0.resize(n1);
+		zMatrix1.resize(n1);
+		for(int i=0; i<n1; i++){
+			zMatrix0[i].resize(n2);
+			zMatrix1[i].resize(n2);
+		}
+			
+
+		for(int i1=0; i1<n1; i1++){
+			for(int i2=0; i2<n2; i2++){
+				zMatrix0[i1][i2] = u[i1][i2][0];
+				zMatrix1[i1][i2] = u[i1][i2][n3-2];
+			}	
+		}
+
+		left = zMatrix0;
+		right = zMatrix1;
+	}
+
+	[Unit<x, y, z>] void resid(int& x, int& y, int& z, Double3DMatrix& u, Double3DMatrix& v, Double3DMatrix& r, 
+			int& n1, int& n2, int& n3){
+		int i3,  i2,  i1;
+		DoubleArray u1, u2;
+		u1.resize(nm+1);
+		u2.resize(nm+1);
+											
+		for(i3=1;i3<n3-1;i3++)
+			for(i2=1;i2<n2-1;i2++){
+				for(i1=0;i1<n1;i1++){
+					u1[i1] = u[i1][i2-1][i3] + u[i1][i2+1][i3] + u[i1][i2][i3-1] + u[i1][i2][i3+1];
+					u2[i1] = u[i1][i2-1][i3-1] + u[i1][i2+1][i3-1] + u[i1][i2-1][i3+1] + u[i1][i2+1][i3+1];
+				}
+				
+				for(i1=1;i1<n1-1;i1++){
+					r[i1][i2][i3] = v[i1][i2][i3] - a[0] * u[i1][i2][i3] - a[2] * ( u2[i1] + u1[i1-1] + u1[i1+1] ) 
+												- a[3] * ( u2[i1-1] + u2[i1+1] );
+				}
+			}
+	}
+
+
+	[Unit<x, y, z>] void rprj3(int& x, int& y, int& z, Double3DMatrix& rk, int& m1k, int& m2k, int& m3k, 
+			Double3DMatrix& rj, int& m1j, int& m2j, int& m3j){
+		int j3,  j2,  j1,  i3,  i2,  i1,  d1,  d2,  d3,  j;
+		double x2, y2;
+		
+		DoubleArray x1, y1;
+		x1.resize(nm+1);
+		y1.resize(nm+1);
+		
+		if(m1k==3){
+			d1 = 2;
+		}else{
+			d1 = 1;
+		}
+		if(m2k==3){
+			d2 = 2;
+		}else{
+			d2 = 1;
+		}
+		if(m3k==3){
+			d3 = 2;
+		}else{
+			d3 = 1;
+		}
+		
+		for(j3=2;j3<=m3j-1;j3++){
+			i3 = 2*j3-d3-1;
+			for(j2=2;j2<=m2j-1;j2++){
+				i2 = 2*j2-d2-1;
+				for(j1=2;j1<=m1j;j1++){
+					i1 = 2*j1-d1-1;
+					x1[i1-1] = rk[i1-1][i2-1][i3] + rk[i1-1][i2+1][i3] + rk[i1-1][i2][i3-1] + r[i1-1][i2][i3+1];
+					y1[i1-1] = rk[i1-1][i2][i3-1] + rk[i1-1][i2-1][i3+1] + rk[i1-1][i2+1][i3-1] + rk[i1-1][i2+1][i3+1];
+				}
+				
+				for(j1=2;j1<=m1j-1;j1++){
+					i1 = 2*j1-d1-1;
+					y2 = rk[i1][i2-1][i3-1] + rk[i1][i2-1][i3+1] + rk[i1][i2+1][i3-1] + r[i1][i2+1][i3+1];
+					x2 = rk[i1][i2-1][i3] + rk[i1][i2+1][i3] + rk[i1][i2][i3-1] + rk[i1][i2][i3+1];
+				
+					rj[j1-1][j2-1][j3-1] = 0.5 * rk[i1][i2][i3]	+ 0.25 * (rk[i1-1][i2][i3]+rk[i1+1][i2][i3]+x2) 
+																+ 0.125 * ( x1[i1-1] + x1[i1+1] + y2)	+ 0.0625 * ( y1[i1-1] + y1[i1+1] );
+					
+				}
+			}
+		}
+	}
+
+	[Unit<x, y, z>] void psinv(int& x, int& y, int& z, Double3DMatrix& r, Double3DMatrix& u, int& n1, int& n2, int& n3){
+		int i3,  i2,  i1;
+		DoubleArray r1, r2;
+		r1.resize(nm+1);
+		r2.resize(nm+1);
+																	       
+		for(i3=1;i3<n3-1;i3++){
+			for(i2=1;i2<n2-1;i2++){
+				for(i1=0;i1<n1;i1++){
+					r1[i1] = r[i1][i2][i3] + r[i1][i2+1][i3] + r[i1][i2][i3-1] + r[i1][i2][i3+1];
+					r2[i1] = r[i1][i2-1][i3-1] + r[i1][i2+1][i3-1] + r[i1][i2-1][i3+1] + r[i1][i2+1][i3+1];
+				}
+				
+				for(i1=1;i1<n1-1;i1++){
+					u[i1][i2][i3] = c[0] * r[i1][i2][i3] + c[1]*(r[i1-1][i2][i3]+r[i1+1][i2][i3]+r1[i1]) 
+												+ c[2]* ( r2[i1] + r1[i1-1] + r1[i1+1] );
+				}
+				
+			}
+		}
+	}
+
+	[Unit<x, y, z>] void interp(int& x, int& y, int& z, Double3DMatrix& um, int& mm1, int& mm2, int& mm3, 
+																Double3DMatrix& un, int n1, int n2, int n3 ){
+		int i3,  i2,  i1,  d1,  d2,  d3,  t1,  t2,  t3;
+		int m=535;
+		DoubleArrray z1, z2, z3;
+		z1.resize(m);
+		z2.resize(m);
+		z3.resize(m);
+		if( n1 != 3 && n2 != 3 && n3 != 3 ){
+			for(i3=1;i3<=mm3-1;i3++){
+				for(i2=1;i2<=mm2-1;i2++){
+					for(i1=1;i1<=mm1;i1++){
+						z1[i1-1] = um[i1-1][i2][i3-1] + um[i1-1][i2-1][i3-1] + u[i1-1][i2-1][i3-1];
+						z2[i1-1] = um[i1-1][i2-1][i3] + u[i1-1][i2-1][i3-1];
+						z3[i1-1] = um[i1-1][i2][i3] + um[i1-1][i2-1][i3] + z1[i1-1];	
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-2][2*i2-2][2*i3-2] += um[i1-1][i2-1][i3-1];
+						un[2*i1-1][2*i2-2][2*i3-2] += 0.5*(um[i1][i2-1][i3-1]+um[i1-1][i2-1][i3-1]);	
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-2][2*i2-1][2*i3-2] += 0.5*z1[i1-1];	
+						un[2*i1-1][2*i2-1][2*i3-2] += 0.25*(z1[i1-1]+z1[i1]);	
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-2][2*i2-2][2*i3-1] += 0.5*z2[i1-1];
+						un[2*i1-1][2*i2-1][2*i3-1] += 0.25*(z2[i1-1]+z2[i1]);	
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-2][2*i2-1][2*i3-1] += 0.25*z3[i1-1];	
+						un[2*i1-1][2*i2-1][2*i3-1] += 0.125*(z3[i1-1]+z3[i1]);	
+					}
+				}
+			}
+		}else{
+			if(n1==3){
+				d1 = 2;
+				t1 = 1;
+			}else{
+				d1 = 1;
+				t1 = 0;
+			}
+		
+			if(n2==3){
+				d2 = 2;
+				t2 = 1;
+			}else{
+				d2 = 1;
+				t2 = 0;
+			}
+						
+			if(n3==3){
+				d3 = 2;
+				t3 = 1;
+			}else{
+				d3 = 1;
+				t3 = 0;
+			}
+						
+			for(i3=1;i3<=mm3-1;i3++){
+				for(i2=1;i2<=mm2-1;i2++){
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-d1][2*i2-1-d2][2*i3-1-d3] += um[i1-1][i2-1][i3-1];					
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-t1][2*i2-1-d2][2*i3-1-d3] += 0.5*(um[i1][i2-1][i3-1]+um[i1-1][i2-1][i3-1]);		
+					}
+				}
+						
+				for(i2=1;i2<=mm2-1;i2++){
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-d1][2*i2-1-t2][2*t3-1-d3] += 0.5*(um[i1-1][i2][i3-1]+um[i1-1][i2-1][i3-1]);
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-t1][2*i2-1-t2][2*i3-1-d3] += 0.25*(um[i1][i2][i3-1]+um[i1][i2-1][i3-1]) + um[i1-1][i2][i3-1] + um[i1-1][i2][i3-1];	
+					}
+				}
+			}
+						
+			for(i3=1;i3<=mm3-1;i3++){
+				for(i2=1;i2<=mm2-1;i2++){
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-d1][2*i2-1-d2][2*i3-1-t3] = 0.5*(um[i1-1][i2-1][i3]+um[i1-1][i2-1][i3-1]);
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-t1][2*i2-1-d2][2*i3-1-t3] = 0.25*(um[i1][i2-1][i3]+um[i1-1][i2-1][i3]
+																								+um[i1][i2-1][i3-1]+um[i1-1][i2-1][i3-1]);
+					}
+				}
+						
+				for(i2=1;i2<=mm2-1;i2++){
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-d1][2*i2-1-t2][2*i3-1-t3] += 0.25*(um[i1-1][i2][i3]+um[i1-1][i2-1][i3]+um[i1-1][i2][i3-1]+um[i1-1][i2-1][i3-1]);
+					}
+						
+					for(i1=1;i1<=mm1-1;i1++){
+						un[2*i1-1-t1][2*i2-1-t2][2*i3-1-t3] += 0.125*(um[i1][i2][i3]+um[i1][i2-1][i3]+um[i1-1][i2][i3]+um[i1-1][i2-1][i3]
+																								+um[i1-1][i2][i3]+um[i1-1][i2-1][i3]+um[i1][i2][i3-1]+um[i1][i2-1][i3-1]
+																								+um[i1-1][i2][i3-1]+um[i1-1][i2-1][i3-1]);	
+					}
+				}
+			}
+		}
+	}
+
+	[Unit<x, y, z>] void barrier(int& x, int& y, int& z, int& flag, Double3DMatrix& matrix, int& n1, int& n2, int& n3, 
+															int& neighbors_iter){
+			Position left = left_neighbors[neighbors_iter];
+			Position right = right_neighbors[neighbors_iter];
+
+			cur_state = flag;
+			cur_iter = neighbors_iter;
+			Double2DMatrix left, right;
+			local_comm(x, y, z, matrix, n1, n2, n3, left, right);
+			async_neighbor_notice(left.x, left.y, left.z, flag, left, RIGHT);
+			async_neighbor_notice(right.x, right.y, right.z, flag, right, LEFT);
+
+			if(recv_left && recv_right){
+				check_and_run(x, y, z);	
+			}
+	}
+
+	[Unit<x, y, z>] void start_mg3P(int& x, int& y, int& z){
+			int k;
+			k = lt-1;
+			loop_indicator.push_back(k);
+			barrier(x, y, z, mg3P_loop1_rprj3, r[k], m1[k], m2[k], m3[k], k);
+	}
+
+	[Unit<x, y, z>] void check_and_run(int& x, int& y, int& z){
+		Position left = left_neighbors[cur_iter];
+		Position right = right_neighbors[cur_iter];
+
+		if(left.x == left_barrier.x && left.y == left_barrier.y && left.z == left_barrier.z && cur_state == left_barrier_flag &&
+				right.x == right_barrier.x && right.y == right_barrier.y && right.z == right_barrier.z && cur_state == right_barrier_flag){
+			recv_left = recv_right = false;
+			if(cur_state == mg3P_loop1_rprj3){
+					int k=loop_indicator.back();
+					int j=k-1;
+
+					for(int i1=0; i1<m1[k]; i1++){
+						for(int i2=0; i2<m2[k]; i2++){
+							r[k][i1][i2][0] = left_matrix[i1][i2];
+							r[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+						}	
+					}
+
+					rprj3(x, y, z, r[k], m1[k], m2[k], m3[k], r[j], m1[j], m2[j], m3[j]);
+					loop_indicator.pop_back();
+					k--;
+					if(k>=lb){
+						loop_indicator.push_back(k);
+						barrier(x, y, z, mg3P_loop1_rprj3, r[k], m1[k], m2[k], m3[k], k);
+					}else {
+						k=lb-1;
+						zero3(u[k], m1[k], m2[k], m3[k]);
+						barrier(x, y, z, mg3P_psinv1, r[k], m1[k], m2[k], m3[k], k);
+					}
+			}else if(cur_state == mg3P_psinv1){
+				int k = cur_iter;
+				
+				for(int i1=0; i1<m1[k]; i1++){
+					for(int i2=0; i2<m2[k]; i2++){
+						r[k][i1][i2][0] = left_matrix[i1][i2];
+						r[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+					}	
+				}
+
+				psinv(x, y, z, r[k], u[k], m1[k], m2[k], m3[k]);
+				k = lb;
+				loop_indicator.push_back(k);
+				zero3(u[k], m1[k], m2[k], m3[k]);
+				int j=k-1;
+				barrier(x, y, z, mg3P_loop2_interp, u[j], m1[j], m2[j], m3[j], j);
+			}	
+		}else if(cur_state == mg3P_loop2_interp){
+			int j=cur_iter;
+			int k=j+1;
+
+			for(int i1=0; i1<m1[j]; i1++){
+				for(int i2=0; i2<m2[j]; i2++){
+					u[j][i1][i2][0] = left_matrix[i1][i2];
+					u[j][i1][i2][m3[j]-1] = right_matrix[i1][i2];
+				}	
+			}
+			
+			interp(x, y, z, u[j], m1[j], m2[j], m3[j], u[k], m1[k], m2[k], m3[k]);
+			barrier(x, y, z, mg3P_loop2_resid, u[k], m1[k], m2[k], m3[k], k);
+
+		}else if(cur_state == mg3P_loop2_resid){
+			int k=loop_indicator.back();
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					u[k][i1][i2][0] = left_matrix[i1][i2];
+					u[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			resid(x, y, z, u[k], r[k], r[k], m1[k], m2[k], m3[k]);
+			barrier(x, y, z, mg3P_loop2_psinv, r[k], m1[k], m2[k], m3[k], k);
+		}else if(cur_state == mg3P_loop2_psinv){
+			int k=loop_indicator.back();
+
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					r[k][i1][i2][0] = left_matrix[i1][i2];
+					r[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			psinv(x, y, z, r[k], u[k], m1[k], m2[k], m3[k]);
+			loop_indicator.pop_back();
+			k++;
+			if(k<lt-1){
+				loop_indicator.push_back(k);
+				zero(u[k], m1[k], m2[k], m3[k]);
+				int j=k-1;
+				barrier(x, y, z, mg3P_loop2_interp, u[j], m1[j], m2[j], m3[j], j);
+			}else{
+				int j=lt-2;
+				k = lt-1;
+				barrier(x, y, z, mg3P_interp1, u[j], m1[j], m2[j], m3[j], j);
+			}
+		}else if(cur_state == mg3P_interp1){
+			int j=cur_iter;
+			int k=j+1;
+			
+			for(int i1=0; i1<m1[j]; i1++){
+				for(int i2=0; i2<m2[j]; i2++){
+					u[j][i1][i2][0] = left_matrix[i1][i2];
+					u[j][i1][i2][m3[j]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			interp(x, y, z, u[j], m1[j], m2[j], m3[j], u[k], m1[k], m2[k], m3[k]);
+			barrier(x, y, z, mg3P_resid1, u[lt-1], n1, n2, n3, lt-1);
+		}else if(cur_state == mg3P_resid1){
+			int k=cur_iter;
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					u[k][i1][i2][0] = left_matrix[i1][i2];
+					u[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			resid(x, y, z, u[k], r[k], r[k], m1[k], m2[k], m3[k]);
+			barrier(x, y, z, mg3P_psinv2, r[lt-1], n1, n2, n3, lt-1);
+		}else if(cur_state == mg3P_psinv2){
+			int k=cur_iter;
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					r[k][i1][i2][0] = left_matrix[i1][i2];
+					r[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			psinv(x, y, z, r[lt-1], u[lt-1], n1, n2, n3);
+			if(mg3P_state == mg3P1){
+				barrier(x, y, z, resid2, u[lt-1], n1, n2, n3, lt-1);	
+			}else if(mg3P_state == loop1_mg3P){
+				barrier(x, y, z, loop1_resid, u[lt-1], n1, n2, n3, lt-1);	
+			}
+		}else if(cur_state == resid1){
+			int k=cur_iter;
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					r[k][i1][i2][0] = left_matrix[i1][i2];
+					r[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			resid(x, y, z, u[lt-1], r[lt-1], u[lt-1], n1, n2, n3);
+			mg3P_state = mg3P1;
+			start_mg3P(x, y, z);
+		}else if(cur_state == resid2){
+			int k=cur_iter;
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					u[k][i1][i2][0] = left_matrix[i1][i2];
+					u[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+			
+			resid(x, y, z, u[lt-1], v[lt-1], r[lt-1], n1, n2, n3);
+			zero(u[lt-1], n1, n2, n3);
+
+			cur_state = zran3_2;
+			Position pos;
+			pos.x = x;
+			pos.y = y;
+			pos.z = z;
+
+			async_master_scatter(0, 0, 0, cur_state, u[lt-1], pos);
+		}else if(cur_state == resid3){
+			int k=cur_iter;
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					u[k][i1][i2][0] = left_matrix[i1][i2];
+					u[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+			
+			resid(x, y, z, u[lt-1], v[lt-1], r[lt-1], n1, n2, n3);
+
+			k=1;
+			loop_indicator.push_back(k);
+			mg3P_state = loop1_mg3P;
+			start_mg3P(x, y, z);
+		}else if(cur_state == loop1_resid){
+			int k=cur_iter;
+			
+			for(int i1=0; i1<m1[k]; i1++){
+				for(int i2=0; i2<m2[k]; i2++){
+					u[k][i1][i2][0] = left_matrix[i1][i2];
+					u[k][i1][i2][m3[k]-1] = right_matrix[i1][i2];
+				}	
+			}
+
+			resid(x, y, z, u[lt-1], v[lt-1], r[lt-1], n1, n2, n3);
+			
+			k=loop_indicator.back();
+			loop_indicator.pop_back();
+
+			k++;
+			if(k<=nit){
+				loop_indicator.push_back(k);
+				mg3P_state = loop1_mg3P;
+				start_mg3P(x, y, z);
+			}else{
+				cur_state = VERIFY;
+				Position pos;
+				pos.x = x;
+				pos.y = y;
+				pos.z = z;
+
+				async_master_gather(0, 0, 0, cur_state, r[lt-1], pos);
+			}
+		}
+
+	}
+
+	[__null] void zran3(Double3DMatrix& matrix, int& n1, int& n2, int& n3){
+		for(int i1=1; i1<n1-1; i1++){
+			for(int i2=1; i2<n2-1; i2++){
+				for(int i3=1;i3<n3-1; i3++){
+						matrix[i1][i2][i3] = 0;				
+				}	
+			}	
+		}	
+	}
+
+	[__null] double norm2u3(Double3DMatrix& matrix, int n1, int n2, int n3, double rnmu, int nx, int ny, int nz){
+		rnmu = 0.0;
+		double rnm2=0.0;
+		for(int i3=1;i3<n3-1;i3++)
+			for(int i2=1;i2<n2-1;i2++)
+				for(int i1=1;i1<n1-1;i1++){
+					rnm2+=r[i1+n1*(i2+n2*i3)]*r[i1+n1*(i2+n2*i3)];
+					double a=Math.abs(r[i1+n1*(i2+n2*i3)]);
+					rnmu=dmax1(rnmu, a);
+				}
+				rnm2=Math.sqrt( rnm2 / ((double) nx*ny*nz ));
+				return rnm2;
+	}
+
+	[Unit<x, y, z>] int verify(double rnm2){
+		double verify_value=0.0;
+		epsilon = 1.0e-8;
+		
+		if (CLASS != 'U') {
+			if(CLASS=='S') {
+				verify_value = 0.530770700573E-4;
+			}else if(CLASS=='W') {
+				verify_value = 0.250391406439E-17; 
+			}else if(CLASS=='A') {
+				verify_value = 0.2433365309E-5;
+			}else if(CLASS=='B') {
+				verify_value = 0.180056440132E-5;
+			}else if(CLASS=='C') {
+				verify_value = 0.570674826298E-6;
+			}
+			
+			if( abs( rnm2 - verify_value ) < epsilon ) {
+				verified = 1;
+			}else{
+				verified = 0;
+			}
+		}else{
+			verified = -1;
+		}
+		return  verified;  
+	}
+
+	[__null] void zran3(Double3DMatrix& matrix, int& n1, int& n2, int& n3){
+		mace::map<Position, int> pos_neg_map;
+		
+		for(int i1=1; i1<n1-1; i1++){
+			for(int i2=1; i2<n2-1; i2++){
+				for(int i3=1; i3<n3-1; i3++){
+					matrix[i1][i2][i3] = 0;	
+				}	
+			}	
+		}
+		
+		srand(mace::gettime());
+	 	
+		while(true){
+			Position pos;
+			pos.x = rand()%n1+1;
+			pos.y = rand()%n2+1;
+			pos.z = rand()%n3+1;
+
+			if(pos_neg_map.find(pos) == pos_neg_map.end()){
+				pos_neg_map[pos] = 1;
+
+				if(pos_neg_map.size() >= 10){
+					break;	
+				}
+			}
+		}
+
+		while(true){
+			Position pos;
+			pos.x = rand()%n1+1;
+			pos.y = rand()%n2+1;
+			pos.z = rand()%n3+1;
+
+			if(pos_neg_map.find(pos) == pos_neg_map.end()){
+				pos_neg_map[pos] = -1;
+
+				if(pos_neg_map.size() >= 20){
+					break;	
+				}
+			}
+		}
+
+		mace::map<Position, int>::iterator iter = pos_neg_map.begin();
+		for(; iter!=pos_neg_map.end(); iter++){
+			Position pos = iter->first;
+			matrix[pos.x][pos.y][pos.z] = iter->second;
+		}
+	}
+	
+}
+
+

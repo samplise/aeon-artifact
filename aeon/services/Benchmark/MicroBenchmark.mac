@@ -1,0 +1,328 @@
+service MicroBenchmark;
+
+provides Null;
+
+//trace=low;
+time = MaceTime;
+
+constructor_parameters {
+  uint64_t NUM_GROUPS = 0;     /* Number of context */
+  uint64_t NUM_PRIMES = 0;     /* CPU overhead */
+  //uint64_t MESSAGE_LENGTH = 0;     /* IO overhead */
+  /* NOTE: We also have to measure "context-creation time" */
+  
+  uint64_t NUM_EVENTS = 1000; // How many times they will be calling themselves
+  uint64_t NUM_ITERATIONS = 1;
+  uint64_t HEAD_INITIAL_WAIT_TIME = 10*1000*1000;
+  uint64_t HEAD_FINISH_WAIT_TIME = 1*1000*1000;
+  int32_t USE_GLOBAL_EVENT_CREATE = 0; /* if 1, global event create event
+                                           if 0, each context creates event
+                                           if -1, dedicated context (NUM_GROUPS) creates event
+                                         */
+   
+  uint32_t EVENT_WAIT_TIME = 0;
+
+  /* Migration test related */
+  uint32_t COMPUTE_PRIMES = 1; /* Unset this if you want to test migration only */
+                               /* In this case, it only initialize context and
+                                  wait until EXIT_TIME expires. */
+  uint32_t MIGRATION_POLICY = 0;   /* If 1, do swap migration at half.
+                                      if 2, do scale out at a third, and scale in at two third. */
+  std::string MIGRATION_IDS = "";
+  std::string MIGRATION_IDS2 = "";
+                                       
+  uint32_t EXIT_TIME = 0;
+  uint32_t NUM_PAYLOAD = 0;
+}
+
+state_variables {
+  
+  uint64_t num_remaining_groups;
+  uint64_t num_iterations_global;
+
+  context Group<int32_t group_id> {
+    uint64_t num_primes;
+    uint64_t num_events;
+    uint64_t num_iterations;
+    std::string payload;
+  }
+
+  // master-specific information
+  double ts_start;
+  double ts_end;
+
+  timer exit_timer;
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("MicroBenchmark::start");
+
+    
+    /* Experimental design
+     * 
+     * Head node will not appear in NUM_GROUPS.
+     * First node in CHAT_NODES will be the head node. It will initiate the computation and end the computation.
+     * Also, it will do book-keeping of event creation and committing.
+     *
+     * Other node in CHAT_NODES will basically compute primes. Those nodes will make self async-call upon completion
+     * until getting "finish" message.
+     */
+
+
+    usleep(HEAD_INITIAL_WAIT_TIME);
+
+    ts_start = (double)TimeUtil::timeu();
+
+    num_remaining_groups = NUM_GROUPS;
+    num_iterations_global = NUM_ITERATIONS;
+
+    std::cout << curtime << " initiate" << std::endl;
+
+    for( uint32_t i=0; i<NUM_GROUPS; i++ ) {
+      // it does graph generation / initialization by group
+      std::cout << curtime << " initiate (" << i << ")" << std::endl;
+      async_initialize(i, NUM_PRIMES, NUM_EVENTS, num_iterations_global );
+    }
+
+    if( USE_GLOBAL_EVENT_CREATE == -1 ) {
+      async_initialize(NUM_GROUPS, NUM_PRIMES, NUM_EVENTS, num_iterations_global+1 );
+    }
+
+    if( COMPUTE_PRIMES == 0 ) {
+      exit_timer.schedule(EXIT_TIME);
+    }
+
+  }
+
+  async [Group<id>] initialize( const uint32_t id, const uint64_t nprime, const uint64_t nevents, const uint64_t niterations ) {
+    std::cout << curtime << " initiate (" << id << ")" << std::endl;
+    num_primes = nprime;
+    num_events = nevents;
+    num_iterations = niterations;
+    //num_events_left = nevents;
+
+    /* Generate payload */
+    if( NUM_PAYLOAD > 0 ) {
+      for (uint32_t i=0; i<NUM_PAYLOAD; i++) {
+        payload += " ";
+      }
+    }
+
+    ///* Generate load */
+    if( COMPUTE_PRIMES > 0 ) {
+      if( USE_GLOBAL_EVENT_CREATE == 1 || USE_GLOBAL_EVENT_CREATE == -1) {
+        async_initreply(id);
+      } else {
+        std::cout << curtime << " local launcher will create events" << std::endl;
+        /* Otherwise, each context will create events */
+        for( uint32_t i = 0; i < nevents; i++ ) {
+          async_compute(id, i);
+        }
+      }
+    }
+  }
+
+  async initreply(const uint32_t id) {
+    std::cout << curtime << " initreply (" << id << ")" << std::endl;
+    num_remaining_groups--;
+
+    if( num_remaining_groups == 0 ) {
+
+      if( USE_GLOBAL_EVENT_CREATE == -1 ) {
+        /* Dedicated context will create the event */
+        std::cout << curtime << " dedicated launcher will create events" << std::endl;
+        async_initiate(NUM_GROUPS, NUM_ITERATIONS);
+
+      } else {
+        /* Global event will create the events */
+        std::cout << curtime << " global launcher will create events" << std::endl;
+
+        /* check if we need "SWAP" migration in the middle of the run */
+
+        if( MIGRATION_POLICY == 1 ) {
+          /* Migration case */
+          for( uint32_t j=0; j<NUM_EVENTS/2; j++ ) {
+            for( uint32_t i=0; i<NUM_GROUPS; i++ ) {
+            //std::cout << curtime << " compute-launch1 (" << i << ")" << std::endl;
+              async_compute(i,j);
+            }
+          }
+
+          migrateContext(MIGRATION_IDS);
+
+          for( uint32_t j=NUM_EVENTS/2; j<NUM_EVENTS; j++ ) {
+            for( uint32_t i=0; i<NUM_GROUPS; i++ ) {
+              //std::cout << curtime << " compute-launch2 (" << i << ")" << std::endl;
+              async_compute(i,j);
+            }
+          }
+
+
+        } else {
+          /* Normal case */
+
+          for( uint32_t j=0; j<NUM_EVENTS; j++ ) {
+            //std::cout << curtime << " compute-launch (" << i << ")" << std::endl;
+            for( uint32_t i=0; i<NUM_GROUPS; i++ ) {
+              async_compute(i,j);
+            }
+          }
+        }
+      }
+      num_remaining_groups = NUM_GROUPS;
+
+      std::cout << curtime << " event all created" << std::endl;
+    }
+  }
+
+  async [Group<id>] initiate( const uint32_t id, const uint32_t niterations ) {
+    ASSERT(id == NUM_GROUPS);
+
+    if( niterations < num_iterations ) {
+      
+      num_iterations = niterations;
+
+      if( niterations > 0 ) {
+        
+        std::cout << curtime << " creating events (iterations left = " << niterations << ")" << std::endl;
+
+        for( uint32_t j=0; j<NUM_EVENTS; j++ ) {
+          //std::cout << curtime << " compute-launch (" << i << ")" << std::endl;
+          for( uint32_t i=0; i<NUM_GROUPS; i++ ) {
+            async_compute(i,j);
+          }
+        }
+
+        /* Make migration if necessary */
+        if( MIGRATION_POLICY == 1 ) {
+          /* Do migration at HALF */
+          if( 2 * niterations == NUM_ITERATIONS || 2 * niterations + 1 == NUM_ITERATIONS ) {
+            std::cout << curtime << " migration started" << std::endl;
+            migrateContext(MIGRATION_IDS);
+          }
+        } else if (MIGRATION_POLICY == 2 ) {
+          /* Scale out at a third, Scale in at two third. */
+          /* Do migration at a third */
+          if( 3 * niterations == 2 * NUM_ITERATIONS || 3 * niterations + 1 == 2 * NUM_ITERATIONS || 3 * niterations + 2 == 2 * NUM_ITERATIONS ) {
+            std::cout << curtime << " migration (scale out) started : " << MIGRATION_IDS << std::endl;
+            migrateContext(MIGRATION_IDS);
+          } else if( 3 * niterations == NUM_ITERATIONS || 3 * niterations + 1 == NUM_ITERATIONS || 3 * niterations + 2 == NUM_ITERATIONS ) {
+            std::cout << curtime << " migration (scale in) started : " << MIGRATION_IDS2 << std::endl;
+            migrateContext(MIGRATION_IDS2);
+          }
+        }
+
+        /* Self-scheduling */
+        /* This is round-trip. We do this extra effort to make sure event creation is regulated. */
+        async_initiate_request(niterations % NUM_GROUPS, niterations - 1);
+      } else {
+        std::cout << curtime << " finished launching events" << std::endl;
+      }
+    }
+    /* Others are duplicate. So ignore them. */
+  }
+
+  /*
+   * This is regulator
+   */
+  async [Group<id>] initiate_request( const uint32_t id, const uint32_t niterations ) {
+    ASSERT(id < NUM_GROUPS);
+    async_initiate(NUM_GROUPS, niterations);
+  }
+  
+
+  async [Group<id>] compute( const uint32_t id, const uint64_t processed_events ) {
+    //std::cout << curtime << " compute (" << id  << ") evt = " << processed_events << std::endl;
+    if( EVENT_WAIT_TIME > 0 ) {
+      usleep(EVENT_WAIT_TIME);
+    }
+    num_events--;
+    if( num_events <= 0 ) {
+      //if( processed_events > num_events ) {
+      num_iterations--;
+      if( num_iterations <= 0 ) {
+        std::cout << curtime << " finishing (" << id  << ") it = " << num_iterations << std::endl;
+        async_finish(id);
+      } else {
+        std::cout << curtime << " done_iteration (" << id  << ") it = " << num_iterations << std::endl;
+
+        if( USE_GLOBAL_EVENT_CREATE == 1 || USE_GLOBAL_EVENT_CREATE == 0 ) {
+          async_done_iteration(id);
+        } else {
+          /* Otherwise, it is managed by themselves */
+          async_initiate(NUM_GROUPS, num_iterations);
+          num_events = NUM_EVENTS;
+        }
+      }
+    } else {
+      if( num_primes > 0 ) {
+        do_primes(num_primes);
+      }
+      //async_compute(id, processed_events+1);
+    }
+  }
+
+  async done_iteration(const uint32_t id) {
+    ASSERT(USE_GLOBAL_EVENT_CREATE == 1 || USE_GLOBAL_EVENT_CREATE == 0);
+    num_remaining_groups--;
+    if( num_remaining_groups == 0 ) {
+      // start another iteration.
+      num_iterations_global--;
+      std::cout << curtime << " iterations left = " << num_iterations_global << std::endl;
+      for( uint32_t i=0; i<NUM_GROUPS; i++ )
+      {
+        // it does graph generation / initialization by group
+        //std::cout << curtime << " initiate (" << i << ")" << std::endl;
+        async_initialize(i, NUM_PRIMES, NUM_EVENTS, num_iterations_global );
+      }
+      num_remaining_groups = NUM_GROUPS;
+    }
+  }
+
+  async finish(const uint32_t id) {
+    std::cout << curtime << " finishing (" << id  << ")" << std::endl;
+    num_remaining_groups--;
+    if( num_remaining_groups == 0 ) {
+      ts_end = (double)TimeUtil::timeu();
+      std::cout.setf(std::ios::fixed);
+      std::cout << curtime << " finished" << std::endl;
+      std::cout << curtime << std::setprecision(0) << " execution_time = " << (ts_end-ts_start) << std::endl;
+      usleep(HEAD_FINISH_WAIT_TIME);
+      exit(0);
+    }
+  }
+
+  scheduler exit_timer() {
+    ts_end = (double)TimeUtil::timeu();
+    std::cout.setf(std::ios::fixed);
+    std::cout << curtime << " finished" << std::endl;
+    std::cout << curtime << std::setprecision(0) << " execution_time = " << (ts_end-ts_start) << std::endl;
+    usleep(HEAD_FINISH_WAIT_TIME);
+    exit(0);
+  }
+    
+}
+
+routines {
+  [__null] void do_primes( uint64_t nprimes)
+  {
+      uint64_t i, num=1, primes = 0;
+      //std::cout << curtime << " do_primes()" << std::endl;
+      while(1) {
+        ++num;
+        for (i = 2; (i <= num) && (num % i != 0); ++i);
+        if (i == num)
+          ++primes;
+        if( primes > nprimes ) {
+          return;
+        }
+      }
+      //printf("Calculated %d primes.\n", primes);
+  }
+}

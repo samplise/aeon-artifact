@@ -1,0 +1,77 @@
+/* 
+ * MulticastServiceClass.mh : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, James W. Anderson, Ryan Braud
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include <string>
+#include "MaceTypes.h"
+#include "OverlayServiceClass.h"
+
+// NOTE: MulticastServiceClass-es which also provide GroupServiceClass have
+// special properties, especially as pertains to 'dest' in multicast, anycast
+// other calls of derived classes.
+serviceclass Multicast {
+  // Note: For multicast and anycast, "dest" is the group id if this is also
+  // a group service, otherwise the behavior is not well specified.  This 
+  // could be used to implement a channel abstraction.  But, what should be
+  // true is that services providing MulticastServiceClass should deliver the
+  // input dest field as the "destination" part of the callback.
+
+  // REM: When delivering a multicast or anycast message, the 
+  // communicationType parameter SHOULD be set to COMM_TYPE_MULTICAST
+  // or COMM_TYPE_ANYCAST, accordingly.  These are specified in 
+  // lib/mace_constants.h
+  
+  // For the following calls, the int return value tells whether the service 
+  // accepted the message.  It does NOT guarantee delivery or other properties.
+  // NOTE: 'dest' in a Group service refers to the groupId.  In non-groups
+  // this field will typically be ignored by the service provided by multicast,
+  // however, it will be available as the 'dest' variable in mac files, and 
+  // could be used
+  // as desired.
+
+  virtual bool multicast(const MaceKey& dest, const mace::string& s) { return false; }
+  virtual bool anycast(const MaceKey& dest, const mace::string& s) { return false; }
+
+  handlers ReceiveData, ForwardData;
+
+  mace services {
+    method_remappings {
+      uses {
+	downcall_multicast(const MaceKey&, const Message& -> const mace::string&, registration_uid_t);
+	downcall_anycast(const MaceKey&, const Message& -> const mace::string&, registration_uid_t);
+      }
+      implements {
+	upcalls {
+	  forward(const MaceKey&, const MaceKey&, MaceKey&, const Message& <- const std::string&);
+	  deliver(const MaceKey&, const MaceKey&, const Message& <- const std::string&);
+	}
+      }
+    }
+  }
+};

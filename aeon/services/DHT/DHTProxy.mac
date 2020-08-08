@@ -1,0 +1,79 @@
+using std::string;
+
+service DHTProxy;
+
+provides Null;
+
+services {
+  Transport t;
+  DHT dht;
+}
+
+local_address {
+  return downcall_localAddress(t);
+}
+
+#minclude "DHTNetMessages.mi"
+
+typedefs {
+  typedef mace::map<MaceKey, NodeList> KeyMap;
+}
+
+state_variables {
+  KeyMap getWaiters; 
+  KeyMap containsKeyWaiters; 
+}
+
+transitions {
+  upcall deliver(const MaceKey& src,const MaceKey&  dest, const DHTGet& g) {
+    getWaiters[g.key].push_back(src);
+    downcall_get(g.key);
+  }
+
+  upcall deliver(const MaceKey& src,const MaceKey&  dest, const DHTContainsKey& g) {
+    containsKeyWaiters[g.key].push_back(src);
+    downcall_containsKey(g.key);
+  }
+
+  //Note - the following 2 transitions assume reliable responses, and no aggregation of responses. 
+  //  Properly this code should probably have timeouts - but for now I will ignore.
+  upcall dhtGetResult(key, value, found) {
+    KeyMap::iterator i = getWaiters.find(key);
+    if (i == getWaiters.end()) { return; }
+    
+    NodeList::iterator j = i->second.begin();
+    downcall_route(*j, DHTReply(key, found, value));
+    i->second.pop_front();
+    if (i->second.empty()) { 
+      getWaiters.erase(i);
+    }
+  }
+
+  upcall dhtContainsKeyResult(key, found) {
+    KeyMap::iterator i = containsKeyWaiters.find(key);
+    if (i == containsKeyWaiters.end()) { return; }
+    
+    NodeList::iterator j = i->second.begin();
+    downcall_route(*j, DHTKeyResult(key, found));
+    i->second.pop_front();
+    if (i->second.empty()) { 
+      containsKeyWaiters.erase(i);
+    }
+  }
+
+  upcall deliver(const MaceKey& src,const MaceKey&  dest, const DHTPut& p) {
+//    log("putrequest", p.key, p.payload, src);
+
+    downcall_put(p.key, p.payload);
+  }
+
+  upcall deliver(const MaceKey& src,const MaceKey&  dest, const DHTDelete& d) {
+    downcall_remove(d.key);
+  }
+}
+
+routines {
+  void log(const string& action, const MaceKey& key, const string& value, const MaceKey& proxy) {
+    std::cout << curtime << " " << localAddress() << " " << action << " " << key << " => " << value << " proxy " << proxy << std::endl;
+  }
+}

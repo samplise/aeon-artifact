@@ -1,0 +1,8 @@
+#ifndef __LOAD_PROTOCOLS_H_
+#define __LOAD_PROTOCOLS_H_
+
+@DECL_LOAD_PROTO_SV@
+
+@LOAD_PROTO_STRING@
+
+#endif //__LOAD_PROTOCOLS_H_

@@ -1,0 +1,57 @@
+
+#include "Util.h"
+#include "MaceKey.h"
+service Throughput;
+provides Null;
+
+services {
+  Transport tcp = TcpTransport();
+}
+
+messages{
+  Data{ uint32_t n; mace::string s; }
+}
+
+constructor_parameters {
+  MaceKey sender_addr = MaceKey( ipv4, "tiberius06-132:8050");
+  MaceKey receiver_addr = MaceKey( ipv4, "tiberius05-132:8000");
+
+  uint32_t message_length = 100;
+
+  uint32_t NCONTEXTS = 8;
+}
+
+state_variables {
+  context Receiver<uint32_t n>{
+    uint32_t count = 0;
+  }
+}
+
+transitions {
+  downcall maceInit(){
+    if( sender_addr.getMaceAddr() == Util::getMaceAddr() ){
+      //for(int i=0;i< 8;i++){
+        async_send(  );
+      //}
+    }
+  }
+
+  async send(  ) {
+    mace::string s;
+    s.resize( message_length, ' ');
+    
+    // send a million network messages
+    for( int n=0; n<1000*1000; n++ ){
+      downcall_route( receiver_addr, Data( n, s ) );
+    }
+  }
+
+  upcall [Receiver<round_robin(m.n)>] deliver(src, dest, const Data& m) {
+  }
+}
+
+routines {
+  [__null] uint32_t round_robin( uint32_t n ){
+    return n % NCONTEXTS;
+  }
+}

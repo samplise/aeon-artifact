@@ -1,0 +1,1156 @@
+/* 
+ * ScribeMS.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2007, Charles Killian, Adolfo Rodriguez, Sooraj Bhat
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in
+ *      the documentation and/or other materials provided with the
+ *      distribution.
+ *    * Neither the names of Duke University nor The University of
+ *      California, San Diego, nor the names of the authors or contributors
+ *      may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+/**
+ *  Implementation of the SCRIBE protocol
+ */
+
+#include "lib/NodeCollection.h"
+#include "lib/StrUtil.h"
+#include "GlobalCommit.h"
+#include "ThreadStructure.h"
+using mace::NodeCollection;
+using mace::MapIterator;
+using mace::ConstMapIterator;
+using mace::string;
+using Log::endl;
+
+#define pushdownAggregate(x, y) x = (x > -1 ? x : y)
+
+//These macros are used to turn additional debugging/trace messages on and off.
+#define SCRIBE_TRACE
+//#define ANYCAST_TRACE
+//#define HEARTBEAT_TRACE
+
+service ScribeMS;
+variants Scribe;
+
+provides Tree, ScribeTree;
+
+trace=high;
+
+constants {
+  int MAX_CHILDREN = 25; //Number of Children per tree to maintain state for.
+  uint64_t DEBUG_INTERVAL = 4*1000*1000; //The interval of the printer timer.
+
+  variant<ScribeMS> {
+    //NOTE: The following constants are used by the heartbeat timer 
+    //NOTE: As long as the timeouts are close in granularity it makes sense to only have one.  Otherwise,
+    // more may be needed.
+    uint64_t TIMER_INTERVAL = 5*1000*1000; //Heartbeat timer interval
+    int DROP_CHILD_TICKS = 10; //Number of timer transitions before dropping a child who doesn't renew its joined status.
+    int RENEW_TICKS = 6; //Number of timer transitions before renewing join status to parents in subscribed trees.
+    int HB_MISS_REPAIR = 2; //Number of timer transitions with no heartbeat received before searching for a new parent.
+    int HB_TICKS = 0; //Number of timer transitions skipped (-1) before sending hb
+  }
+  variant<Scribe> {
+    int JOIN_TIMEOUT_INT = 2;
+    uint64_t JOIN_TIMER_PERIOD = 2*1000*1000;
+  }
+
+}
+
+services {
+  //   OverlayRouter overlay_ =Pastry();
+  //   Route recursive_ =RecursiveOverlayRoute(TransportServiceClass::NULL_, overlay_);
+  //   Route direct_ =CacheRecursiveOverlayRoute(overlay_);
+
+  //Would be great to somehow link this router to the sharedrouter below.  Could be based on registration id matching?
+  OverlayRouter router = auto(shared, [], []);
+
+  Route recursive_ = auto(shared, [hopbyhop,sharedrouter], []);
+  Route direct_ = auto(shared, [direct,sharedrouter], []);
+}
+
+auto_types {
+  //Note that definitions here are of _types_, not actual variables.  This is similar to 
+  //  defining classes.
+  Peer __attribute((node())) {
+    variant<ScribeMS> {
+      int ticks_since_join; //Used to maintain the number of hbtimer ticks since this child last sent a join message
+      int joinSeq;
+    }
+  }
+  Session {
+    Children kids;        //The Children of this node in the tree.
+    MaceKey parent;   //The parent of this node in the tree. BUG: Until a general macedon_key class is defined, this approach uses 0 as NULL or undefined.  Thus a node with id 0 will be confused.
+    Uppath pathtoroot;    //The path to the root of this tree.
+    bool subscribed;       //If subscribed==1, then this node should deliver data to the upper layer/app.
+    bool isRoot;          //Stores whether this node is the root of the tree (to prevent downcalls all the time.
+    bool avoidKids;
+    variant<ScribeMS> {
+      int ticks_since_heartbeat;  //Keeps track of how long its been (in hbtimer ticks) since a heartbeat has been received for this tree.
+      int tick_count_for_renew;   //Keeps track of how long (in hbtimer ticks) since this node sent a join to its parent for this tree. 
+      int tick_count_without_data;//Keeps track of how long (in hbtimer ticks) since this node has sent data to its Children (used to determine if a heartbeat needs to be sent to its Children)
+
+      int joinReqSeq;
+      int joinReplySeq;
+    }
+  }
+
+  variant<Scribe> {
+    RefCountNode __attribute((node())) {
+      int count;            //The number of things we are watching this node for.
+    }
+  }
+}
+
+
+typedefs {
+  typedef NodeCollection<Peer, MAX_CHILDREN> Children;
+  variant<ScribeMS> {
+    typedef NodeSet Uppath;
+    typedef mace::hash_map<mace::string, int> StringIntMap;
+  }
+  variant<Scribe>{
+    typedef NodeCollection<Peer> Uppath;
+    typedef NodeCollection<RefCountNode> Monitored;
+    typedef NodeCollection<RefCountNode> Joining; //here count is hb delay count
+  }
+  typedef mace::map<MaceKey, Session> Sessions;
+}
+
+method_remappings {
+  uses {
+    downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t regId = recursive_);
+    variant<ScribeMS> {
+      downcall_route(const MaceKey&, const Heartbeat&, registration_uid_t regId = direct_); 
+    }
+    variant<Scribe> {
+      downcall_route(const MaceKey&, const Membership&, registration_uid_t regId = direct_);
+    }
+    upcall_verifyJoinGroup(const MaceKey&, const MaceKey&, registration_uid_t regId = authGroupJoinHandler); 
+  }
+}
+messages {
+  CreateGroup {
+    MaceKey groupId;
+  }
+  Join {
+    MaceKey groupId;
+    variant<ScribeMS> {
+      int joinSeq;
+    }
+  }
+  Leave {
+    MaceKey groupId;
+    variant<ScribeMS> {
+      int joinSeq;
+    }
+  }
+  Pushdown {
+  //Sent to a child when it is being "kicked out" of this node's children list.
+                            //  Contains a list of the pushed down node's siblings.  It will try to join  
+                            //  under one of these.
+    MaceKey groupId;
+    Children siblings;
+    variant<ScribeMS> {
+      int joinSeq;
+    }
+  }
+  variant<ScribeMS> {
+    Heartbeat { 
+      //Heartbeats will be sent periodically in the absence of tree data to maintain
+                              //  freshness of state.  Each node sends the list of nodes in the path to 
+                              //  the root of the tree to its Children to prevent loops.
+      MaceKey groupId;
+      Uppath pathtoroot;
+      int joinSeq;
+    }
+  }
+  variant<Scribe> {
+    Membership {
+      //Heartbeats will be sent to maintain each node's path to root to prevent loops.
+      MaceKey groupId;
+      Uppath pathtoroot;
+    }
+  }
+}
+
+state_variables {	          //These are not type definitions but actual variable declarations.
+  //XXX: COMPILER MUST VERIFY "first" is a message field for type=map, and response contains msg.first
+  //Default forward for probe and response msg will be "true"
+  //type, who, are required
+  //routeReceive, probetime, failTime, interval are optional
+  //probe, response, suppress are optional
+  //no probe implies probeTime = 0
+  //no response implies probes will not be auto-responded to
+  //failTime = 0 implies this is for record-keeping only
+  //interval = 0 implies only send one probe
+  //routeReceive = * or not included means receives on any router are checked.  (can be comma-sep list)
+  //routeSend must be present exactly when probe is present
+  //   Sessions [failure(name=PARENT_FAILURE; type=map; who=second.parent; probe=Join(first, second.joinReplySeq); 
+  //                     response=Heartbeat(Join.groupId, sessions[Join.groupId].pathToRoot, sessions[Join.groupId].joinSeq);
+  //                     probeTime=5*1000*1000; failTime=10*1000*1000; interval=1*1000*1000; routeSend=router; routeReceive=*;), 
+  //             failure(name=CHILD_FAILURE; type=map; subtype=NodeCollection; who=second.kids; 
+  //                     suppress=Join(Join.groupId==first && Join.joinSeq >= second.joinReplySeq);
+  //                     failTime=30*1000*1000;)
+  //            ] my_sessions;      //The set of scribe trees we are members of.
+  Sessions my_sessions;      //The set of scribe trees we are members of.
+  timer printer __attribute((recur(DEBUG_INTERVAL))); //This is the printer timer, used to debug and dump state periodically.
+  KeyRange myRange;
+  registration_uid_t authGroupJoinHandler;
+  variant<ScribeMS> {
+    NodeSet groupsToAvoidKids;
+    timer hbTimer __attribute((recur(TIMER_INTERVAL))); //This is the heartbeat timer, used for periodic table maintenance
+  }
+  variant<Scribe> {
+    Monitored watched; //The set of nodes which are to be monitored for failure.
+    timer joinTimer;         //This timer fires periodically to rejoin failed joins.
+    Joining outstanding_joins __attribute((serialize(no)));//This keeps track of the outstanding joins for the system
+  }
+}	  
+
+transitions {
+
+  //The automatic transition which occurs at the beginning.
+  downcall (true) maceInit() {
+    myRange = downcall_getIdSpace();
+    authGroupJoinHandler = -1;
+    variant<ScribeMS> {
+      //       ANNOTATE_SET_PATH_ID_STR(NULL, 0, "scribe-timer-hbtimer-%s", localAddress().toString().c_str());
+      hbTimer.reschedule(TIMER_INTERVAL); //All timers have to be scheduled the first time.
+    }
+    variant<Scribe> {
+      ABORT("Scribe code currently broken for failures.  To use anyway, comment out this abort statement!");
+    }
+    //     ANNOTATE_SET_PATH_ID_STR(NULL, 0, "scribe-timer-printer-%s", localAddress().toString().c_str());
+    //     printer.reschedule(DEBUG_INTERVAL);
+
+
+  }
+
+  downcall setAuthoritativeGroupJoinHandler(registration_uid_t regId) { authGroupJoinHandler = regId; }
+
+  downcall (my_sessions.containsKey(groupId)) isRoot(const MaceKey& groupId) [locking=read] {
+    return my_sessions.get(groupId).isRoot;
+  }
+  downcall isRoot(const MaceKey& groupId) [locking=read] {
+    return false;
+  }
+
+  //Message: create_group
+  //Action: recv
+  //
+  //If state already exists for this group, simply set isRoot to true, upstream 
+  //  maintenance state to 0, and clear out data about parents.
+  //Otherwise, first add state for the group.
+  upcall (!my_sessions.containsKey(msg.groupId)) deliver(const MaceKey& from, const MaceKey& dest, const CreateGroup& msg) {
+    Session& temp = my_sessions[msg.groupId];
+    temp.subscribed=0;
+    temp.isRoot=true;
+    variant<ScribeMS> {
+      temp.parent = localAddress();
+      temp.ticks_since_heartbeat = 0;
+      temp.tick_count_for_renew = 0;
+      temp.tick_count_without_data = 0;
+      temp.joinReqSeq = 0;
+      temp.joinReplySeq = -1;
+    }
+    //What do we need to do with this?
+    //       upcall_notify(my_sessions, NBR_TYPE_TREE);
+  }
+  upcall /*(else) */ deliver(const MaceKey& from, const MaceKey& dest, const CreateGroup& msg) {
+    Session& temp = my_sessions[msg.groupId];
+    temp.pathtoroot.clear();
+    temp.isRoot=true;
+    variant<ScribeMS> {
+      temp.parent = localAddress();
+      temp.ticks_since_heartbeat = 0;
+      temp.tick_count_for_renew = 0;
+      temp.tick_count_without_data = 0;
+    }
+    variant<Scribe> {
+      unwatch(temp.parent);
+      temp.parent = MaceKey();
+    }
+    //TODO: What kind of notify should happen here?
+  }
+
+  upcall 
+    variant<ScribeMS> {
+      (nextHop == localAddress() || (regId == recursive_ && from != localAddress() && !groupsToAvoidKids.contains(msg.groupId))) 
+    }
+    variant<Scribe> {
+      (nextHop == localAddress() || (regId == recursive_ && from != localAddress()) ) 
+    }
+    forward(const MaceKey& from, const MaceKey& dest, MaceKey& nextHop, const Join& msg, registration_uid_t regId) {
+    Session *temp;
+
+    //CASE 1: Forward join because this node sent it (state expression)
+    //upcall_forward will be called on all nodes, including origin node.  Thus, if this node
+    //is the origin node, automatically forward it.
+
+    if ( my_sessions.containsKey(msg.groupId)) {
+      //retrieve state for use in this transition
+      temp = &(my_sessions[msg.groupId]);
+      
+      variant<Scribe> {
+        if(temp->avoidKids && !temp->isRoot) { return true; }
+      }
+
+      if(temp->pathtoroot.contains(from)) {
+        //CASE 2: Reject joining node based on loop test.
+        //If the joining node is in our path to the root, forward it on, because we cannot allow loops.
+        macewarn << "Forwarding a join (fr: " << from << " to: " << dest << " ) because it is in our path to root." << endl;
+        return true; //Continue forwarding the join, because we cannot take the node.
+      }
+    }
+    else {
+      //add state for the new session, joining the group
+      temp = &my_sessions[msg.groupId];
+      //       upcall_notify(my_sessions, NBR_TYPE_TREE);  //notify the upper layer of the state change.
+      //FIXME: If upcall_notify causes the group to be removed -- what happens here?
+      temp->subscribed = 0;
+      temp->isRoot = myRange.containsKey(msg.groupId);
+      variant<ScribeMS> {
+        if (temp->isRoot) {
+          temp->parent = localAddress();
+        }
+        temp->ticks_since_heartbeat = 0;
+        temp->tick_count_for_renew = 0;
+        temp->tick_count_without_data = 0;
+        temp->joinReqSeq = 0;
+        temp->joinReplySeq = -1;
+      }
+      if(!temp->isRoot) {
+        //         pushPathId(localAddress(), msg.groupId, true);
+        //         ANNOTATE_NOTICE(NULL, 0, "Recursively joining because of %s from %s", msg.toString().c_str(), from.toString().c_str());
+        variant<ScribeMS> {
+          downcall_route(msg.groupId,Join(msg.groupId, temp->joinReqSeq++));
+        }
+        variant<Scribe> {
+          downcall_route(msg.groupId,Join(msg.groupId));
+          dojoin(msg.groupId);
+        }
+        //         popPathId(true);
+      }
+    }
+
+    variant<ScribeMS> {
+      if (! temp->kids.contains(from )) {
+        Peer& kid = temp->kids.add(from );
+        if(temp->kids.space() && upcall_verifyJoinGroup(msg.groupId, from)) {
+          //CASE 3: Accept new child
+          kid.joinSeq = msg.joinSeq;
+          downcall_route(from,Heartbeat(msg.groupId,temp->pathtoroot, msg.joinSeq));
+          maceout << "added kid " << from << " for group " << msg.groupId << " , now have " << temp->kids.size() << endl;
+          //TODO: Should we also have a notifyNewChild or some such like we did for OverlayStructureHandler?
+          // shyoo: deferrable
+          upcallAllVoid(notifyChildren, msg.groupId, temp->kids.nodeSet());
+          // shyoo: deferrable
+          upcallAllVoid(notifyChildAdded, msg.groupId, from);
+          // shyoo: deferrable
+          upcallAllVoid(peerJoinedGroup, msg.groupId, from);
+        } else {
+          temp->kids.erase(from);
+          //CASE 4: Reject child because there are too many children or because upper layer said not to accept.
+          downcall_route(from, Pushdown(msg.groupId,temp->kids, msg.joinSeq));
+        }
+      }
+      if(temp->kids.contains(from)) {
+        temp->kids.get(from).ticks_since_join = 0;
+        if(temp->kids.get(from).joinSeq < msg.joinSeq) {
+          temp->kids.get(from).joinSeq = msg.joinSeq;
+        }
+      }
+    }
+    variant<Scribe> {
+      if (! temp->kids.contains(from )) {
+        if(temp->kids.space()) {
+          //CASE 3: Accept new child
+          temp->kids.add(from );
+          watch(from);
+          downcall_route(from,Membership(msg.groupId,temp->pathtoroot));
+          maceout << "added kid " << from << " for group " << msg.groupId << " , now have " << temp->kids.size() << endl;
+          //TODO: Should we also have a notifyNewChild or some such like we did for OverlayStructureHandler?
+          // shyoo: deferrable
+          upcallAllVoid(notifyChildren, msg.groupId, temp->kids.nodeSet());
+          // shyoo: deferrable
+          upcallAllVoid(notifyChildAdded, msg.groupId, from);
+        } else {
+          //CASE 4: Reject child because there are too many children.
+          downcall_route(from, Pushdown(msg.groupId,temp->kids));
+        }
+      }
+    }
+    return false;
+  }	 
+
+  //Message: join
+  //Action: recv
+  //
+  //If a join message is received at a node, this means it has already been forwarded by all 
+  //  intermediate nodes, including this one.  If this happens frequently, it may be an 
+  //  indicator of a more serious problem.  Likely indicates stale state.
+  upcall deliver(const MaceKey& from, const MaceKey& dest, const Join& msg) {
+    macewarn << "join failed! Join msg not accepted by any node. (fr: " << from << " gr: " << msg.groupId << " )" << endl;
+  }
+
+  //Message: leave
+  //Action: forward
+  //
+  //Process:
+  //1 - Remove child if found (otherwise stale state somewhere)
+  //2 - Conditionally notify higher layer
+  //3 - If we have no remaining Children and are not subscribed, leave the group. (notify upper layer)
+  upcall (my_sessions.containsKey(msg.groupId)) deliver(const MaceKey& from, const MaceKey& dest, const Leave& msg) {
+    Session& temp = (my_sessions[msg.groupId]);
+
+    //remove "from" from the list of neighbor kids
+    if (temp.kids.contains(from)) {
+      variant<ScribeMS> {
+        if(temp.kids.get(from).joinSeq == msg.joinSeq) {
+          temp.kids.erase(from);
+          // shyoo: deferrable
+          upcallAllVoid(notifyChildren, msg.groupId, temp.kids.nodeSet());
+        } else if(temp.kids.get(from).joinSeq < msg.joinSeq) {
+          //(Re)Send heartbeat to child since old leave received.
+          downcall_route(from, Heartbeat(msg.groupId, temp.pathtoroot, temp.kids.get(from).joinSeq));
+        } else {
+          maceerr << "Received unexpected leave message from " << from << " joinSeq: " << msg.joinSeq << " expecting: " << temp.kids.get(from).joinSeq << endl;
+        }
+      }
+      variant<Scribe> {
+        temp.kids.erase(from);
+        // shyoo: deferrable
+        upcallAllVoid(notifyChildren, msg.groupId, temp.kids.nodeSet());
+        unwatch(from);
+      }
+    }	
+
+    if (temp.kids.size() == 0 && !temp.subscribed)
+    { // now we check both for children and our own subscription.
+      variant<ScribMS> {
+        if( !temp.parent.isNullAddress() && temp.parent != localAddress()) {
+          //           pushPathId(localAddress(), msg.groupId, true);
+          //           ANNOTATE_NOTICE(NULL, 0, "Leaving group recursively due to %s", msg.toString().c_str());
+          downcall_route(temp.parent, Leave(msg.groupId, temp.joinReplySeq));
+          //           popPathId(true);
+        }
+      }
+      variant<Scribe>{
+        if( !temp.parent.isNullAddress() ) {
+          downcall_route(temp.parent, Leave(msg.groupId));
+          unwatch(temp.parent);
+          temp.parent = MaceKey();
+        }
+      }
+      my_sessions.erase(msg.groupId);
+      //         upcall_notify(my_sessions, NBR_TYPE_TREE);
+    }
+  }
+
+  //Message: pushdown
+  //Action: recv
+  //
+  //1 - Pick sibling to join under based on symantics below.
+  //2 - Reset Session state pertinent to parents.
+  //3 - Send a join to that sibling
+  //
+  //Known Problems: See FIXME
+  upcall (dest != localAddress() || from == localAddress()) deliver(const MaceKey& from, const MaceKey& dest, const Pushdown& msg) {
+    maceerr << "A pushdown message was received and either dest " << dest << " != localAddress() " << localAddress() << " or from " << from << " == localAddress() " << localAddress() << endl;
+  }
+  upcall (!my_sessions.containsKey(msg.groupId)) deliver(const MaceKey& from, const MaceKey& dest, const Pushdown& msg) {
+    macewarn << "A pushdown message was received from " << from << " but groupid " << msg.groupId << " is not part of my sessions." << endl;
+  }
+  variant<Scribe> {
+    upcall (my_sessions.find(msg.groupId)->second.parent != from && !my_sessions.find(msg.groupId)->second.parent.isNullAddress()) deliver(const MaceKey& from, const MaceKey& dest, const Pushdown& msg) {
+      macewarn << "Received pushdown from non-parent.  Ignoring (gr: " << msg.groupId << " fr: " << from << " pr: " << my_sessions.find(msg.groupId)->second.parent << endl;
+    }
+  }
+  //XXX: Do we want this?  Not part of scribems
+  //   upcall (my_sessions.find(msg.groupId)->second.parent != from && !my_sessions.find(msg.groupId)->second.parent.isNullAddress()) deliver(const MaceKey& from, const MaceKey& dest, const Pushdown& msg) {
+  //     macewarn << "Received pushdown from non-parent.  Ignoring (gr: " << msg.groupId << " fr: " << from << " pr: " << my_sessions.find(msg.groupId)->second.parent << endl;
+  //   }
+  variant<ScribeMS> {
+    upcall (msg.joinSeq < my_sessions.find(msg.groupId)->second.joinReplySeq) deliver(const MaceKey& from, const MaceKey& dest, const Pushdown& msg) {
+      macewarn << "A pushdown message was received from " << from << " but joinSeq is out of date. ( rcvd " << msg.joinSeq << " but current reply " << my_sessions.find(msg.groupId)->second.joinReplySeq << " ) Ignoring." << endl;
+    }
+  }
+  upcall /*(else) */ deliver(const MaceKey& from, const MaceKey& dest, const Pushdown& msg) {
+    //Symantics: 
+    // 1- Upcall to upper layer.  If not subscribed, or if they wish, return < 0, 
+    //    which implies to perform standard scribe pushdown.
+    // 2- Standard Scribe Pushdown: probe for lowest latency
+    // 3- returnCode = 0, chosen node is set in the arg
+    MaceKey pushdownNode;
+    int returnCode=-1;
+
+    //defined in scribe_ext.h
+    MaceKey pushdownId;
+    NodeSet siblings = msg.siblings.nodeSet();
+    variant<ScribeMS> {
+      Session& tempsess = (my_sessions[msg.groupId]);
+      upcallAll(returnCode, pushdownAggregate, selectParent, msg.groupId, siblings, pushdownId, tempsess.joinReqSeq);
+    }
+    variant<Scribe> {
+      upcallAll(returnCode, pushdownAggregate, selectParent, msg.groupId, siblings, pushdownId);
+    }
+
+    //Three values for return code:
+    //-1 - Let lower layer pick
+    //0  - I've chosen, result is in arg->chosen
+    //1 - don't send any join messages, I've taken care of it.
+    if(returnCode == 0) {
+      pushdownNode = pushdownId;
+    }
+
+    if(returnCode == -1 && msg.siblings.size() > 0) {
+      //FIXME: This should be replaced with a proper probe
+      const Peer& mysibling = msg.siblings.random();
+      pushdownNode = mysibling.getId();
+    } else if(returnCode == -1) {
+      //No node to join.
+      returnCode=2;
+    }
+
+    //Update these values anyway. If no node is rejoined -- this becomes a new timeout timer.
+    variant<Scribe> {
+      dojoin(msg.groupId);
+      Session& tempsess = (my_sessions[msg.groupId]);
+      unwatch(tempsess.parent);
+      maceout << "REPLAY MEMBERSHIP_CHANGE ( gr me parent ) " << msg.groupId << " " << localAddress() << " " << localAddress() << endl;
+    }
+    variant<ScribeMS> {
+      maceout << "REPLAY MEMBERSHIP_CHANGE ( gr me parent ) " << msg.groupId << " " << localAddress() << " " << MaceKey::null << endl;
+    }
+    tempsess.parent = MaceKey::null;
+    tempsess.pathtoroot.clear();
+    variant<ScribeMS> {
+      tempsess.ticks_since_heartbeat=0;
+      tempsess.tick_count_for_renew=0;
+      tempsess.joinReplySeq = msg.joinSeq;
+      //XXX: Can use this to adjust the heartbeat timer perhaps?
+
+      if(returnCode <= 0) {
+        downcall_route(pushdownNode,Join(msg.groupId, tempsess.joinReqSeq), direct_);
+      }	
+      tempsess.joinReqSeq++; 
+    }
+    variant<Scribe> {
+      if(returnCode <= 0) {
+        downcall_route(pushdownNode,Join(msg.groupId),direct_);
+      }	
+    }
+  }
+
+  variant<ScribeMS> {
+  //Message: heartbeat
+  //Action: recv
+  //
+  //When receiving a heartbeat
+  //1 - clear heartbeat state
+  //2 - update pathtoroot
+  //3 - update parent
+  //
+  //Known Problems: How do we add optimization #1: Cycle detection only when needed?
+  upcall (dest != localAddress() || from == localAddress()) deliver(const MaceKey& from, const MaceKey& dest, const Heartbeat& msg) {
+    maceerr << "A heartbeat message (for " << msg.groupId << " ) was received and either dest( " << dest << " )!=localAddress()( " << localAddress() << " ) or from( " << from << " )==localAddress()( " << localAddress() << " )" << endl;
+  }
+  upcall (msg.pathtoroot.contains(localAddress())) deliver(const MaceKey& from, const MaceKey& dest, const Heartbeat& msg) {
+    maceerr << "A heartbeat message (for " << msg.groupId << " ) was received and I was in the path to root!" << endl;
+  }
+  upcall (!my_sessions.containsKey(msg.groupId)) deliver(const MaceKey& from, const MaceKey& dest, const Heartbeat& msg) {
+#ifdef HEARTBEAT_TRACE
+    maceout << "Received heartbeat for group " << msg.groupId << endl;
+#endif
+    //FIXME: Nothing for now -- consider sending a leave message.
+    macewarn << "Received heartbeat for group " << msg.groupId << " but not subscribed." << endl;
+  }
+  upcall (msg.joinSeq < my_sessions.find(msg.groupId)->second.joinReplySeq) deliver(const MaceKey& from, const MaceKey& dest, const Heartbeat& msg) {
+    macewarn << "Received heartbeat for group " << msg.groupId << " but joinSeq " << msg.joinSeq << " is less than joinReplySeq " << my_sessions.find(msg.groupId)->second.joinReplySeq << endl;
+  }
+  upcall /*(else) */ deliver(const MaceKey& from, const MaceKey& dest, const Heartbeat& msg) {
+    //FIXME: Add optimisation #1, cycle detection only when needed?
+#ifdef HEARTBEAT_TRACE
+    maceout << "Received membership for group " << msg.groupId << endl;
+#endif
+    Session& tempsess = (my_sessions[msg.groupId]);
+    tempsess.ticks_since_heartbeat = 0;
+    tempsess.pathtoroot = msg.pathtoroot;
+    tempsess.pathtoroot.insert(from);
+    tempsess.joinReplySeq = msg.joinSeq;
+    //HUH? why the first part? if(msg.groupId != dest && (tempsess.parent.isNullAddress() || tempsess.parent != from) ) 
+    if(msg.groupId != dest && (tempsess.parent.isNullAddress() || tempsess.parent != from)) {
+      //XXX: Not part of ScribeMS
+      //       if(!tempsess.parent.isNullAddress()) {
+      //         //FIXME: Consider printing a warning when parent changes unexpectedly.
+      //         macewarn << "Unexpected parent change in group " << msg.groupId << " from " << tempsess.parent << " to " << from << endl;
+      //         downcall_routeDirect(tempsess.parent,Leave(msg.groupId));
+      //       }
+      maceout << "REPLAY MEMBERSHIP_CHANGE ( gr me parent ) " << msg.groupId << " " << localAddress() << " " << from << endl;
+      tempsess.parent = from;
+      // shyoo: deferrable
+      upcallAllVoid(notifyParent, msg.groupId, from);
+    }
+    //XXX: Not part of ScribeMS
+    //     Children::map_iterator childIter = tempsess.kids.mapIterator();
+    //     MaceKey dest;
+    //     while(childIter.hasNext()) {
+    //       childIter.next(dest);
+    //       downcall_routeDirect(dest,Membership(msg.groupId,tempsess.pathtoroot));
+    //     }
+  }
+
+  //Timer: hbTimer
+  //
+  //Perform periodic maintenance actions.
+  //Steps 1 and 2 only apply to groups we aren't the root for.
+  //STEP 1: Check to see if we're receiving data on the tree.
+  //STEP 2: See if we need to renew our interest to our parent
+  //STEP 3: Check for Children who seem to have lost interest in the group
+  //STEP 3b: Increment ticks_since_join.
+  //STEP 4: Send a heartbeat to all Children if no data has been sent.
+  //
+  //Q: A good API Error could resolve this.  But what about scribe-liveness, not just network liveness?
+  scheduler hbTimer() {
+    macedbg(1) << "recursive_ " << recursive_ << Log::endl;
+    for(Sessions::iterator i = my_sessions.begin(); i != my_sessions.end(); i++) {
+      //Steps 1 and 2 only apply to groups we aren't the root for.
+      //       pushPathId(localAddress(), i->first, true);
+      //       ANNOTATE_NOTICE(NULL, 0, "hbTimer");
+      if(!i->second.isRoot) {	
+        //STEP 1: Check to see if we're receiving data on the tree.
+        if(i->second.ticks_since_heartbeat > HB_MISS_REPAIR) {
+          macewarn << "No heartbeat received (ticks_since_hb= " << i->second.ticks_since_heartbeat << " ), rejoining group ( " << i->first << " )" << endl;
+          downcall_route(i->first, Join(i->first, i->second.joinReqSeq++));
+          i->second.ticks_since_heartbeat = 0;
+          i->second.tick_count_for_renew = 0;
+          i->second.parent = MaceKey();
+          maceout << "REPLAY MEMBERSHIP_CHANGE ( gr me parent ) " << i->first << " " <<  localAddress() << " " <<  localAddress() << endl;
+          i->second.pathtoroot.clear();
+        } else {
+          i->second.ticks_since_heartbeat++;
+#ifdef HEARTBEAT_TRACE
+          maceout << "Incremented ticks_since_hb= " << i->second.ticks_since_heartbeat << " for group ( " << i->first << " )" << endl;
+#endif
+          //STEP 2: See if we need to renew our interest to our parent
+          if(i->second.tick_count_for_renew > RENEW_TICKS) {
+            if(!i->second.parent.isNullAddress() && i->second.parent != localAddress()) {
+#ifdef HEARTBEAT_TRACE
+              maceout << "Time to renew interest to parent ( " << i->second.parent << " ). tick_count_for_renew= " << i->second.tick_count_for_renew << " for group ( " << i->first << " )" << endl;
+#endif
+              //If we have a parent, send a renewal message to that parent.
+              downcall_route(i->second.parent, Join(i->first, i->second.joinReplySeq), direct_);
+            } else {
+              //Oddball case.  Should only happen if RENEW_TICKS < HB_MISS_REPAIR.  Basically retries a join.
+#ifdef HEARTBEAT_TRACE
+              macewarn << "Oddball case: Time to renew interest to parent, but no known parent. tick_count_for_renew= " << i->second.tick_count_for_renew << " for group ( " << i->first << " )" << endl;
+#endif
+              downcall_route(i->first, Join(i->first, i->second.joinReqSeq++));
+            }
+            i->second.tick_count_for_renew=0;
+          } else {
+            i->second.tick_count_for_renew++;
+#ifdef HEARTBEAT_TRACE
+            maceout << "incremented tick_count_for_renew= " << i->second.tick_count_for_renew << " for group ( " << i->first << " )" << endl;
+#endif
+          }
+        }
+      }	
+
+      //Check if heartbeats need to be sent.
+      bool sendHeartbeats=false;
+      if(i->second.tick_count_without_data > HB_TICKS) sendHeartbeats = true;
+
+      //      debug_macro("Scribe: hbTimer: sess=%.8x sendHeartbeats=%d\n",i->second.ipaddr,sendHeartbeats);
+
+      Children::map_iterator childs = i->second.kids.mapIterator();
+      while(childs.hasNext()) {
+        Peer& achild = childs.next();
+        //STEP 3: Check for Children who seem to have lost interest in the group
+        if(achild.ticks_since_join > DROP_CHILD_TICKS) {
+	  //          debug_macro("Scribe: hbTimer: sess=%.8x dropping dead child %.8x\n",i->first,achild->ipaddr);
+
+          //           group_change *gchg = new group_change;
+          //           gchg->groupId = i->first;
+          //           gchg->childId = achild->ipaddr;
+          //           gchg->newJoin = false;
+          //           upcall_ext(GROUP_CHANGE, (void*)gchg);
+
+          //           pushPathId(achild.getId(), i->first, true);
+          //           ANNOTATE_NOTICE(NULL, 0, "hbTimer-parent");
+          // 	  ANNOTATE_NOTICE(NULL, 0, "dropping child %s", achild.getId().toString().c_str());
+          childs.remove();
+          //           popPathId(false);
+        } else {
+          //STEP 3b: Increment ticks_since_join.
+          achild.ticks_since_join++;
+          //STEP 4: Send a heartbeat to all Children if no data has been sent.
+          if(sendHeartbeats) {
+            //             pushPathId(achild.getId(), i->first, true);
+            //             ANNOTATE_NOTICE(NULL, 0, "hbTimer-parent");
+	    //            debug_macro("Scribe: hbTimer: sess=%.8x sending hb to child %.8x\n",i->first,achild->ipaddr);
+            downcall_route(achild.getId(), Heartbeat(i->first, i->second.pathtoroot, achild.joinSeq));
+            //             popPathId(true);
+          }
+        }
+      }
+
+      //Reset the hb count.
+      if(sendHeartbeats) {
+	//        debug_macro("Scribe: hbTimer: sess=%.8x clearing hb flag\n",i->first);
+        i->second.tick_count_without_data=0;
+      } else {
+        i->second.tick_count_without_data++;
+	//        debug_macro("Scribe: hbTimer: sess=%.8x incrementing tick_count_without_data (%d)\n",i->first,i->second.tick_count_without_data);
+      }
+      //       popPathId(true);
+    }
+  }
+  }
+  variant<Scribe> {
+    //Message: membership
+    //Action: recv
+    //
+    //When receiving a membership
+    //1 - clear join timer state
+    //2 - update pathtoroot
+    //3 - update parent
+    //4 - send membership to children
+    //
+    //Known Problems: How do we add optimization #1: Cycle detection only when needed?
+    upcall (dest != localAddress() || from == localAddress()) deliver(const MaceKey& from, const MaceKey& dest, const Membership& msg) {
+      maceerr << "A membership message (for " << msg.groupId << " ) was received and either dest( " << dest << " )!=localAddress()( " << localAddress() << " ) or from( " << from << " )==localAddress()( " << localAddress() << " )" << endl;
+    }
+    upcall (msg.pathtoroot.contains(localAddress())) deliver(const MaceKey& from, const MaceKey& dest, const Membership& msg) {
+      maceerr << "A membership message (for " << msg.groupId << " ) was received and I was in the path to root!" << endl;
+    }
+    upcall (!my_sessions.containsKey(msg.groupId)) deliver(const MaceKey& from, const MaceKey& dest, const Membership& msg) {
+#ifdef MEMBERSHIP_TRACE
+      maceout << "Received membership for group " << msg.groupId << endl;
+#endif
+      //FIXME: Nothing for now -- consider sending a leave message.
+      macewarn << "Received membership for group " << msg.groupId << " but not subscribed." << endl;
+    }
+    upcall /*(else) */ deliver(const MaceKey& from, const MaceKey& dest, const Membership& msg) {
+      //FIXME: Add optimisation #1, cycle detection only when needed?
+#ifdef MEMBERSHIP_TRACE
+      maceout << "Received membership for group " << msg.groupId << endl;
+#endif
+      Session& tempsess = (my_sessions[msg.groupId]);
+      tempsess.pathtoroot = msg.pathtoroot;
+      tempsess.pathtoroot.add(from);
+      //HUH? why the first part? if(msg.groupId != dest && (tempsess.parent.isNullAddress() || tempsess.parent != from) ) 
+      if(tempsess.parent.isNullAddress() || tempsess.parent != from) {
+        if(!tempsess.parent.isNullAddress()) {
+          //FIXME: Consider printing a warning when parent changes unexpectedly.
+          macewarn << "Unexpected parent change in group " << msg.groupId << " from " << tempsess.parent << " to " << from << endl;
+          unwatch(tempsess.parent);
+          downcall_route(tempsess.parent,Leave(msg.groupId));
+        }
+        maceout << "REPLAY MEMBERSHIP_CHANGE ( gr me parent ) " << msg.groupId << " " << localAddress() << " " << from << endl;
+        tempsess.parent = from;
+        watch(tempsess.parent);
+        // shyoo: deferrable
+        upcallAllVoid(notifyParent, msg.groupId, from);
+      }
+      donejoin(msg.groupId);
+      Children::map_iterator childIter = tempsess.kids.mapIterator();
+      MaceKey dest;
+      while(childIter.hasNext()) {
+        childIter.next(dest);
+        downcall_route(dest,Membership(msg.groupId,tempsess.pathtoroot));
+      }
+    }
+    //Timer: joinTimer
+    //
+    //Ensure joins complete successfully.
+    //
+    //Process: Iterate over join list, incrementing delay for 
+    //          each.  If delay > JOIN_TIMEOUT_INT, issue a new
+    //          join.
+    scheduler joinTimer() {
+      Joining::map_iterator iter = outstanding_joins.mapIterator();
+      while(iter.hasNext()) {
+        RefCountNode &tempjoin = iter.next();
+        ASSERT(!tempjoin.getId().isNullAddress());
+        tempjoin.count++;
+        if(tempjoin.count > JOIN_TIMEOUT_INT) {
+          macewarn << "No membership received (delay= " << tempjoin.count<< " ), rejoining group ( "<< tempjoin.getId()<< " )"<< endl;
+          tempjoin.count=0;
+          downcall_route(tempjoin.getId(), Join(tempjoin.getId()));
+        } else {
+#ifdef MEMBERSHIP_TRACE
+          maceout << "Incremented delay=" << tempjoin.count << " for group ( " << tempjoin.getId() << " )" << endl;
+#endif
+        }
+      }
+      if(!outstanding_joins.empty()) {
+        joinTimer.reschedule(JOIN_TIMER_PERIOD);
+      }
+    }
+  }
+
+  //Timer: printer
+  //
+  //prints out current state, and calls dump_state().
+  //Also -- prints REPLAY BANDWIDTH
+  scheduler printer() [locking=read] {
+#ifdef SCRIBE_TRACE
+    macedbg(1) << my_sessions << endl;
+    ConstMapIterator<Sessions> iter = ConstMapIterator<Sessions>(my_sessions);
+    while(iter.hasNext()) {
+      MaceKey groupId;
+      const Session& session = iter.next(groupId);
+      maceout << "REPLAY session: " << groupId << " parent: " << session.parent << " num_kids: " << session.kids.size() << endl;
+      macedbg(0) << "session: " << groupId << " kids: " << session.kids << endl;
+    }
+#endif
+  }
+
+  downcall createGroup(const MaceKey& groupId, registration_uid_t regId) {
+    //sufficient?  will blindly send it.
+    //XXX: What about improper address families?
+    //     pushPathId(localAddress(), groupId, false);
+    //     ANNOTATE_NOTICE(NULL, 0, "downcall createGroup");
+    downcall_route(groupId, CreateGroup(groupId));
+    variant<ScribeMS> {
+      groupsToAvoidKids.insert(groupId);
+      if(my_sessions.containsKey(groupId)) {
+        my_sessions[groupId].avoidKids = true;
+        //XXX: Pushdown all kids if we are not root
+      }
+    }
+    //     popPathId(true);
+    //routeIP_create_group( groupId, groupId, 0, 0, -1 ); //it's not clear that routeIP isn't the right thing.
+  }
+
+  //API: Join
+  //
+  //1- Create State if needed, send a join if new and not root.
+  //2- Set subscribed to 1 on the state.
+  downcall (my_sessions.containsKey(groupId)) joinGroup(const MaceKey& groupId, registration_uid_t regId) {
+    maceout << "Subscribing to a group ( " << groupId << " ), already joined." << endl;
+    my_sessions[groupId].subscribed=1;
+    variant<ScribeMS> {
+      groupsToAvoidKids.erase(groupId);
+      my_sessions[groupId].avoidKids = false;
+    }
+  }
+  downcall (myRange.containsKey(groupId)) joinGroup(const MaceKey& groupId, registration_uid_t regId) {
+    //     pushPathId(localAddress(), groupId, true);
+    //     ANNOTATE_NOTICE(NULL, 0, "downcall joinGroup - am root");
+    maceout << "Joining a group ( " << groupId << " ), am root." << endl;
+    maceout << "REPLAY MEMBERSHIP_CHANGE ( gr me parent ) " << groupId << " " << localAddress() << " " << localAddress() << endl;
+    Session &temp = my_sessions[groupId];
+    temp.isRoot = true;
+    temp.subscribed = 1;
+    variant<ScribeMS> {
+      groupsToAvoidKids.erase(groupId);
+      temp.ticks_since_heartbeat = 0;
+      temp.tick_count_for_renew = 0;
+      temp.tick_count_without_data = 0;
+      temp.parent = localAddress();
+    }
+    //     popPathId(true);
+  }
+  downcall /*(else) */ joinGroup(const MaceKey& groupId, registration_uid_t regId) {
+    variant<ScribeMS> {
+      groupsToAvoidKids.erase(groupId);
+    }
+    //add neighbor... set subscribed to 1
+    //send join message, add neighbor
+    //     pushPathId(localAddress(), groupId, true);
+    //     ANNOTATE_NOTICE(NULL, 0, "downcall joinGroup - routing");
+    maceout << "Joining a group ( " << groupId << " ), routing join." << endl;
+    Session &temp = my_sessions[groupId];
+    temp.isRoot = false;
+    temp.subscribed = 1;
+    variant<ScribeMS> {
+      temp.ticks_since_heartbeat = 0;
+      temp.tick_count_for_renew = 0;
+      temp.tick_count_without_data = 0;
+      temp.joinReqSeq = 0;
+      temp.joinReplySeq = -1;
+      downcall_route( groupId, Join(groupId, temp.joinReqSeq));
+    }
+    variant<Scribe> {
+      downcall_route( groupId, Join(groupId));
+      dojoin(groupId);
+    }
+    //     popPathId(true);
+    //       upcall_notify(my_sessions, NBR_TYPE_TREE);
+  }
+
+  //API: Leave
+  //1 - set unsubscribed.
+  //2 - If also no Children, send leave message.
+  downcall (my_sessions.containsKey(groupId)) leaveGroup(const MaceKey& groupId) {
+    Session& tempsess = my_sessions[groupId];
+    tempsess.subscribed = 0;
+    //     pushPathId(localAddress(), groupId, true);
+    //     ANNOTATE_NOTICE(NULL, 0, "downcall leaveGroup");
+    if(tempsess.kids.empty()) {
+      //No longer part of this group!  Remove it and notify parent.
+      if( !tempsess.parent.isNullAddress() ) {
+        maceout << "Leaving a group ( " << groupId << " ), sending leave to parent ( " << tempsess.parent << " )." << endl;
+        variant<ScribeMS> {
+          downcall_route(tempsess.parent, Leave(groupId, tempsess.joinReplySeq));
+        }
+        variant<Scribe> {
+          downcall_route(tempsess.parent, Leave(groupId));
+          unwatch(tempsess.parent);
+          tempsess.parent = MaceKey::null;
+        }
+      } else {
+        macewarn << "Leaving a group ( " << groupId << " ), but no parent record." << endl;
+      }
+      my_sessions.erase(groupId);
+      variant<Scribe> {
+        donejoin(groupId);
+      }
+      //         upcall_notify(my_sessions, NBR_TYPE_TREE);
+    }
+    //     popPathId(true);
+  }
+
+  //API notify: Called when its possible this node's managed ID space 
+  //            changes
+  //
+  //1 - ignore non-Peer notifications
+  //2 - check if we are the rooot on each Session
+  //3 - (if needed) tell the new root that it is root
+  //4 - update isRoot status.
+  upcall notifyIdSpaceChanged(const KeyRange& range) {
+    myRange = range;
+    MaceKey groupId;
+    mace::MapIterator<Sessions> iter = mace::MapIterator<Sessions>(my_sessions);
+    while(iter.hasNext()) {
+      Session& tempsess = iter.next(groupId);
+      int isOwner = range.containsKey(groupId);
+      if(tempsess.isRoot && !isOwner ) {
+        maceout << "Group ( " << groupId << " ) should be moved to new root." << endl;
+
+        //Join under the new root of the session.
+        tempsess.isRoot = false;
+        if(tempsess.avoidKids) { 
+          ASSERT(!tempsess.subscribed);
+          Children siblings;
+          siblings.add(groupId);
+          //           pushPathId(localAddress(), groupId, false);
+          //           ANNOTATE_NOTICE(NULL, 0, "notifyIdSpaceChanged-avoidKids");
+          downcall_route(groupId, CreateGroup(groupId));
+          Children::map_iterator childIter = tempsess.kids.mapIterator();
+          MaceKey childId;
+          while(childIter.hasNext()) {
+            //             pushPathId(childId, groupId, true);
+            //             ANNOTATE_NOTICE(NULL, 0, "notifyIdSpaceChanged-avoidKids");
+            variant<ScribeMS> {
+              const Peer& child = childIter.next(childId);
+              downcall_route(childId, Pushdown(groupId, siblings, child.joinSeq));
+            }
+            variant<Scribe> {
+              childIter.next(childId);
+              downcall_route(childId, Pushdown(groupId, siblings));
+            }
+            //             popPathId(true);
+          }
+          //           popPathId(true);
+          iter.remove();
+          //TODO: What to do with this?
+          //upcall_notify(my_sessions, NBR_TYPE_TREE);  //notify the upper layer of the state change.
+        } else {
+          //           pushPathId(localAddress(), groupId, true);
+          //           ANNOTATE_NOTICE(NULL, 0, "notifyIdSpaceChanged-joining");
+          variant<ScribeMS> {
+            downcall_route(groupId,Join(groupId, tempsess.joinReqSeq++), direct_);
+          }
+          variant<Scribe> {
+            downcall_route(groupId,Join(groupId), direct_);
+            dojoin(groupId);
+          }
+          //           popPathId(true);
+        }
+      } else if (!tempsess.isRoot && isOwner ) {
+        //I am now the parent, so fix the timers (don't expect heartbeats from parents)
+        tempsess.isRoot = true;
+        variant<ScribeMS> {
+          tempsess.parent = localAddress(); //XXX: parent should be self
+        }
+        variant<Scribe> {
+          donejoin(groupId);
+          unwatch(tempsess.parent);
+          tempsess.parent = MaceKey();
+        }
+      }
+
+    }
+  }
+
+  downcall (my_sessions.containsKey(groupId) && my_sessions.find(groupId)->second.kids.contains(childId)) pushdownChild(const MaceKey& groupId, const MaceKey& childId) { //Added for scribe/splitstream
+    //     pushPathId(childId, groupId, true); //should be a no-op
+    //     ANNOTATE_NOTICE(NULL, 0, "downcall pushdownChild");
+    maceout << "PUSHDOWN(gr: " << groupId << " ,no: " << childId << " ) CALLED" << endl;
+    Session &tempsess = my_sessions[groupId];
+    variant<ScribeMS> {
+      int kidJoinSeq = tempsess.kids.get(childId).joinSeq;
+    }
+    tempsess.kids.erase(childId);
+    variant<ScribeMS> {
+      downcall_route(childId,Pushdown(groupId,tempsess.kids,kidJoinSeq));
+    }
+    variant<Scribe> {
+      unwatch(childId);
+      downcall_route(childId,Pushdown(groupId,tempsess.kids));
+    }
+    //     popPathId(true);
+    return 0;
+  }
+  downcall (childId != localAddress() 
+            && my_sessions.containsKey(groupId) 
+            && !my_sessions.find(groupId)->second.kids.full() 
+            && !my_sessions.find(groupId)->second.pathtoroot.contains(childId)
+            && !my_sessions.find(groupId)->second.parent.isNullAddress()
+           ) addChild(const MaceKey& groupId, const MaceKey& childId, int joinSeq) { // Added for scribe/splitstream
+    Session& tempsess = my_sessions[groupId];
+    //     ANNOTATE_SET_PATH_ID_STR(NULL, 0, "scribeJoin-%s-%s", childId.toString().c_str(), groupId.toString().c_str());
+    if(!tempsess.kids.contains(childId)) {
+      tempsess.kids.add(childId);
+      maceout << "[downcall(ADD_CHILD)] added kid " << childId << " for group " << groupId << ", now have " << tempsess.kids.size() << endl;
+      variant<Scribe> {
+        watch(childId);
+        downcall_route(childId, Membership(groupId, tempsess.pathtoroot));
+      }
+      variant<ScribeMS> {
+        downcall_route(childId, Heartbeat(groupId, tempsess.pathtoroot, joinSeq));
+        tempsess.kids.get(childId).ticks_since_join = 0;
+        tempsess.kids.get(childId).joinSeq = joinSeq;
+      }
+      return 0;
+    } else {
+      maceout << "CHILD " << childId << " ALREADY IN GROUP " << groupId << " (sending membership)." << endl;
+      variant<ScribeMS> {
+        if(tempsess.kids.get(childId).joinSeq < joinSeq) {
+          tempsess.kids.get(childId).joinSeq = joinSeq;
+        }
+        downcall_route(childId, Heartbeat(groupId, tempsess.pathtoroot, tempsess.kids.get(childId).joinSeq));
+      }
+      variant<Scribe> {
+        downcall_route(childId, Membership(groupId, tempsess.pathtoroot));
+      }
+      return 2;
+    }
+  }
+  downcall (true) getGroupJoinStatus(const MaceKey& groupId) [locking=read] {
+    if(my_sessions.containsKey(groupId)) {
+      const Session& session = my_sessions.find(groupId)->second;
+      if(session.parent.isNullAddress()) {
+        return JOINING;
+      } else {
+        return JOINED;
+      }
+    } else {
+      return NONE;
+    }
+  }
+  downcall (my_sessions.containsKey(groupId)) getParent(const MaceKey& groupId) [locking=read] {
+    return my_sessions.find(groupId)->second.parent;
+  }
+  downcall (my_sessions.containsKey(groupId)) getChildren(const MaceKey& groupId) [locking=read] {
+    return my_sessions.find(groupId)->second.kids.nodeSet();
+  }
+  downcall /*(else) */ getParent(const MaceKey& groupId) [locking=read] {
+    return groupId; // return the groupId when not subscribed MaceKey();
+  }
+  downcall /*(else) */ getChildren(const MaceKey& groupId) [locking=read] {
+    static const NodeSet dud = NodeSet();
+    return dud;
+  }
+}
+
+routines {
+  //void pushPathId(const MaceKey& node, const MaceKey& group, bool joinGroup) {
+  //  if(PIP) {
+  //    std::ostringstream s;
+  //    s << (joinGroup?"scribeJoin-":"scribeCreateGroup-") << node << "-" << group;
+  //    const string& str = s.str();
+  //    ANNOTATE_PUSH_PATH_ID(NULL, 0, str.data(), str.size());
+  //  }
+  //}
+  ////XXX Doesn't quite work when there are joins after leaves
+  //void popPathId(bool send) {
+  //  if(PIP) {
+  //    ANNOTATE_POP_PATH_ID(NULL, 0);
+  //  }
+  //}
+  variant<Scribe> {
+    //Common procedure to increment/add a node to be watched.
+    void watch(MaceKey who) {
+      if(who.isNullAddress()) return;
+#ifdef SCRIBE_TRACE
+      maceout << "watch " << who << endl;
+#endif
+      //NOTE: calling add if who already in set is equivalent to calling get.  This is more efficient.
+      watched.add(who).count++;
+    }
+
+    //Common procedure to decrement/delete a node being watched.
+    void unwatch(MaceKey who) {
+      if(who.isNullAddress()) return;
+#ifdef SCRIBE_TRACE
+      maceout << "unwatch " << who << endl;
+#endif
+      int c = --watched.get(who).count;
+      if(c == 0) {
+        watched.erase(who);
+      }
+    }
+
+    //Common procedure to join
+    void dojoin(MaceKey which) {
+      if(which.isNullAddress()) return;
+      if(!my_sessions[which].isRoot) {
+        if(!outstanding_joins.contains(which)) {
+          if(outstanding_joins.empty()) {
+            joinTimer.reschedule(JOIN_TIMER_PERIOD);
+          }
+          outstanding_joins.add(which);
+        }
+        outstanding_joins.get(which).count=0;
+      }  
+    }
+
+    //Common procedure to stop monitoring a join
+    void donejoin(MaceKey which) {
+      if(which.isNullAddress()) return;
+      outstanding_joins.erase(which);
+      if(outstanding_joins.empty()) {
+        joinTimer.cancel();
+      }
+    }
+  }
+
+}
+

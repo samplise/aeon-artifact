@@ -1,0 +1,7 @@
+serviceclass TagClientRG {
+	virtual void changeDirection(uint16_t newDirection);	
+  virtual void kidInit();	
+  virtual void kidLeave(); 
+
+  handlers TagClientRGData;
+};

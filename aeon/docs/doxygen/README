@@ -1,0 +1,18 @@
+This Doxyfile file will allow you to create API documentation for the Mace
+Library (libmace.a).
+
+Not only does it create HTML documentation, but it also creates man pages, and
+supports (but does not generate) other outputs.
+
+To create the documentation, you will need to install at least:
+
+- doxygen
+- dot
+- latex
+
+To generate the documentation, go to the mace/docs/doxygen directory, and run
+$ cd mace/docs/doxygen
+$ doxygen Doxyfile
+
+Then you can view the documentation by viewing
+file:///path/to/mace/docs/doxygen/html/index.html

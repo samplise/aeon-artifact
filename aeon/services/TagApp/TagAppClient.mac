@@ -1,0 +1,115 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service TagAppClient;
+ 
+provides Null;
+
+
+services {
+  Transport t;
+}
+ 
+constants {
+  
+}
+ 
+constructor_parameters {
+  uint32_t N_CLIENTS = 1;
+	NodeSet TagServer = NodeSet();
+
+  uint64_t OUTPUT_COUNT = 100;
+}
+
+#minclude "TagAppMessages.mi"
+
+state_variables {
+  context Client <uint32_t clientId> {
+    uint32_t clientId;
+    uint32_t playerId;
+    MaceKey serverAddr;
+
+    uint64_t lastRequestTime;
+    uint64_t requestTimePeriod;
+
+    uint64_t reqCount;
+  }
+}
+ 
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("TagAppClient");
+    ASSERT( TagServer.size() == 1 );
+    for( uint32_t i=1; i<=N_CLIENTS; i++) {
+      uint32_t clientId = i;
+      mace::string clientCtxName = generateContextName("Client", clientId);
+      createNewOwnership("globalContext", clientCtxName);
+      async_initClient(clientId);
+    }
+    maceout << "Start TagAppClient!" << Log::endl;
+  }
+
+  async [Client<nClient>] initClient(const uint32_t& nClient) {
+    ADD_SELECTORS("TagAppClient");
+    maceout << "To initialize client " << nClient << Log::endl;
+    clientId = nClient;
+    playerId = 0;
+    
+    reqCount = 0;
+    requestTimePeriod = 0;
+    downcall_route( *( TagServer.begin() ), ConnectionRequest(clientId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const PlayerInitReply& msg) {
+    ADD_SELECTORS("TagAppClient");
+    maceout << "Client("<< clientId <<") get player("<< msg.playerId<<")!" << Log::endl;
+    playerId = msg.playerId;
+
+    lastRequestTime = mace::getmtime();
+    downcall_route(serverAddr, InfoRequest(clientId, playerId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const RequestReply& msg) {
+    ADD_SELECTORS("TagAppClient");
+    
+    reqCount ++;
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    requestTimePeriod += latency;
+
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg = requestTimePeriod / OUTPUT_COUNT;
+
+      maceout<< "Client("<< clientId <<") avg="<< avg << " reqCount="<< reqCount << " currReqCount=" << OUTPUT_COUNT << Log::endl;
+
+      requestTimePeriod = 0; 
+    }
+
+
+    lastRequestTime = mace::getmtime();
+    downcall_route(serverAddr, InfoRequest(clientId, playerId) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("TagAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+    sleep(10);
+    downcall_route(serverAddr, PlayerInitRequest(msg.clientId) );
+  }
+
+  
+
+}
+
+routines {
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}

@@ -1,0 +1,41 @@
+messages {
+
+	RequireKidInit __attribute((number(0))) {
+    
+	}
+
+  ResponseKidInit {
+    uint16_t kidID;
+    uint16_t kidRole;
+    uint16_t kidLocation;
+    uint16_t kidBuilding;
+    uint16_t kidRoom;
+    uint16_t kidDirection;
+  }
+
+  RequireKidLeave {
+    uint16_t kidID;
+    uint16_t kidLocation;
+    uint16_t kidBuilding;
+    uint16_t kidRoom;
+  }
+
+  SetDirection {
+    uint16_t kidID;
+		uint16_t kidDirection;
+  }
+
+	RequireMapInfo {
+    uint16_t kidID;
+    uint16_t kidLocation; 
+		uint16_t nBuilding;
+		uint16_t nRoom;
+    uint64_t timeStamp;
+	}
+
+	ReceiveMapInfo {
+    uint16_t kidLocation;
+		mace::array<mace::array<int, 50>, 50> map;
+    uint64_t timeStamp;
+	}
+}

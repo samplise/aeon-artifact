@@ -1,0 +1,9 @@
+LIBNAME = mathservice
+APPS = xmlrpcd xmlrpcclient xmlrpcclient-async
+MACEPATH = ../..
+XMLRPC = MathService.h
+
+EXTRA_LIB = -Lmathservice
+
+include ../Makefile.common
+

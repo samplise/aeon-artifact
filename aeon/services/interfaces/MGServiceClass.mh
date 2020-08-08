@@ -1,0 +1,3 @@
+serviceclass MG {
+  handlers MGUpcall;
+};

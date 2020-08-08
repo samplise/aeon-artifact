@@ -1,0 +1,115 @@
+/**
+chuangw: test case 6 continuesly creates events. Migration request is initiated from the application
+This is a simpler test scenario -- only one service, not composition of services, and just one context apart from global context.
+
+*/
+service TestCase6;
+provides Null;
+trace=high;
+typedefs {
+}
+services {
+
+}
+
+constants {
+  //int32_t DEFAULT_NCONTEXT    =   4;
+  //int32_t DEFAULT_NEVENT      =   16;
+  
+}
+constructor_parameters {
+    int32_t NCONTEXT = 32;
+    int32_t NEVENT = 16;
+    int64_t MAX_PRIME = 100000;
+    uint64_t PERIOD = 1000;     //1 millisecond
+    bool USETIMER = false;     
+    uint32_t CONTEXTSIZE = 2;
+}
+ 
+state_variables {
+  uint32_t eventCounter;
+  timer mytimer __attribute((recur(PERIOD)));
+  context A<int x>{
+    uint64_t count;
+
+  }
+
+  context B<int x> {
+    int id;
+  }
+}
+
+messages {
+}
+ 
+transitions {
+  //downcall (state == init)maceInit()  {
+  downcall maceInit()  {
+    for(int i=0; i< NCONTEXT; i++ ){
+      async_cellInit(i);
+
+      async_createMoreEvents(i);
+    }
+    
+  }
+  scheduler mytimer() {
+      for(int i=0;i< NEVENT;i++){
+          async_timerMoreEvents( (i + eventCounter) % NCONTEXT );
+      }
+
+      eventCounter = (NEVENT + eventCounter ) % NCONTEXT;
+  }
+  async [A<n>] timerMoreEvents(int n){
+    do_primes();
+  }
+  async [A<n>] createMoreEvents(int n){
+    if( n == 0 && count == 10 ){
+      migrateContext("migrate1");
+    } 
+
+    count ++;
+
+    if(count <= 20 ) {
+      for(int i=0; i<NCONTEXT; i++) {
+        if( i==n) { 
+          continue;
+        }
+        async_createMoreEvents(i);
+      }
+    }
+  }
+  async [A<n>] cellInit(int n){
+    count = 0;
+  }
+  async explicitDowngrade(){
+    //downgradeCurrentContext();
+    //enterA( 5 );
+  }
+}
+
+routines {
+  [A<n>] void enterA( uint32_t n ){
+    do_primes();
+  }
+
+  [B<n>] void enterB( uint32_t n) {
+    do_primes();
+  }
+
+  [__null] void do_primes()
+  {
+      /*
+      int64_t i, num, primes = 0;
+      
+      for (num = 1; num <= MAX_PRIME; ++num) {
+        for (i = 2; (i <= num) && (num % i != 0); ++i);
+        if (i == num)
+          ++primes;
+      }
+      */
+      //printf("Calculated %d primes.\n", primes);
+  }
+
+
+}
+

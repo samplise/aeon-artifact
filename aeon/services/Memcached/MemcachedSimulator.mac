@@ -1,0 +1,680 @@
+#include <functional>
+#include <random>
+
+service MemcachedSimulator;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  uint32_t TABLE_NUMBER = 2;
+  uint64_t ITEM_NUMBER_PER_TABLE = 4000000;
+
+  uint32_t CLIENT_NUMBER = 8;
+
+  uint64_t PAIRS_NUMBER = 40000000;
+  uint64_t PAIRS_NUMBER_PER_CLIENT = 40000000;
+
+  uint64_t TABLE_OUTPUT_COUNT = 1000;
+  uint64_t CLIENT_OUTPUT_COUNT = 100;
+
+  uint64_t DAY_PERIOD = 100;
+  uint32_t DAY_NUMBER = 3; 
+
+  double DAY_JOIN = 0.2;
+  double DAY_LEAVE = 0.5;
+  double DAY_ERROR = 0.15;
+
+  uint64_t WARMUP_TIME_PERIOD = 100;
+
+  uint32_t POINTS_PER_SERVER = 5;
+}
+
+typedefs {
+  typedef mace::map< mace::string, Item > TableType;
+  typedef mace::deque< RemoveItem > RemoveListType;
+}
+
+services {
+  
+}
+
+messages {
+    
+}
+
+auto_types {
+  Item __attribute((comparable(equals=default; lessthan=default))) {
+    mace::string value;
+    uint64_t timestamp;
+  }
+
+  RemoveItem __attribute((comparable(equals=default; lessthan=default))) {
+    mace::string key;
+    uint64_t timestamp;
+  }
+
+  ContinuumItem __attribute((comparable(equals=default; lessthan=default))) {
+    uint32_t index;
+    uint32_t value;
+  }
+
+  Ketama __attribute((comparable(equals=default; lessthan=default))) {
+    uint32_t continuum_count;
+    uint32_t continuum_points_counter;
+    mace::vector<ContinuumItem> continuum;
+  }
+
+  ServerStruct __attribute((comparable(equals=default; lessthan=default))) {
+    uint32_t tableId;
+    uint32_t port;
+    mace::string host_name;
+    uint64_t request_count;
+  }
+}
+
+state_variables {
+  context ItemTable<uint32_t taleId> {
+    TableType table;
+    RemoveListType removeList;
+    uint64_t item_number;
+    uint64_t miss_number;
+    uint64_t get_number; 
+    uint64_t request_count;   
+  }
+
+  context Controller {
+    mace::map<uint32_t, uint64_t> join_times;
+    mace::map<uint32_t, uint64_t> leave_times;
+
+    uint64_t current_day_start;
+    uint64_t current_day_end;
+    uint64_t current_day_mid;
+
+    uint64_t exact_start_time;
+
+    uint64_t sleep_time_period;
+
+    uint32_t current_day;
+
+    uint32_t current_client_number;
+  }
+  
+  context Client<uint32_t clientId> {
+    Ketama ketama;
+    mace::vector<ServerStruct> servers;
+
+    bool isActive;
+
+    uint64_t request_count;
+    uint64_t cache_miss_count;
+    uint64_t cache_hit_count;
+
+    uint64_t start_key_value;
+    uint64_t end_key_value;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    srand( mace::getmtime() );
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;
+
+    for(uint32_t i=0; i<TABLE_NUMBER; i++){
+      std::ostringstream oss;
+      oss<< "ItemTable[" << i << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initItemTable(i);  
+    }
+
+    mace::vector<ServerStruct> servers = generateServers( TABLE_NUMBER );
+    for( uint32_t i=0; i<CLIENT_NUMBER; i++) {
+      std::ostringstream oss;
+      oss<< "Client[" << i << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initClient(i, servers);
+      async_setActive(i, true);
+    }
+    async_initController();
+    addNewOwnerships(ownerships);
+  }
+
+  async [Controller] initController() {
+    ADD_SELECTORS("MemcachedSimulator");
+    maceout<<"Initializing Controller!" << Log::endl;
+    current_client_number = 0;
+
+    current_day_start = WARMUP_TIME_PERIOD + 10;
+    current_day_end = current_day_start + DAY_PERIOD;
+    current_day_mid = (current_day_start+current_day_end) / 2;
+
+    mace::vector<uint32_t> clientIds;
+    for(uint32_t i=0; i< CLIENT_NUMBER; i++) clientIds.push_back(i);
+    join_times = generateRandomJoinTime( current_day_start, current_day_end, clientIds );
+    leave_times = generateRandomLeaveTime( current_day_start, current_day_end, clientIds );
+
+    exact_start_time = mace::getmtime();
+    sleep_time_period = 0;
+    current_day = 1;
+
+    sleep(WARMUP_TIME_PERIOD);
+    async_startWorkloadVariation();
+  }
+
+  async [Controller] startWorkloadVariation() {
+    ADD_SELECTORS("MemcachedSimulator");
+    maceout<< "Start to vary the owrkload" << Log::endl;
+
+    for(uint64_t i=0; i< CLIENT_NUMBER; i++) {
+      async_setActive(i, false);
+    }
+    current_client_number = 0;
+
+    async_launchTimeScheduler();
+  }
+
+  async [Controller] launchTimeScheduler() {
+    ADD_SELECTORS("MemcachedSimulator");
+    maceout<<"sleep time=" << sleep_time_period << Log::endl;
+    sleep(sleep_time_period);
+    uint64_t exact_current_time = mace::getmtime();
+    
+
+    uint64_t current_time = (uint64_t) (exact_current_time - exact_start_time) / 1000000;
+    maceout<<"exact_current_time="<< exact_current_time<<" current_time=" << current_time <<" current_day="<<current_day <<" current_day_start="<<current_day_start<<" current_day_end="<<current_day_end << Log::endl;
+    mace::vector<uint64_t> toRemoved;
+    uint64_t next_join_time = 0;
+    uint64_t next_leave_time = 0;
+    if( current_time <= current_day_mid ) {
+      mace::map<uint32_t, uint64_t>::iterator iter = join_times.begin();
+      for(; iter != join_times.end(); iter++ ){
+        if( current_time >= iter->second ) {
+          async_setActive( iter->first, true);
+          current_client_number ++;
+          maceout<< "Active Client Number=" << current_client_number <<" Current Day="<<current_day <<  Log::endl;
+          toRemoved.push_back(iter->first);
+        } else {
+          if( next_join_time == 0 ) {
+            next_join_time = iter->second;
+          } else if( next_join_time > iter->second ) {
+            next_join_time = iter->second;
+          }
+        }
+      }
+      for( uint64_t i=0; i<toRemoved.size(); i++ ) {
+        join_times.erase( toRemoved[i] );
+      }
+
+    } else if ( current_time > current_day_mid ) {
+      mace::map<uint32_t, uint64_t>::iterator iter = leave_times.begin();
+      for(; iter != leave_times.end(); iter++ ) {
+        if( current_time >= iter->second ) {
+          current_client_number --;
+          maceout<< "Active Client Number=" << current_client_number << Log::endl;
+          async_setActive( iter->first, false);
+          toRemoved.push_back( iter->first );
+        } else {
+          if( next_leave_time == 0 ) {
+            next_leave_time = iter->second;
+          } else if( next_leave_time > iter->second ) {
+            next_leave_time = iter->second;
+          }
+        } 
+      }
+
+      for( uint64_t i=0; i<toRemoved.size(); i++ ) {
+        leave_times.erase( toRemoved[i] );
+      }
+    }
+
+    maceout<<"next_join_time=" << next_join_time<<" next_leave_time="<< next_leave_time << Log::endl;
+    if( next_join_time != 0 ) {
+      sleep_time_period = next_join_time - current_time;
+      async_launchTimeScheduler();
+    } else if( next_leave_time != 0 ) {
+      sleep_time_period = next_leave_time - current_time;
+      async_launchTimeScheduler();
+    } else {
+      if( join_times.empty() && !leave_times.empty() ) {
+        mace::map<uint32_t, uint64_t>::iterator iter = leave_times.begin();
+        for(; iter != leave_times.end(); iter++ ) {
+          if( next_leave_time == 0 ) {
+            next_leave_time = iter->second;
+          } else if( next_leave_time > iter->second ) {
+            next_leave_time = iter->second;
+          }
+        }
+        sleep_time_period = next_leave_time - current_time;
+        async_launchTimeScheduler();
+      } else if( join_times.empty() && leave_times.empty() ) {
+        current_day ++;
+        if( current_day <= DAY_NUMBER) {
+          current_day_start = 2 + current_day_end;
+          current_day_end = current_day_start + DAY_PERIOD;
+          current_day_mid = (current_day_start+current_day_end) / 2;
+
+          mace::vector<uint32_t> clientIds;
+          for(uint32_t i=0; i< CLIENT_NUMBER; i++) clientIds.push_back(i);
+          join_times = generateRandomJoinTime( current_day_start, current_day_end, clientIds );
+          leave_times = generateRandomLeaveTime( current_day_start, current_day_end, clientIds );
+
+          mace::map<uint32_t, uint64_t>::iterator iter = join_times.begin();
+          for(; iter != join_times.end(); iter++ ) {
+            if( next_join_time == 0 ) {
+              next_join_time = iter->second;
+            } else if( next_join_time > iter->second ) {
+              next_join_time = iter->second;
+            }
+          }
+          sleep_time_period = next_join_time - current_time;
+          async_launchTimeScheduler();
+        }
+      }
+    }
+
+    
+  }
+
+  async [Client<clientId>] initClient( uint32_t const& clientId, mace::vector<ServerStruct> const& new_servers) {
+    ADD_SELECTORS("MemcachedSimulator");
+    servers = new_servers;
+    ketama = update_continuum(servers);
+    
+    request_count = 0;
+    cache_miss_count = 0;
+    cache_hit_count = 0;
+
+    isActive = false;
+    if( PAIRS_NUMBER == PAIRS_NUMBER_PER_CLIENT ) {
+      start_key_value = 1;
+      end_key_value = PAIRS_NUMBER;
+    } else {
+      randomGenerateKeyRange(start_key_value, end_key_value);
+    }
+    maceout << "To initialize client(" << clientId <<") start_key_value="<< start_key_value<< " end_key_value="<< end_key_value << Log::endl;
+  }
+
+  async [Client<clientId>] launchRequest( uint32_t const& clientId ) {
+    ADD_SELECTORS("MemcachedSimulator");
+    const mace::string key_str = generateRandomKey(start_key_value, end_key_value);
+    const uint32_t serverId = generate_hash_with_redistribution(key_str, ketama);
+    async_readRequest(serverId, clientId, key_str);
+  }
+
+  async [Client<clientId>] setActive( uint32_t const& clientId, bool const& active ) {
+    ADD_SELECTORS("MemcachedSimulator");
+    if( active ) {
+      maceout<< "Set Client("<< clientId <<") active!" << Log::endl;
+    } else {
+      maceout<< "Set Client("<< clientId <<") inactive" << Log::endl;
+    }
+
+    isActive = active;
+    if( isActive ) {
+      launchRequest(clientId);
+    }
+  }
+
+  async [Client<clientId>] readReply( uint32_t const& clientId, mace::string const& key, mace::string const& value, const bool isCacheMiss) {
+    ADD_SELECTORS("MemcachedSimulator");
+  
+    request_count ++;
+    if( isCacheMiss ) {
+      cache_miss_count ++;
+    } else {
+      cache_hit_count ++;
+    }
+
+    if( request_count % CLIENT_OUTPUT_COUNT == 0 ) {
+      maceout<< "Client("<< clientId <<"): requestCount=" << request_count << " cacheMissCount=" << cache_miss_count <<   " cacheHitCount=" << cache_hit_count << Log::endl;
+      cache_miss_count = 0;
+      cache_hit_count = 0;
+    }
+    if( isActive ) {
+      launchRequest( clientId );
+    }
+  }
+
+  async [ ItemTable<tableId> ] initItemTable(uint32_t tableId){
+    ADD_SELECTORS("MemcachedSimulator");
+    
+    item_number = 0;
+    miss_number = 0;
+    get_number = 0;  
+    request_count = 0;
+
+    const uint64_t current_time = mace::getmtime();
+
+    for(uint64_t i = 0; i < 2*ITEM_NUMBER_PER_TABLE && table.size() < ITEM_NUMBER_PER_TABLE; i++ ) {
+      const mace::string key_str = generateRandomKey(1, PAIRS_NUMBER);
+      Item item;
+      item.value = "abcd";
+      item.timestamp = current_time;
+      table[key_str] = item;
+    }
+
+    item_number = table.size();
+
+    TableType::const_iterator tableIter = table.begin();
+    for(; tableIter != table.end(); tableIter ++) {
+      RemoveItem rItem( tableIter->first, current_time);
+      removeList.push_back( rItem );
+    }
+
+    maceout<< "To initialize table " << tableId <<" with item number="<< item_number << Log::endl;  
+  }
+
+  async [ ItemTable<tableId> ] readRequest(const uint32_t& tableId, const uint32_t& clientId, const mace::string& key) {
+    ADD_SELECTORS("MemcachedSimulator");
+    uint64_t current_time = mace::getmtime();
+    bool isCacheMiss = false;
+    TableType::iterator iter = table.find(key);
+    if( iter != table.end() ) {
+      iter->second.timestamp = current_time;
+      get_number ++;
+
+      RemoveItem rItem( key, current_time);
+      removeList.push_back( rItem );
+    } else {
+      isCacheMiss = true;
+      if( item_number >= ITEM_NUMBER_PER_TABLE ) {
+        bool findMinItemFlag = false;
+        while( !findMinItemFlag && !removeList.empty() ) {
+          const RemoveItem& rItem = removeList.front();
+          TableType::iterator mIter = table.find(rItem.key);
+          if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+            findMinItemFlag = true;
+            table.erase(mIter);
+            item_number --;
+          }
+
+          removeList.pop_front();
+        }
+
+        if( !findMinItemFlag ) {
+          uint64_t min_time = current_time;
+          TableType::iterator min_iter;
+          for( TableType::iterator miter = table.begin(); miter != table.end(); miter++ ) {
+            if( min_time > miter->second.timestamp ) {
+              min_time = miter->second.timestamp;
+              min_iter = miter;
+            }
+          }
+
+          table.erase(min_iter);
+          item_number --;
+        }
+      }
+
+      Item item("abcde", current_time);
+      table[key] = item;
+      RemoveItem rItem(key, current_time);
+      removeList.push_back(rItem);
+      item_number ++;
+
+      miss_number ++;
+    }
+
+    request_count ++;
+    if( request_count % TABLE_OUTPUT_COUNT == 0) {
+      maceout<< "Table("<< tableId <<"): requestCount="<<request_count<<" missCount="<<miss_number << Log::endl; 
+      miss_number = 0;
+    }
+    
+    async_readReply(clientId, key, table[key].value, isCacheMiss );
+  }
+
+}
+
+
+routines {
+  /*
+   * Refer to http://www.azillionmonkeys.com/qed/hash.html */
+  [__null] uint32_t hashkit_one_at_a_time( mace::string const& key ) {
+  uint32_t value = 0;
+  uint32_t key_len = key.length();
+
+  for(uint32_t i=0; i < key_len; i++) {
+    uint32_t val = (uint32_t)key[i];
+    value += val;
+    value += (value << 10);
+    value ^= (value >> 6);
+  }
+
+  value += (value << 3);
+  value ^= (value >> 11);
+  value += (value << 15);
+
+  return value;
+} 
+
+[__null] uint32_t generate_hash_with_redistribution( mace::string const& key, const Ketama& ketama ) {
+  if( TABLE_NUMBER == 1 ) {
+    return 0;
+  }
+
+  uint32_t hash = hashkit_one_at_a_time(key);
+
+  return dispatch_host(hash, ketama);
+}
+
+[__null] uint32_t dispatch_host( const uint32_t& hash, const Ketama& ketama ) {
+  uint32_t begin, left, end, right, middle; 
+  begin = left = 0;
+  end = right = ketama.continuum.size();
+
+  while (left < right) {
+    middle = left + (right - left) / 2;
+    if ( ketama.continuum[middle].value < hash)
+      left= middle + 1;
+    else
+      right= middle;
+  }
+  if (right == end)
+      right= begin;
+
+  return ketama.continuum[right].index;
+}
+
+[__null] void sort_continuums( mace::vector<ContinuumItem>& continuums) {
+  qsort_continuums( continuums, 0, continuums.size()-1 );
+}
+
+[__null] void qsort_continuums( mace::vector<ContinuumItem>& continuums, const uint32_t begin, const uint32_t end) {
+  ASSERT( begin>=0 && end<continuums.size()  );
+  if( begin >= end ) return;
+  ContinuumItem comp_item = continuums[begin];
+
+  uint32_t begin_iter = begin+1;
+  uint32_t end_iter = end;
+  while( begin_iter <= end_iter ) {
+    while( continuums[begin_iter].value <= comp_item.value ) { 
+      if( begin_iter<end ) {
+        begin_iter ++;
+      } else {
+        break;
+      }
+    }
+    while( continuums[end_iter].value > comp_item.value ) {
+      if( end_iter > begin ) {
+        end_iter --;
+      } else {
+        break;
+      }
+    }
+    if( begin_iter >= end_iter ) break;
+
+    ContinuumItem temp = continuums[begin_iter];
+    continuums[begin_iter] = continuums[end_iter];
+    continuums[end_iter] = temp;
+    begin_iter ++;
+    end_iter --;
+  }
+
+  uint32_t pos = begin_iter - 1;
+  if( pos > 0 ) {
+    continuums[begin] = continuums[pos];
+    continuums[pos] = comp_item;
+  }
+
+  qsort_continuums( continuums, begin, pos );
+  qsort_continuums( continuums, pos+1, end );
+
+}
+
+[__null] Ketama update_continuum( mace::vector<ServerStruct> const& new_servers ) {
+  uint32_t continuum_index= 0;
+  uint32_t pointer_counter= 0;
+  uint32_t pointer_per_server= POINTS_PER_SERVER;
+  uint32_t pointer_per_hash= 1;
+  uint32_t live_servers= new_servers.size();
+
+  Ketama ketama;
+  
+  uint32_t total_continuum_pointer = live_servers * pointer_per_server;
+  ketama.continuum.resize(total_continuum_pointer);
+  
+  for (uint32_t host_index= 0; host_index < live_servers; ++host_index) {
+    for (uint32_t pointer_index= 1; pointer_index <= pointer_per_server / pointer_per_hash; pointer_index++) {
+      char sort_host[1025+1+32+1+32]= "";
+      int sort_host_length;
+
+      sort_host_length= snprintf(sort_host, sizeof(sort_host),
+                                 "%s:%u-%u",
+                                 new_servers[host_index].host_name.c_str(),
+                                 new_servers[host_index].port,
+                                 pointer_index - 1);
+      
+      const mace::string host_str = sort_host;
+      uint32_t value= hashkit_one_at_a_time(host_str);
+      ketama.continuum[continuum_index].index= host_index;
+      ketama.continuum[continuum_index++].value= value;
+    }
+
+    pointer_counter+= pointer_per_server;
+  }
+
+  ketama.continuum_points_counter= pointer_counter;
+  sort_continuums(ketama.continuum);
+
+  return ketama;
+}
+
+[__null] mace::vector<ServerStruct> generateServers(const uint32_t I ) {
+  ASSERT( I>0 && TABLE_NUMBER >= I );
+  mace::vector<ServerStruct> servers;
+
+  
+  for( uint32_t i=0; i<I; i++ ) {
+    std::ostringstream oss;
+    oss<< "ItemTable[" << i << "]";
+    servers.push_back( ServerStruct( i, 0, oss.str(), 0 ) );
+  }
+
+  return servers;
+}
+
+  [__null] mace::map<uint32_t, uint64_t> generateRandomJoinTime( const uint64_t& day_start, const uint64_t& day_end, const mace::vector<uint32_t>& clientIds ) {
+  ADD_SELECTORS("MemcachedSimulator");
+  mace::map<uint32_t, uint64_t> join_times;
+
+  std::default_random_engine generator(mace::getmtime());
+  std::normal_distribution<double> distribution(DAY_JOIN,DAY_ERROR);
+  for( uint32_t i=0; i<clientIds.size(); i++ ) {
+    const uint32_t clientId = clientIds[i];
+    double d_join_time = distribution(generator);
+    if( d_join_time < 0 ) {
+      while( d_join_time < 0 ) d_join_time += 1;
+    } else if( d_join_time > 1 ) {
+      while( d_join_time > 1 ) d_join_time -= 1;
+    }
+
+    if( d_join_time > 0.5 ) d_join_time -= 0.5;
+
+    uint64_t join_time = (uint64_t) ( DAY_PERIOD*d_join_time + day_start );
+    ASSERT( join_time >= day_start && join_time < day_end );
+
+    join_times[clientId] = join_time;
+  } 
+
+  mace::map<uint32_t, uint64_t>::const_iterator jtIter = join_times.begin();
+  for(; jtIter != join_times.end(); jtIter ++) {
+    maceout<< "Client("<< jtIter->first <<") join_time = " << jtIter->second << Log::endl;
+  }
+
+  return join_times;
+}
+
+[__null] mace::map<uint32_t, uint64_t> generateRandomLeaveTime( const uint64_t& day_start, const uint64_t& day_end, const mace::vector<uint32_t>& clientIds ) {
+  ADD_SELECTORS("MemcachedSimulator");
+  mace::map<uint32_t, uint64_t> leave_times;
+
+  std::default_random_engine generator(mace::getmtime());
+  std::normal_distribution<double> distribution(DAY_LEAVE, DAY_ERROR);
+  for( uint32_t i=0; i<clientIds.size(); i++ ) {
+    const uint32_t clientId = clientIds[i];
+    double d_leave_time = distribution(generator);
+    if( d_leave_time < 0 ) {
+      while( d_leave_time < 0 ) d_leave_time += 1;
+    } else if( d_leave_time > 1 ) {
+      while( d_leave_time > 1 ) d_leave_time -= 1;
+    }
+
+    if( d_leave_time < 0.5 ) d_leave_time += 0.5;
+
+    uint64_t leave_time = (uint64_t) ( DAY_PERIOD*d_leave_time + day_start );
+    ASSERT( leave_time > day_start && leave_time <= day_end );
+
+    leave_times[clientId] = leave_time;
+  }
+
+  mace::map<uint32_t, uint64_t>::const_iterator ltIter = leave_times.begin();
+  for(; ltIter != leave_times.end(); ltIter ++) {
+    maceout<< "Client("<< ltIter->first <<") leave_time = " << ltIter->second << Log::endl;
+  }
+
+  return leave_times;
+}
+
+[__null] mace::string generateRandomKey( const uint64_t start_pair_number, const uint64_t end_pair_number ) {
+  ASSERT(end_pair_number >= start_pair_number);
+  uint64_t uint_key;
+  if( start_pair_number == end_pair_number ) {
+    uint_key = start_pair_number;
+  } else {
+    uint64_t size = end_pair_number - start_pair_number;
+    uint_key = start_pair_number + (uint64_t) rand()%size;
+    ASSERT( uint_key <= end_pair_number );
+  }
+
+  std::ostringstream oss;
+  oss<< uint_key;
+  return oss.str();
+}
+
+[__null] void randomGenerateKeyRange(uint64_t& start_pair_number, uint64_t& end_pair_number ) {
+  const uint64_t start_range = PAIRS_NUMBER - PAIRS_NUMBER_PER_CLIENT;
+
+  start_pair_number = (uint64_t) rand()%start_range;
+  if( start_pair_number == 0) {
+    start_pair_number = 1;
+  }
+
+  end_pair_number = start_pair_number + PAIRS_NUMBER_PER_CLIENT - 1;
+  ASSERT( end_pair_number <= PAIRS_NUMBER);
+  return;
+}
+
+}
+
+

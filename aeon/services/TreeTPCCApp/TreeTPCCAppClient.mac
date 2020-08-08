@@ -1,0 +1,303 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service TreeTPCCAppClient;
+ 
+provides Null;
+
+
+services {
+  Transport t;
+}
+ 
+constants {
+  uint8_t REQ_TYPE_NEW_ORDER = 0;
+  uint8_t REQ_TYPE_PAYMENT = 1;
+  uint8_t REQ_TYPE_ORDER_STATUS = 2;
+  uint8_t REQ_TYPE_DELIVERY = 3;
+  uint8_t REQ_TYPE_STOCK_LEVEL = 4;
+}
+ 
+constructor_parameters {
+  uint32_t N_CLIENTS = 1;
+	NodeSet DatabaseServer = NodeSet();
+
+  uint64_t N_WAREHOUSE = 10;
+  uint64_t N_DISTRICT_PER_WAREHOUSE = 10;
+  uint64_t N_CUSTOMER_PER_DISTRICT = 3000;
+  uint64_t N_CUSTOMER_TABLE_PER_DISTRICT = 4;
+  uint64_t N_ITEM = 10000;
+
+  uint32_t NEW_ORDER_REQ_PERCENT = 50;
+  uint32_t PAYMENT_REQ_PERCENT = 100;
+  uint32_t ORDER_STATUS_REQ_PERCENT = 92;
+  uint32_t DELIVERY_REQ_PERCENT = 96;
+  uint32_t STOCK_LEVEL_REQ_PERCENT = 100;
+
+  uint64_t OUTPUT_COUNT = 100;
+
+  uint16_t WORKLOAD_SKEW = 0; // 0: even; 1: low; 2: high
+}
+
+#minclude "TreeTPCCAppMessages.mi"
+
+state_variables {
+
+  context Client <uint32_t clientId> {
+    uint32_t clientId;
+    MaceKey serverAddr;
+
+    uint64_t lastRequestTime;
+    uint64_t requestTimePeriod;
+    uint64_t newOrderRequestTimePeriod;
+
+    uint64_t reqCount;
+    uint8_t reqType;
+
+    uint64_t newOrderReqCount;
+    uint64_t paymentReqCount;
+    uint64_t orderStatusReqCount;
+    uint64_t deliveryReqCount;
+    uint64_t stockLevelReqCount; 
+
+    mace::map< uint32_t, mace::vector<uint32_t> > currentOrderNumber;
+  }
+
+}
+ 
+transitions {
+  downcall maceInit() {
+    ASSERT( DatabaseServer.size() == 1 );
+    for( uint32_t i=0; i<N_CLIENTS; i++) {
+      uint32_t clientId = createNewContext("Client");
+      mace::string clientCtxName = generateContextName("Client", clientId);
+      createNewOwnership("globalContext", clientCtxName);
+      async_initClient(clientId);
+    }
+  }
+
+  async [Client<nClient>] initClient(const uint32_t& nClient) {
+    clientId = nClient;
+    
+    requestTimePeriod = 0;
+    newOrderRequestTimePeriod = 0;
+
+    reqCount = 0;
+    newOrderReqCount = 0;
+    paymentReqCount = 0;
+    orderStatusReqCount = 0;
+    deliveryReqCount = 0;
+    stockLevelReqCount = 0;
+
+    for( uint32_t i=1; i<=N_WAREHOUSE; i++ ){
+      mace::vector<uint32_t> order_number;
+      for( uint32_t j=0; j<N_DISTRICT_PER_WAREHOUSE; j++ ){
+        order_number.push_back(0);
+      }
+      currentOrderNumber[i] = order_number;
+    }
+    downcall_route( *(DatabaseServer.begin()), ConnectionRequest(nClient) );
+  }
+
+  async [Client<cId>] launchRequest( const uint32_t& cId ){
+    ADD_SELECTORS("TreeTPCCAppClient");
+    int32_t w_id = RandomUtil::randInt(N_WAREHOUSE) + 1;
+    int32_t d_id = RandomUtil::randInt(N_DISTRICT_PER_WAREHOUSE) + 1;
+    int32_t c_id = RandomUtil::randInt(N_CUSTOMER_PER_DISTRICT) + 1;
+
+    uint16_t hot_p = RandomUtil::randInt(100);
+    int32_t hot_w = (int32_t)(N_WAREHOUSE/2);
+    int32_t hot_d = (int32_t)(N_DISTRICT_PER_WAREHOUSE/2);
+    int32_t hot_c = (int32_t)(N_CUSTOMER_TABLE_PER_DISTRICT/2);
+
+    if( hot_w <= 0 ){
+      hot_w = 1;
+    }
+
+    if( hot_d <= 0 ) {
+      hot_d = 1;
+    }
+
+    if( hot_c <= 0 ) {
+      hot_c = 1;
+    }
+    
+    if( WORKLOAD_SKEW == 1 ) {
+      if( hot_p < 90 ){
+        w_id = RandomUtil::randInt(hot_w) + 1;
+        d_id = RandomUtil::randInt(hot_d) + 1;
+        c_id = RandomUtil::randInt(hot_c) + 1;
+      } else {
+        w_id = RandomUtil::randInt( N_WAREHOUSE - hot_w ) + hot_w + 1;
+        d_id = RandomUtil::randInt( N_DISTRICT_PER_WAREHOUSE - hot_d ) + hot_d + 1;
+        // c_id = RandomUtil::randInt( N_CUSTOMER_PER_DISTRICT - hot_c) + hot_c + 1;
+      }
+    } else if( WORKLOAD_SKEW == 2 ) {
+      uint16_t hot_p = RandomUtil::randInt(100);
+      if( hot_p < 60 ){
+        w_id = 1;
+        d_id = 1;
+        c_id = 1;
+      } else {
+        uint16_t hot_p2 = RandomUtil::randInt(100);
+        if( hot_p2 < 75 ){
+          w_id = RandomUtil::randInt(hot_w) + 1;
+          d_id = RandomUtil::randInt(hot_d) + 1;
+          c_id = RandomUtil::randInt(hot_c) + 1;
+        } else {
+          w_id = RandomUtil::randInt( N_WAREHOUSE - hot_w ) + hot_w + 1;
+          d_id = RandomUtil::randInt( N_DISTRICT_PER_WAREHOUSE - hot_d ) + hot_d + 1;
+          // c_id = RandomUtil::randInt( N_CUSTOMER_PER_DISTRICT - hot_c) + hot_c + 1;
+        }
+      }
+    }
+
+    uint16_t p = RandomUtil::randInt(100);
+
+    lastRequestTime = mace::getmtime();    
+    if( p <= NEW_ORDER_REQ_PERCENT ) {
+      newOrderReqCount ++;
+      reqType = REQ_TYPE_NEW_ORDER;
+
+      uint32_t ol_cnt = RandomUtil::randInt(11)+5;
+
+      mace::set<int32_t> i_id_set;
+      mace::vector<int32_t> item_ids;
+      mace::vector<uint32_t> item_quantities;
+
+      for(uint32_t i=0; i<ol_cnt; i++ ) {
+        while(true){
+          int32_t i_id = RandomUtil::randInt(N_ITEM) + 1;
+          if( i_id_set.count(i_id) == 0 ){
+            i_id_set.insert(i_id);
+            item_ids.push_back(i_id);
+            uint32_t quantity = RandomUtil::randInt(10)+1;
+            item_quantities.push_back(quantity);
+            break;
+          }
+        }
+      }
+
+      NewOrderTransactionMessage message(cId, w_id, d_id, c_id, ol_cnt, item_ids, item_quantities);
+      // maceout << "Send out New-Order Transaction: " << message << Log::endl;
+      downcall_route(serverAddr, message );
+      
+    } else {
+      paymentReqCount ++;
+      reqType = REQ_TYPE_PAYMENT;
+
+      mace::string c_last = "";
+
+      /*
+      uint32_t c_p = RandomUtil::randInt(100);
+
+      if( c_p<=60 ){
+        c_last = Lastname( NURand(255, 0, 999) );
+      } else {
+        c_id = NURand(1023, 1, 3000);
+      }
+      */
+
+      int32_t h_amount = RandomUtil::randInt(5000) + 1;
+
+      PaymentTransactionMessage message(cId, w_id, d_id, c_last, c_id, h_amount);
+      // maceout << "Send out Payment Transaction=" << message << Log::endl;
+      downcall_route(serverAddr, message );
+    } 
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("TreeTPCCAppClient");
+
+    serverAddr = msg.proxyAddr;
+    maceout << "Client("<< msg.clientId <<") receive proxy server: " << serverAddr << Log::endl;
+    
+    async_launchRequest(msg.clientId);
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const RequestReply& msg) {
+    ADD_SELECTORS("TreeTPCCAppClient");
+    // maceout << "Recv request reply in Client["<< msg.clientId <<"]!" << Log::endl;
+        
+    reqCount ++;
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    requestTimePeriod += latency;
+
+    if( reqType == REQ_TYPE_NEW_ORDER ){
+      newOrderRequestTimePeriod += latency;
+    }
+
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg = requestTimePeriod / OUTPUT_COUNT;
+      double new_order_avg = 0;
+
+      if( newOrderReqCount > 0 ){
+        new_order_avg = newOrderRequestTimePeriod / newOrderReqCount;
+      }
+
+      maceout<< "Client("<< clientId<<") avg="<< avg << " reqCount="<< reqCount << " new_order_avg="<< new_order_avg << " newOrderReqCount="
+            << newOrderReqCount << " paymentReqCount="<< paymentReqCount << " orderStatusReqCount="<< orderStatusReqCount << " deliveryReqCount="
+            << deliveryReqCount << " stockLevelReqCount="<< stockLevelReqCount << Log::endl;
+
+      requestTimePeriod = 0; 
+      newOrderRequestTimePeriod = 0;
+
+      newOrderReqCount = 0;
+      paymentReqCount = 0;
+      orderStatusReqCount = 0;
+      deliveryReqCount = 0;
+      stockLevelReqCount = 0;
+    }
+
+    /*
+    if( msg.orderNumberFlag ){
+      ASSERT( msg.w_id <= (int)N_WAREHOUSE && msg.w_id>0 && msg.d_id>0 && msg.d_id <= (int)N_DISTRICT_PER_WAREHOUSE  );
+
+      mace::vector<uint32_t>& order_numbers = currentOrderNumber[msg.w_id];
+      order_numbers[msg.d_id-1] = msg.order_number;
+    }
+    */
+
+    async_launchRequest( msg.clientId );
+  }
+
+}
+
+routines {
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+
+  [__null] int32_t NURand(const int32_t& A, const int32_t& x, const int32_t& y) {
+    int32_t C = RandomUtil::randInt(A+1);
+
+    int32_t r = ((( RandomUtil::randInt(A) | (RandomUtil::randInt(y-x) + x) ) + C) % (y-x+1)) + x;
+    return r;
+  } 
+
+  [__null] mace::string Lastname( const int& num ){
+    mace::vector<mace::string> n;
+    n.push_back("BAR");
+    n.push_back("OUGHT");
+    n.push_back("ABLE");
+    n.push_back("PRI");
+    n.push_back("ESE");
+    n.push_back("ANTI");
+    n.push_back("CALLY");
+    n.push_back("ATION");
+    n.push_back("EING");
+
+
+    mace::string name = n[ (num/100) %9];
+    name += n[(num/10)%9];
+    name += n[num % 9];
+    return name;
+  }
+}

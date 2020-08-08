@@ -1,0 +1,49 @@
+
+#include "Util.h"
+#include "MaceKey.h"
+service Latency;
+provides Null;
+
+services {
+  Transport tcp = TcpTransport();
+}
+
+messages{
+  Request{ uint32_t n; uint64_t sent_time; }
+  Response{ uint64_t sent_time; }
+}
+
+constructor_parameters {
+  MaceKey sender_addr = MaceKey( ipv4, "tiberius06-132:8050");
+  MaceKey receiver_addr = MaceKey( ipv4, "tiberius05-132:8000");
+
+}
+
+state_variables {
+  uint64_t total_msg;
+  uint64_t total_latency;
+}
+
+transitions {
+  downcall maceInit(){
+    if( receiver_addr.getMaceAddr() != Util::getMaceAddr() ){
+      downcall_route( receiver_addr, Request( 0, curtime ) );
+    }
+  }
+
+  downcall maceExit(){
+  }
+  upcall deliver(src, dest, const Request& m)  {
+    downcall_route( src, Response( m.sent_time ) );
+  }
+  upcall deliver(src, dest, const Response& m)  {
+    total_latency += ( curtime - m.sent_time );
+
+    downcall_route( receiver_addr, Request( total_msg, curtime ) );
+    total_msg ++;
+
+    if( total_msg % 10000 == 0 ){
+      std::cout<<"total_msg = "<< total_msg << " , total_latency = "<< total_latency << " , avg latency = "<< (total_latency)/(total_msg) << std::endl;
+    }
+  }
+}

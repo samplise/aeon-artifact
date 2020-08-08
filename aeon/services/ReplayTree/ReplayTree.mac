@@ -1,0 +1,492 @@
+/* 
+ * ReplayTree.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, Dejan Kostic, Adolfo Rodriguez
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+/**
+ *  randtree.mac 
+ *  Adolfo Rodriguez
+ *
+ *  Implementation of a simple random tree overlay.  
+ *  Nodes have a maximum number of children they are willing to accept.
+ *  If full, a node receiving a join request will redirect the request to
+ *    one of its children.
+ *  By specifying a parent file, this code recreates a random tree for 
+ *    reproducibility.
+ *  
+ */
+#include "lib/mstring.h"
+#include "lib/Iterator.h"
+#include "lib/NodeCollection.h"
+using mace::NodeCollection;
+#include "lib/Iterator.h"
+using mace::MapIterator;
+using mace::ConstMapIterator;
+
+using mace::string;
+
+// #define PIP_STRUCTURAL_BUG
+#ifdef PIP_MESSAGING
+#include "annotate.h"
+#endif
+
+service ReplayTree;
+
+provides Tree, Overlay; 
+
+//addressing ip     //The address space which this protocols uses are
+//the set of IP addresses.
+
+trace=med;
+
+constants {       //The set of [global]  constants available to the protocol.
+  int RANDTREE_MAX_CHILDREN = 12;
+  uint64_t RANDTREE_JOIN_TIMEOUT = 1 *1000*1000;
+  uint64_t DEBUG_INTERVAL = 4 *1000*1000;
+}
+
+services {
+  /* <service_class> <instance_name> <default_construction>*/
+  Transport control_ = auto(shared, [reliable,inorder], []); 
+}
+
+constructor_parameters {
+}
+
+states {          //A semi-colon separated list of protocol state names.
+  //init is a special system start state, and its declaration is not needed.
+  //init;
+  preJoining;
+  joining;
+  joined;
+}
+
+/*
+ * Type definitions of neighbors randtree uses. These neighbor types
+ * inherit many properties from a base neighbor class defined in
+ * neighbor_set.h and discussed in section 4.2 of the manual.
+ */
+auto_types {
+  //Qualifying an auto_type as a "neighbor" can let us auto-define neighbor features (key, time_last_heard, etc.
+  parent __attribute((node())) {
+  }
+  child __attribute((node() )) {
+  }
+}
+
+typedefs {
+  typedef NodeCollection<child, RANDTREE_MAX_CHILDREN> children;
+  typedef mace::hash_set<registration_uid_t> RegistrationSet;
+}
+
+/*
+ * Declaration of state variables (note the difference between state
+ * variables and the protocol's FSM state).
+ *
+ * These variables are declared according to normal conventions, with
+ * the same exceptions as existed for message variables. 
+ */
+state_variables {    
+  uint CURRENT_MAX_CHILDREN = 12;
+  //    rparent papa;  
+  //    rchildren kids;
+  parent papa;  //NOTE: In theory, this could imply the corresponding traits in the struct.  However, forcing declarations up front will promote better knowledge. 
+  children kids;
+
+  int forced_children;
+
+  timer join;
+  timer printer __attribute((recur(DEBUG_INTERVAL)));
+
+  MaceKey root; //From params
+  MaceKey forcedParent; //From parent file
+  MaceKey currentJoinParent;
+  NodeSet joinSet; //From joinOverlay
+  NodeSet joinSetRemaining; //From joinOverlay
+
+  registration_uid_t authoritativeJoinHandler;
+}     
+
+method_remappings {
+  uses {
+    upcall_verifyJoinOverlay(const MaceKey&, registration_uid_t regId = authoritativeJoinHandler); 
+  }
+}
+
+/*
+ * Definition of message types.
+ *
+ * Syntax:
+ * (Under Construction)
+ *
+ * Creates a message type called <MESSAGE TYPE>.
+ */
+messages {
+  /* The idea here is that a message can specify a set of default parameters to pass into 
+   * the wrapper functions for each type of service (not each service).  A <> means that
+   * there will never be a default value.  A <foo> means that a value of foo should be used
+   * to indicate the default value should be used, even if provided.
+   *
+   * NOTE: Each service class will define in its api what values are defaults.  The compiler
+   * somehow needs to know this.
+   */
+  join_msg {
+    MaceKey who;
+  }
+  join_reply {
+    bool accepted;
+  }
+  remove {
+  }
+
+}
+
+/*
+ * Definition of the protocol transitions. That is, the code which is
+ * triggered when events occur. This wholly codifies the entry-points
+ * into the protocol execution.
+ *
+ */
+transitions {
+  //The init API call will be called at the protocol's start time,
+  //so the system will be in the init state. 
+  downcall (state == init) maceInit() {
+      printer.reschedule(DEBUG_INTERVAL);
+      CURRENT_MAX_CHILDREN = RANDTREE_MAX_CHILDREN;
+
+      ASSERT(params::containsKey("root"));
+      if(params::containsKey("root")) {
+        root = MaceKey(ipv4, params::get<string>("root"));
+      }
+      if(root == localAddress()) { 
+	upcallAllVoid(notifyIsRootChanged, MaceKey::null, true);
+        state_change(joined);
+        papa = parent(root);
+      } else {
+        state_change(preJoining);
+      }
+      papa = MaceKey();
+      kids = children();
+      currentJoinParent = MaceKey();
+      forcedParent = MaceKey();
+      forced_children = 0;
+      read_parent_file();  // Attempts to read static tree file.
+
+      authoritativeJoinHandler = -1;
+  }
+
+  downcall (true) setAuthoritativeJoinHandler(registration_uid_t rid) {
+    maceout << "NOTICE: blindly trusing setActiveAuthenticator to use " << rid <<
+		" as active authenticator (old " << authoritativeJoinHandler << ")" << Log::endl;
+    authoritativeJoinHandler = rid;
+  }
+  
+  downcall (state == preJoining) 
+    joinOverlay(const NodeSet& peerSet, 
+		registration_uid_t registrationUid) {
+    maceout << "Processing joinOverlay request from handler " << registrationUid << Log::endl;
+// #ifdef PIP_MESSAGING
+//     char initname[30];
+//     sprintf(initname, "randtree_init-%.8x", meIPV4.getMaceAddr().local.addr);
+//     ANNOTATE_SET_PATH_ID("preJoining API joinOverlay", 0, initname, 
+// 			 strlen(initname));
+// #endif
+
+    joinSet = peerSet;
+    joinSet.erase(localAddress());
+
+    if(!forcedParent.isNullAddress()) { 
+      maceout << "Have forced parent " << forcedParent 
+	      << ", ignoring peerSet" << Log::endl;
+      currentJoinParent = forcedParent;
+    } else if(joinSet.size() > 0) {
+      joinSetRemaining = joinSet;
+      currentJoinParent = *joinSet.begin();
+      joinSetRemaining.erase(currentJoinParent);
+      maceout << "Using joinSet peer " << currentJoinParent << Log::endl;
+    } else {
+      maceout << "Using root " << root << Log::endl;
+      currentJoinParent = root;
+    }
+    
+    downcall_route(currentJoinParent, join_msg(localAddress()));  
+    join.reschedule(RANDTREE_JOIN_TIMEOUT);
+    state_change(joining);
+  }
+
+  downcall (state == joining) joinOverlay(const NodeSet& peerSet, 
+					  registration_uid_t registrationUid) {
+    maceout << "Already joining...  Recording peer set from handler " << registrationUid << Log::endl;
+    //Defer this join request until current join succeeds or times out.
+    joinSet.insert(peerSet.begin(), peerSet.end());
+    joinSet.erase(localAddress());
+    joinSetRemaining.insert(peerSet.begin(), peerSet.end());
+    joinSetRemaining.erase(localAddress());
+  }
+
+  downcall (state == joined) joinOverlay(const NodeSet& peerSet, registration_uid_t registrationUid) {
+    //XXX: Implement maceDefer
+    //       maceDefer(true, upcall_joinResultOverlay, me, 0/*JOIN_SUCCESS*/, handlerUid); //true refers to the condition which allows this to fire
+    upcall_joinResultOverlay(localAddress(), 0/*JOIN_SUCCESS*/, registrationUid); //true refers to the condition which allows this to fire
+  }
+
+  // Note: trigger this transition when a timer event occurs on the
+  // join timer and we are in the joining state.
+  scheduler (state == joining) join() {
+    // Timer fired, retry join
+// #ifdef PIP_MESSAGING
+//     char initname[30];
+//     sprintf(initname, "randtree_init-%.8x", meIPV4.getMaceAddr().local.addr);
+//     ANNOTATE_SET_PATH_ID("joining timer join", 0, initname, strlen(initname));
+// #endif
+    
+    //Update currentJoinParent and send new join_msg
+    if(!forcedParent.isNullAddress()) { 
+      //       maceLog("Have forced parent %s, ignoring joinSet\n", forcedParent.toString().c_str());
+      maceout << "Have forced parent " << forcedParent << " , ignoring joinSet\n";
+      currentJoinParent = forcedParent;
+    } else if(joinSetRemaining.size() > 0) {
+      currentJoinParent = *joinSetRemaining.begin();
+      joinSetRemaining.erase(currentJoinParent);
+      //       maceLog("Using joinSet peer %s\n", currentJoinParent.toString().c_str());
+      maceout << "Using joinSet peer " << currentJoinParent << Log::endl;
+    } else {
+      //       maceLog("Using root %s\n", root.toString().c_str());
+      maceout << "Using root " << root << Log::endl;
+      currentJoinParent = root;
+      joinSetRemaining = joinSet;
+    }
+    downcall_route(currentJoinParent, join_msg(localAddress()));  
+    join.reschedule(RANDTREE_JOIN_TIMEOUT);
+  }
+
+  // Note: trigger this transition when a message is received of type
+  // join and we are in the joined state.
+  upcall (state == joined) deliver(const MaceKey& source, const MaceKey& destination, const join_msg& msg) {
+    bool verified = upcall_verifyJoinOverlay(msg.who);
+    if(verified) {
+      //NOTE: Under this strategy, only the node which has space will verify this node.
+      if ( ((!kids.contains(msg.who)) && kids.space() && kids.size() < CURRENT_MAX_CHILDREN) ) { // built-in neighbor fns.
+        //         maceLog("accepted child %s\n", msg.who.toString().c_str());
+	kids.add(msg.who);
+        maceout << "accepted child " << msg.who << Log::endl;
+        upcallAllVoid(peerJoinedOverlay, msg.who);
+        upcallAllVoid(notifyChildren, MaceKey(), kids.nodeSet()); 
+        bool macedon_sendret = downcall_route(msg.who, join_reply(true));
+        //         maceLog ("route_join_reply true to: %s route status(%d)\n", msg.who.toString().c_str(), macedon_sendret);
+        maceout << "route_join_reply true to: " << msg.who << " route status(" << macedon_sendret << ")" << Log::endl;
+      }
+      else if ( kids.contains(msg.who) ) {
+        maceLog("child %s was already a child\n", msg.who.toString().c_str());
+      }
+      else {   // choose random child to redirect join
+        child& redir = kids.random();
+        downcall_route(redir.getId(), join_msg(msg.who));
+      }
+    }
+    else {
+      maceLog("child %s was not verified\n", msg.who.toString().c_str());
+      bool sendret = downcall_route(msg.who, join_reply(false));
+      maceLog ("route_join_reply false to: %s route status(%d)\n", msg.who.toString().c_str(), sendret);
+    }
+  }
+
+  upcall (state == joining) deliver(const MaceKey& source, const MaceKey& destination, const join_reply& msg) {
+    // The join reached a destination
+    maceLog ("join_reply from: %s accepted=%s\n", source.toString().c_str(), (msg.accepted?"true":"false"));
+    if(msg.accepted) {
+      if (!papa.getId().isNullAddress() && papa.getId() != source) {
+        downcall_route(papa.getId(), remove());  // remove yourself from the old parent
+      }
+      //       replay_add(source);  // Trace having joined the overlay
+      papa = parent(source);
+      join.cancel();
+      upcallAllVoid(joinResultOverlay, source, 0);
+      upcallAllVoid(notifyParent, MaceKey(), source);
+      state_change(joined);
+    } else {
+      maceLog("authentication failed trying to join %s\n", source.toString().c_str());
+      upcallAllVoid(joinResultOverlay,source, 2);
+    }
+  }
+
+  upcall (state == joined) deliver(const MaceKey& source, const MaceKey& destination, const join_reply& msg) {
+    maceLog ("join_reply from: %s\n", source.toString().c_str());
+    if(source != papa.getId()) {
+      maceLog("join_reply from another papa -- removing from their kid set\n");
+      downcall_route(source, remove());
+    }
+  }
+
+  upcall (state == joined) deliver(const MaceKey& source, const MaceKey& destination, const remove& msg) { 
+    // Child is requesting to be removed
+    if (kids.contains(source)) {  // Only remove it if he is my child
+      maceLog ("request to be removed from: %s\n", source.toString().c_str());
+
+      //XXX: Notify children of all groups affected.
+      kids.erase(source);
+      NodeSet chillins = kids.nodeSet();
+      upcallAllVoid(notifyChildren, MaceKey(), chillins);
+    }
+  }
+
+  upcall (true) error(const MaceKey& nodeId, TransportError::type error_code, const std::string& s, registration_uid_t h) { /* NetworkErrorHandler::error */
+    //CHIP TEMP
+//#ifdef PIP_MESSAGING
+//      static int num = 0;
+//      char errpath[40];
+//      sprintf(errpath, "error-%.8x-%.8x-%d", meIPV4.getMaceAddr().local.addr, nodeId.getMaceAddr().local.addr, num++);
+//      ANNOTATE_SET_PATH_ID("API error", 0, errpath, strlen(errpath));
+//      ANNOTATE_NOTICE("API error", 0, "Peer %.8x died", nodeId.getMaceAddr().local.addr);
+//#endif
+      maceout << "Neighbor " << nodeId << " transport error " << error_code << " on service " << h << Log::endl;
+
+      if (papa.getId() == nodeId) {  // Is it my parent?
+        maceLog("Parent %s transport error!\n", nodeId.toString().c_str());
+        /*         neighbor_remove(papa, nodeId); */
+        papa = parent();
+        //XXX: upcall joinResult -- joining
+        state_change(joining);  // Retry joining at the root
+        forcedParent = MaceKey(); // If forced parent died, make sure we don't try to re-join the [dead] forced parent.
+        join.reschedule(100000); // Fire timer to begin re-join
+      }
+      else if(kids.contains(nodeId)) {  // Is it my child
+        maceLog("Child %s error_code %d!\n", nodeId.toString().c_str(), error_code);
+        kids.erase(nodeId);
+        //XXX: upcall notifyChildren
+        //         NodeSet chillins = kids.nodeSet();
+        //         upcallAllVoid(notifyChildren, 0, chillins);
+      }
+      //upcall_error(AUTOEXT_TRANSPORT_ERROR, &tr); ? Do we propagate the error info?
+    return;
+  }
+
+  downcall (true) isRoot(const MaceKey& groupId, registration_uid_t r) {
+    Log::logf("randtree::isRoot", "me %s source %s\n", localAddress().toString().c_str(), root.toString().c_str());
+    return localAddress() == root;
+  }
+
+  downcall isMember(const MaceKey& groupId) {
+    return state == joined;
+  }
+
+  scheduler (true) printer() {
+    maceout << "Yup, still alive!" << Log::endl;
+  }
+
+  downcall (true) getParent(const MaceKey& channelId) {
+    return (root == localAddress()? localAddress(): papa.getId()); 
+  }
+  downcall (true) getChildren(const MaceKey& channelId) {
+    return kids.nodeSet();
+  }
+  downcall (state == joined) getOverlayJoinStatus() {
+    return JOINED;
+  }
+  downcall (state == joining) getOverlayJoinStatus() {
+    return JOINING;
+  }
+  downcall (true) getOverlayJoinStatus() {
+    return NONE;
+  }
+
+}
+
+/*
+ * Define routines for reusability. These can only be called by
+ * transitions from this protocol. (Or other routines of this protocol).
+ * These are defined just like C++ functions.
+ */
+routines {  
+
+  /*
+   * This function shows how by leveraging a general purpose language,
+   * MACEDON does not limit the possible actions a protocol can take.
+   * In this case, it is reading in a parent file. This same code
+   * could be written as part of a transition, but is here to simplify
+   * the transition code.
+   */
+  void read_parent_file () 
+  {
+    FILE *myfile;
+
+    MaceKey childAddr;
+    MaceKey parentAddr;
+
+    char name[200];
+    char parent[200];
+    char rest[1024];
+    char whole_line[1024];
+    string parent_filename = params::get<string>("parent_file", "");
+    if(parent_filename != "") {
+      maceLog("forced parent_filename: %s\n", parent_filename.c_str());
+    }
+    else {
+      maceLog("parent_filename was NULL\n");
+      return;
+    }
+
+    forced_children=0;
+    myfile = (FILE *)fopen(parent_filename.c_str(), "r");
+    if (!myfile) {
+      maceLog("nonexistent forced parent_file  %s\n", parent_filename.c_str());
+      return;
+    }
+    while (fgets(whole_line, 512, myfile)!=NULL) {
+      int successful = 0;
+      /*TODO: This generates a compiler warning.  Should the '&' be removed from these? */
+      successful = sscanf(whole_line, "%s %s %[^\n]s", name, parent, rest);
+      if (successful != 2) {
+        continue;
+      }   
+
+      childAddr = MaceKey(ipv4, name);
+      if (childAddr.isNullAddress()) {
+        printf("Bad host lookup.\n");
+        exit(24);
+      }
+
+      parentAddr = MaceKey(ipv4, parent);
+      if (parentAddr.isNullAddress()) {
+        printf("Bad host lookup.\n");
+        exit(24);
+      }
+
+      if (parentAddr == localAddress()) {   // i am parent
+        forced_children++;
+      }
+      else if (childAddr == localAddress()) {   // i am kid
+        forcedParent = parentAddr;
+        //         maceLog("forcedParent: %s\n", forcedParent.toString().c_str());
+        maceout << "forcedParent: " << forcedParent << Log::endl;
+      }
+    }
+    fclose(myfile);
+  }
+
+}

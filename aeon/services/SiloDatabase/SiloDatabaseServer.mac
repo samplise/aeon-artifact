@@ -1,0 +1,1902 @@
+/*
+ * bsang: Silo in-memory database application. This application is used to show the consistence and elasticity of our programming
+ * model 
+ */
+
+#include "m_map.h"
+#include "marray.h"
+#include "MaceTypes.h" 
+#include "RandomUtil.h"
+
+service SiloDatabaseServer;
+provides Null;
+
+
+services {
+  Transport t;
+}
+
+typedefs {
+  typedef mace::array<Order_Index_Entry, N_MAX_KEY_ENTRY> EntryArray;
+}
+
+auto_types {
+  WarehouseTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t w_id;
+    mace::string w_name;
+    mace::string w_street_1;
+    mace::string w_street_2;
+    mace::string w_city;
+    mace::string w_state;
+    mace::string w_zip;
+    float w_ytd;
+    float w_tax;
+  }
+
+  DistrictTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t d_w_id;
+    int32_t d_id;
+    float d_ytd;
+    float d_tax;
+    int32_t d_next_o_id;
+    mace::string d_name;
+    mace::string d_street_1;
+    mace::string d_street_2;
+    mace::string d_city;
+    mace::string d_state;
+    mace::string d_zip;
+  }
+
+  CustomerTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t c_w_id;
+    int32_t c_d_id;
+    int32_t c_id;
+    float c_discount;
+    mace::string c_credit;
+    mace::string c_last;
+    mace::string c_first;
+    float c_credit_lim;
+    float c_balance;
+    float c_ytd_payment;
+    int32_t c_payment_cnt;
+    int32_t c_delivery_cnt;
+    mace::string c_street_1;
+    mace::string c_street_2;
+    mace::string c_city;
+    mace::string c_state;
+    mace::string c_zip;
+    mace::string c_phone;
+    uint32_t c_since;
+    mace::string c_middle;
+    mace::string c_data;
+  }
+
+  NewOrderTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t no_w_id;
+    int32_t no_d_id;
+    int32_t no_o_id;
+  }
+
+  OrderTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t o_w_id;
+    int32_t o_d_id;
+    int32_t o_id;
+    int32_t o_c_id;
+    int32_t o_carrier_id;
+    int16_t o_ol_cnt;
+    bool o_all_local;
+    uint32_t o_entry_d;
+  }
+
+  OrderLineTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t ol_w_id;
+    int32_t ol_d_id;
+    int32_t ol_o_id;
+    int32_t ol_number;
+    int32_t ol_i_id;
+    uint32_t ol_delivery_d;
+    float ol_amount;
+    int32_t ol_supply_w_id;
+    int16_t ol_quantity;
+  }
+
+  ItemStockTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t s_w_id;
+    int32_t s_i_id;
+    // int16_t s_quantity;
+    mace::string s_dist_01;
+    mace::string s_dist_02;
+    mace::string s_dist_03;
+    mace::string s_dist_04;
+    mace::string s_dist_05;
+    mace::string s_dist_06;
+    mace::string s_dist_07;
+    mace::string s_dist_08;
+    mace::string s_dist_09;
+    mace::string s_dist_10;
+    float s_ytd;
+    int32_t s_order_cnt;
+    int32_t s_remote_cnt;
+    mace::string s_data;
+
+    int32_t i_id;
+    mace::string i_name;
+    float i_price;
+    mace::string i_data;
+    int32_t i_im_id;
+  }
+
+  StockTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t s_w_id;
+    int32_t s_i_id;
+    int16_t s_quantity;
+  }
+
+  HistoryTableEntry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t h_c_id;
+    int32_t h_c_d_id;
+    int32_t h_c_w_id;
+    int32_t h_d_id;
+    int32_t h_w_id;
+    mace::string h_date;
+    int32_t h_amount;
+    mace::string h_data;
+  }
+
+  oorder_c_id_idx_key __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t o_w_id;
+    int32_t o_d_id;
+    int32_t o_c_id;
+    int32_t o_o_id;    
+  }
+
+  oorder_c_id_idx_value __attribute((comparable(equals=default; lessthan=default))) {
+    bool valid;
+    uint8_t o_dummy;
+  }
+
+  // The New-Order Transaction
+  NewOrderItemStock __attribute((comparable(equals=default; lessthan=default))) {
+    int16_t s_quantity;
+    mace::string s_dist_01;
+    mace::string s_dist_02;
+    mace::string s_dist_03;
+    mace::string s_dist_04;
+    mace::string s_dist_05;
+    mace::string s_dist_06;
+    mace::string s_dist_07;
+    mace::string s_dist_08;
+    mace::string s_dist_09;
+    mace::string s_dist_10;
+    mace::string s_data;
+
+    int32_t i_id;
+    float i_price;
+  }
+
+  NewOrderDistrict __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t d_id;
+    float d_tax;
+    int32_t d_next_o_id;
+  }
+
+  NewOrderWarehouse __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t w_id;
+    float w_tax;
+    mace::vector<NewOrderItemStock> items;
+  }
+
+  NewOrderCustomer __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t c_id;
+    float c_discount;
+    mace::string c_last;
+    mace::string c_credit;
+  }
+
+  NewOrderCustomerReturnValue __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t c_id;
+    int32_t o_id;
+    uint32_t coId;
+    bool is_new_order_context;
+  }
+
+  // The Payment transaction
+  PaymentWarehouse __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t w_id;
+    mace::string w_name;
+    mace::string w_street_1;
+    mace::string w_street_2;
+    mace::string w_city;
+    mace::string w_state;
+    mace::string w_zip;
+  }
+
+  PaymentDistrict __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t d_id;
+    mace::string d_name;
+    mace::string d_street_1;
+    mace::string d_street_2;
+    mace::string d_city;
+    mace::string d_state;
+    mace::string d_zip;
+  }
+
+  PaymentCustomer __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t c_id;
+    float c_discount;
+    mace::string c_credit;
+    mace::string c_last;
+    mace::string c_first;
+    float c_credit_lim;
+    float c_balance;
+    mace::string c_street_1;
+    mace::string c_street_2;
+    mace::string c_city;
+    mace::string c_state;
+    mace::string c_zip;
+    mace::string c_phone;
+    uint32_t c_since;
+    mace::string c_middle;
+  }
+
+  // The Order-Status Transaction
+  OrderStatusCustomer __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t c_id;
+    mace::string c_last;
+    mace::string c_first;
+    float c_balance;
+    mace::string c_middle;
+  }
+
+  OrderStatusOrderLine __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t ol_o_id;
+    int32_t ol_i_id;
+    uint32_t ol_delivery_d;
+    float ol_amount;
+    int32_t ol_supply_w_id;
+    int8_t ol_quantity;
+  }
+
+  // The Delivery Transaction
+  DeliveryOrder __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t o_id;
+    int32_t o_c_id;
+    uint32_t ol_total;
+  }
+
+  // The Stock-Level Transaction
+  RangeOrderInfo __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t o_id;
+    int32_t c_id;
+  }
+
+  // Index
+  C_Last_Index_Entry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t c_id;
+    mace::string c_last;
+    mace::string c_first;
+  }
+
+  Order_Index_Entry __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t o_id;
+    int32_t c_id;
+
+    int32_t l_node;
+    int32_t r_node;
+  }
+
+  Order_Index_Node __attribute((comparable(equals=default; lessthan=default))) {
+    int32_t p_node;
+    EntryArray keys;
+    uint32_t size;
+  }
+}
+
+constants {
+  uint64_t N_KEY_PER_NODE = 100;
+  uint64_t N_MAX_KEY_ENTRY = 105;
+}
+
+constructor_parameters {
+  uint64_t N_WAREHOUSE = 1;
+  uint64_t N_DISTRICT_PER_WAREHOUSE = 10;
+  uint64_t N_CUSTOMER_PER_DISTRICT = 3000;
+  uint64_t N_ITEM_STOCK = 100000;
+      
+  uint64_t N_ITEMSTOCK_PER_CONTEXT = 100;
+  uint64_t N_CUSTOMER_PER_CONTEXT = 100;
+  uint64_t N_DISTRICT_PER_CONTEXT = 1;
+
+  // Initialization
+  uint64_t INIT_N_ORDER = 3000;
+
+  // BTree
+  uint64_t N_INIT_BTREE_NODE = 50;
+
+  uint64_t OUTPUT_COUNT = 50;
+  uint64_t SNAPSHOT_TIME_PERIOD = 0;
+}
+
+#minclude "SiloDatabaseMessages.mi"
+ 
+state_variables {
+
+  context WarehouseTable<uint32_t cwId> {
+    mace::vector<WarehouseTableEntry> warehouseTableEntries;
+    mace::vector<ItemStockTableEntry> itemTableEntries;
+
+    mace::map<uint32_t, uint32_t> districtCtxIdMap;
+    mace::map<uint32_t, uint32_t> stockCtxIdMap;
+
+    int32_t current_d_id;
+
+    uint64_t reqCount;
+    uint64_t newOrderReqCount;
+    uint64_t paymentReqCount;
+    uint64_t orderStatusReqCount;
+    uint64_t deliveryReqCount;
+    uint64_t stockLevelReqCount;
+  }
+
+  context StockTable<uint32_t cisId> {
+    mace::vector<StockTableEntry> tableEntries;
+  }
+
+  context DistrictTable<uint32_t cdId> {
+    mace::vector<DistrictTableEntry> tableEntries;
+
+    mace::map<uint32_t, uint32_t> customerCtxIdMap;
+    mace::map<uint32_t, uint32_t> orderCtxIdMap;
+
+    mace::map< mace::string, mace::set<C_Last_Index_Entry> > c_last_idx;
+
+    uint64_t btreeRootNodeId;
+    mace::vector<Order_Index_Node> orderIdx;
+    uint64_t orderIdxIter;
+    int32_t oldestNewOrderId;
+  }
+
+  context CustomerTable<uint32_t ccId> {
+    mace::vector<CustomerTableEntry> tableEntries;
+
+    mace::map<uint32_t, uint32_t> orderCtxIdMap;
+    mace::map<uint32_t, uint32_t> historyCtxIdMap;
+  }
+
+  context HistoryTable<uint32_t chId> {
+    mace::vector<HistoryTableEntry> tableEntries;
+  }
+
+  context OrderTable<uint32_t coId> {
+    mace::vector<OrderTableEntry> tableEntries;
+
+    mace::map<uint32_t, uint32_t> orderLineCtxIdMap;
+    mace::map<uint32_t, uint32_t> newOrderCtxIdMap;
+  }
+
+  context OrderLineTable<uint32_t colId> {
+    mace::vector<OrderLineTableEntry> tableEntries;
+
+  }
+
+  context NewOrderTable<uint32_t cnoId> {
+    mace::vector<NewOrderTableEntry> tableEntries;
+  }
+}
+
+transitions {
+  // temperary file for 
+
+downcall maceInit() {
+  ADD_SELECTORS("SiloDatabaseServer");
+  maceout << "To start SiloDatabaseServer!" << Log::endl;
+
+  for(uint32_t i=0; i<N_WAREHOUSE; i++ ) {
+    uint32_t cwId = createNewContext("WarehouseTable");
+    mace::string childCtxName = generateContextName("WarehouseTable", cwId);
+    createNewOwnership( "globalContext", childCtxName );
+
+    async_initWarehouseTable( cwId );
+  }
+}
+
+async [WarehouseTable<w_id>] loadOrder(const uint32_t& w_id, const uint32_t& sleep_period, const uint32_t& count ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  sleep(sleep_period);
+  
+  int32_t d_id = current_d_id;
+  //int32_t c_id = NURand(1023, 1, 3000);
+
+  int32_t c_id = N_CUSTOMER_PER_CONTEXT * count - 2;
+  if( c_id > (int32_t)N_CUSTOMER_PER_DISTRICT ) {
+    c_id = N_CUSTOMER_PER_DISTRICT - 10;
+  }
+
+  if( c_id < 0 ){
+    c_id = 1;
+  }
+
+  uint32_t ol_cnt = RandomUtil::randInt(11)+5;
+
+  mace::set<int32_t> i_id_set;
+  mace::vector<int32_t> item_ids;
+  mace::vector<uint32_t> item_quantities;
+
+  for(uint32_t i=0; i<ol_cnt; i++ ) {
+    while(true){
+      int32_t i_id = RandomUtil::randInt(N_ITEM_STOCK)+1;
+      if( i_id_set.count(i_id) == 0 ){
+        i_id_set.insert(i_id);
+        item_ids.push_back(i_id);
+        uint32_t quantity = RandomUtil::randInt(10)+1;
+        item_quantities.push_back(quantity);
+        break;
+      }
+    }
+  }
+
+  maceout<< "WarehouseTable["<< w_id <<"]: loading order: items=" << item_ids << " quantities=" << item_quantities << " d_id="<< d_id << " c_id=" << c_id << " count="<< count << Log::endl;
+ 
+  mace::vector<NewOrderItemStock> items;
+  mace::map< uint32_t, mace::vector<int32_t> > item_stock_ids;
+  mace::map< uint32_t, mace::vector<int32_t> > item_stock_quantities;
+  for(uint32_t i=0; i< item_ids.size(); i++ ) {
+    int32_t itemId = item_ids[i];
+    const int32_t& quantity = item_quantities[i];
+    
+    uint32_t iter = itemId % itemTableEntries.size();
+    ItemStockTableEntry& entry = itemTableEntries[iter];
+    
+    NewOrderItemStock new_order_item_stock;
+
+    new_order_item_stock.s_quantity = quantity;
+    new_order_item_stock.s_dist_01  = entry.s_dist_01;
+    new_order_item_stock.s_dist_02  = entry.s_dist_02;
+    new_order_item_stock.s_dist_03  = entry.s_dist_03;
+    new_order_item_stock.s_dist_04  = entry.s_dist_04;
+    new_order_item_stock.s_dist_05  = entry.s_dist_05;
+    new_order_item_stock.s_dist_06  = entry.s_dist_06;
+    new_order_item_stock.s_dist_07  = entry.s_dist_06;
+    new_order_item_stock.s_dist_08  = entry.s_dist_07;
+    new_order_item_stock.s_dist_09  = entry.s_dist_08;
+    new_order_item_stock.s_dist_10  = entry.s_dist_09;
+    new_order_item_stock.s_data     = entry.s_data;
+    new_order_item_stock.i_id       = itemId;
+
+    items.push_back(new_order_item_stock);
+
+    uint32_t stockCtxId = getContextID( itemId, N_ITEMSTOCK_PER_CONTEXT, stockCtxIdMap );
+
+    if( item_ids.find(stockCtxId) == item_ids.end() ){
+      mace::vector<int32_t> item_vector;
+      mace::vector<int32_t> quantity_vector;
+
+      item_stock_ids[ stockCtxId ] = item_vector;
+      item_stock_quantities[ stockCtxId ]  = quantity_vector;
+    }
+    item_stock_ids[ stockCtxId ].push_back( itemId );
+    item_stock_quantities[ stockCtxId ].push_back( item_quantities[i] );
+  }
+
+
+  for( mace::map< uint32_t, mace::vector<int32_t> >::const_iterator iter=item_stock_ids.begin(); iter!=item_stock_ids.end(); iter++ ){
+    broadcast_NewOrderTransactionStock( iter->first, iter->second, item_stock_quantities[iter->first] );
+  }
+
+
+  NewOrderWarehouse new_order_warehouse;
+  for( uint32_t i=0; i<warehouseTableEntries.size(); i++ ) {
+    WarehouseTableEntry& entry = warehouseTableEntries[i];
+
+    if( (int)w_id == entry.w_id ) {
+      new_order_warehouse.w_id = entry.w_id;
+      new_order_warehouse.w_tax = entry.w_tax;
+      break;
+    }
+  }
+  new_order_warehouse.items = items;
+
+  uint32_t cdId = getContextID( d_id, N_DISTRICT_PER_CONTEXT, districtCtxIdMap );
+  ASSERT( cdId > 0 );
+  MaceKey src;
+
+  broadcast_NewOrderTransactionDistrict( cdId, d_id, c_id, ol_cnt, new_order_warehouse, src, 0);
+
+  if( count < INIT_N_ORDER ) {
+    uint32_t new_count = count + 1;
+    async_loadOrder(w_id, 0, new_count );
+  } else {
+    current_d_id ++;
+    if( current_d_id <= (int32_t)N_DISTRICT_PER_WAREHOUSE ){
+      async_loadOrder( w_id, 0, 1 );
+    }
+  }
+}
+
+// Database initialization
+async [WarehouseTable<w_id>] initWarehouseTable( const uint32_t& w_id ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  WarehouseTableEntry w_entry(  w_id, 
+                              generateRandomString(10), 
+                              generateRandomString(20), 
+                              generateRandomString(20), 
+                              generateRandomString(20), 
+                              generateRandomString(2), 
+                              generateRandomString(9), 
+                              3000000, 
+                              (RandomUtil::randInt(10)+10)/100 );
+
+  warehouseTableEntries.push_back(w_entry);
+
+  mace::string myCtxName = generateContextName("WarehouseTable", w_id);
+  for(uint32_t i=1; i<=N_DISTRICT_PER_WAREHOUSE; i++ ) {
+    uint32_t cdId = i;
+    mace::string childCtxName = generateContextName("DistrictTable", cdId);
+    createNewOwnership( myCtxName, childCtxName );
+
+    districtCtxIdMap[i] = cdId;
+
+    async_initDistrictTable( cdId, w_id, i );
+  }
+
+  mace::map< uint32_t, mace::vector<int32_t> > i_ids;
+
+  for(uint32_t i_id=1; i_id<=N_ITEM_STOCK; i_id++ ) {
+    ItemStockTableEntry i_entry(  w_id,  
+                                  i_id,  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  generateRandomString(24),  
+                                  0, 
+                                  0, 
+                                  0, 
+                                  generateRandomString(50),  
+                                  1, 
+                                  generateRandomString(16),  
+                                  RandomUtil::randInt(100)+1, 
+                                  generateRandomString(50), 
+                                  100);
+    itemTableEntries.push_back( i_entry );
+
+    uint32_t csId = getContextID( i_id, N_ITEMSTOCK_PER_CONTEXT, stockCtxIdMap);
+
+    if( csId == 0 ) {
+      csId = createNewContext("StockTable");
+      mace::string childCtxName = generateContextName("StockTable", csId);
+      createNewOwnership( myCtxName, childCtxName );
+
+      updateContextID( i_id, csId, N_ITEMSTOCK_PER_CONTEXT, stockCtxIdMap);
+      
+    }
+
+    if( i_ids.find(csId) == i_ids.end() ){
+      mace::vector<int32_t> item_vector;
+      i_ids[csId] = item_vector;
+    }
+    i_ids[csId].push_back(i_id);
+  }
+
+  mace::map< uint32_t, mace::vector<int32_t> >::const_iterator iter;
+  for( iter = i_ids.begin(); iter != i_ids.end(); iter++ ) {
+    async_initStockTable(iter->first, w_id, iter->second );
+  }
+
+  maceout << "To initialize WarehouseTable["<< w_id <<"]!" << Log::endl;
+  current_d_id = 1;
+
+  reqCount = 0;
+  newOrderReqCount = 0;
+  paymentReqCount = 0;
+  orderStatusReqCount = 0;
+  deliveryReqCount = 0;
+  stockLevelReqCount = 0; 
+  
+  async_loadOrder(w_id, 5, 1);
+}
+
+async [StockTable<csId>] initStockTable( const uint32_t& csId, const int32_t& w_id, const mace::vector<int32_t>& i_ids ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  maceout << "To initialize StockTable["<< csId <<"] with size=" << i_ids.size() << Log::endl;
+  
+  for( uint32_t i_iter=0; i_iter<i_ids.size(); i_iter++ ) {
+    const int32_t& i_id = i_ids[i_iter];
+    StockTableEntry entry( w_id, i_id, RandomUtil::randInt(90)+10 );
+    tableEntries.push_back(entry);
+  }
+}
+
+async [DistrictTable<cdId>] initDistrictTable( const uint32_t& cdId, const int32_t& w_id, const int32_t& d_id ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  maceout<< "To initialize DistrictTable["<< cdId <<"] with w_id="<< w_id <<" d_id=" << d_id << Log::endl;
+
+  DistrictTableEntry entry( w_id, 
+                            d_id, 
+                            30000, 
+                            0.02, 
+                            1, 
+                            generateRandomString(10), 
+                            generateRandomString(20), 
+                            generateRandomString(20), 
+                            generateRandomString(20), 
+                            generateRandomString(2), 
+                            generateRandomString(9) );
+
+  tableEntries.push_back(entry);
+  oldestNewOrderId = 1;
+  orderIdx.resize(N_INIT_BTREE_NODE);
+  orderIdxIter = 0;
+
+  mace::string myCtxName = generateContextName("DistrictTable", cdId);
+  mace::map< uint32_t, mace::set<C_Last_Index_Entry> > c_ids;
+
+  for(uint32_t c_id=1; c_id<=N_CUSTOMER_PER_DISTRICT; c_id++ ) {
+    uint32_t ccId = getContextID( c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap  );
+
+    if( ccId == 0 ) {
+      ccId = createNewContext("CustomerTable");
+      mace::string childCtxName = generateContextName("CustomerTable", ccId);
+      createNewOwnership( myCtxName, childCtxName );
+
+      updateContextID( c_id, ccId, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap );
+      
+    }
+
+    mace::string c_last;
+
+    if( c_id <=1000 ){
+      c_last = Lastname( c_id-1 );
+    } else {
+      c_last = Lastname( NURand(255, 0, 999) );
+    }
+    mace::string c_first = generateRandomString(16);
+    C_Last_Index_Entry idx_entry( c_id, c_last, c_first);
+    c_last_idx[c_last].insert(idx_entry);
+    c_ids[ccId].insert(idx_entry);
+  }
+
+  mace::map< uint32_t, mace::set<C_Last_Index_Entry> >::const_iterator iter;
+  for( iter = c_ids.begin(); iter != c_ids.end(); iter++ ) {
+    async_initCustomerTable(iter->first, w_id, d_id, iter->second );
+  }
+}
+
+async [CustomerTable<ccId>] initCustomerTable( const uint32_t& ccId, const int32_t& w_id, const int32_t& d_id, const mace::set< C_Last_Index_Entry >& c_ids ) {
+
+  ADD_SELECTORS("SiloDatabaseServer");
+  maceout << "To initialize CustomerTable["<< ccId <<"] with w_id=" << w_id << " d_id="<< d_id << " size="<< c_ids.size() << Log::endl;
+
+  mace::set<C_Last_Index_Entry>::const_iterator iter;
+  for( iter=c_ids.begin(); iter!=c_ids.end(); iter++ ){
+    const C_Last_Index_Entry& e = *iter;
+
+    mace::string c_credit;
+    if( RandomUtil::randInt(2) == 1 ){
+      c_credit = "G";
+    } else {
+      c_credit = "B";
+    }
+    c_credit += "C";
+    CustomerTableEntry entry( w_id, 
+                              d_id, 
+                              e.c_id, 
+                              0.05, 
+                              c_credit, 
+                              e.c_last, 
+                              e.c_first, 
+                              50000, 
+                              -10, 
+                              10, 
+                              1, 
+                              0, 
+                              generateRandomString(20), 
+                              generateRandomString(20), 
+                              generateRandomString(20), 
+                              generateRandomString(2), 
+                              generateRandomString(9), 
+                              generateRandomString(11), 
+                              2000, 
+                              "OE", 
+                              generateRandomString(500) );
+
+    tableEntries.push_back(entry);
+
+    uint32_t chId = getContextID( e.c_id, N_CUSTOMER_PER_CONTEXT, historyCtxIdMap );
+
+    if( chId == 0 ) {
+      chId = createNewContext("HistoryTable");
+      mace::string myCtxName = generateContextName("CustomerTable", ccId);
+      mace::string childCtxName = generateContextName("HistoryTable", chId);
+
+      createNewOwnership(myCtxName, childCtxName);
+      updateContextID( e.c_id, chId, N_CUSTOMER_PER_CONTEXT, historyCtxIdMap);
+
+      async_initHistoryTable( chId );
+    }
+  }
+
+  
+}
+
+async [HistoryTable<chId>] initHistoryTable( const uint32_t& chId ){
+  ADD_SELECTORS("SiloDatabaseServer");
+  maceout << "To initialize HistoryTable["<< chId <<"]!" << Log::endl;
+}
+
+
+// The New-Order Transaction
+upcall [WarehouseTable<msg.w_id>] deliver( const MaceKey& src, const MaceKey& dest, const NewOrderTransactionMessage& msg ) {
+
+
+  mace::vector<NewOrderItemStock> items;
+  ADD_SELECTORS("SiloDatabaseServer");
+  reqCount ++;
+  newOrderReqCount ++;
+  if( reqCount % OUTPUT_COUNT == 0 ){
+    maceout << "In WarehouseTable["<< msg.w_id <<"] reqCount="<< reqCount << " newOrderReqCount=" << newOrderReqCount << " paymentReqCount=" << paymentReqCount << " orderStatusReqCount=" << orderStatusReqCount << " deliveryReqCount=" << deliveryReqCount << " stockLevelReqCount=" << stockLevelReqCount << Log::endl;
+  }
+
+  mace::map< uint32_t, mace::vector<int32_t> > item_ids;
+  mace::map< uint32_t, mace::vector<int32_t> > item_quantities;
+  for(uint32_t i=0; i<msg.item_ids.size(); i++ ) {
+    int32_t itemId = msg.item_ids[i];
+    const int32_t& quantity = msg.item_quantities[i];
+    
+    uint32_t iter = itemId % itemTableEntries.size();
+    ItemStockTableEntry& entry = itemTableEntries[iter];
+    
+    NewOrderItemStock new_order_item_stock;
+
+    new_order_item_stock.s_quantity = quantity;
+    new_order_item_stock.s_dist_01  = entry.s_dist_01;
+    new_order_item_stock.s_dist_02  = entry.s_dist_02;
+    new_order_item_stock.s_dist_03  = entry.s_dist_03;
+    new_order_item_stock.s_dist_04  = entry.s_dist_04;
+    new_order_item_stock.s_dist_05  = entry.s_dist_05;
+    new_order_item_stock.s_dist_06  = entry.s_dist_06;
+    new_order_item_stock.s_dist_07  = entry.s_dist_06;
+    new_order_item_stock.s_dist_08  = entry.s_dist_07;
+    new_order_item_stock.s_dist_09  = entry.s_dist_08;
+    new_order_item_stock.s_dist_10  = entry.s_dist_09;
+    new_order_item_stock.s_data     = entry.s_data;
+    new_order_item_stock.i_id       = itemId;
+
+    items.push_back(new_order_item_stock);
+
+    uint32_t stockCtxId = getContextID( itemId, N_ITEMSTOCK_PER_CONTEXT, stockCtxIdMap );
+
+    if( item_ids.find(stockCtxId) == item_ids.end() ){
+      mace::vector<int32_t> item_vector;
+      mace::vector<int32_t> quantity_vector;
+
+      item_ids[ stockCtxId ] = item_vector;
+      item_quantities[ stockCtxId ]  = quantity_vector;
+    }
+    item_ids[ stockCtxId ].push_back( itemId );
+    item_quantities[ stockCtxId ].push_back( quantity );
+  }
+
+
+  for( mace::map< uint32_t, mace::vector<int32_t> >::const_iterator iter=item_ids.begin(); iter!=item_ids.end(); iter++ ){
+    broadcast_NewOrderTransactionStock( iter->first, iter->second, item_quantities[iter->first] );
+  }
+
+  NewOrderWarehouse new_order_warehouse;
+  for( uint32_t i=0; i<warehouseTableEntries.size(); i++ ) {
+    WarehouseTableEntry& entry = warehouseTableEntries[i];
+
+    if( msg.w_id == entry.w_id ) {
+      new_order_warehouse.w_id = entry.w_id;
+      new_order_warehouse.w_tax = entry.w_tax;
+      break;
+    }
+  }
+  new_order_warehouse.items = items;
+
+  uint32_t districtCtxId = getContextID( msg.d_id, N_DISTRICT_PER_CONTEXT, districtCtxIdMap );
+  broadcast_NewOrderTransactionDistrict(districtCtxId, msg.d_id, msg.c_id, msg.ol_cnt, new_order_warehouse, src, msg.client_id);
+}
+
+
+broadcast [StockTable<csId>] NewOrderTransactionStock( const uint32_t& csId, const mace::vector<int32_t>& i_ids, const mace::vector<int32_t>& quantities ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  
+  for( uint32_t j=0; j<i_ids.size(); j++ ){
+    const int32_t& i_id = i_ids[j];
+    const int32_t& quantity = quantities[j];
+    
+    uint32_t iter = i_id % tableEntries.size();
+    StockTableEntry& entry = tableEntries[iter];
+    
+    if( entry.s_quantity > quantity ) {
+      entry.s_quantity = entry.s_quantity - quantity;
+    } else {
+      entry.s_quantity = entry.s_quantity - quantity + 91;
+    }
+  }
+  usleep(SNAPSHOT_TIME_PERIOD);  
+}
+
+
+broadcast [DistrictTable<cdId>] NewOrderTransactionDistrict(const uint32_t& cdId, const int& d_id, const int& c_id, const uint32_t& o_ol_cnt, const NewOrderWarehouse& new_order_warehouse, const MaceKey& src, const uint32_t& clientId) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  
+
+  NewOrderDistrict new_order_district;
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    DistrictTableEntry& entry = tableEntries[i];
+
+    if( d_id == entry.d_id ) {
+      new_order_district.d_id = entry.d_id;
+      new_order_district.d_tax = entry.d_tax;
+      new_order_district.d_next_o_id = entry.d_next_o_id;
+
+      entry.d_next_o_id ++;
+      break;
+    }
+  }
+  uint32_t ccId = getContextID( c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap );
+
+  NewOrderCustomerReturnValue new_order_customer_return_value = NewOrderTransactionCustomer(ccId, c_id, o_ol_cnt, new_order_warehouse, new_order_district, src, clientId);
+
+  if( new_order_customer_return_value.is_new_order_context ){
+    mace::string myCtxName = generateContextName("DistrictTable", cdId);
+    mace::string childCtxName = generateContextName("OrderTable", new_order_customer_return_value.coId);
+
+    createNewOwnership(myCtxName, childCtxName);
+  }
+  updateContextID( new_order_district.d_next_o_id, new_order_customer_return_value.coId, 1, orderCtxIdMap);
+  insertNewKey( btreeRootNodeId, orderIdx, orderIdxIter, new_order_customer_return_value.o_id, new_order_customer_return_value.c_id );
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+broadcast [OrderTable<coId>] NewOrderTransactionOrder(const uint32_t& coId, const int& o_id, const uint32_t& o_ol_cnt, const NewOrderWarehouse& new_order_warehouse, const NewOrderDistrict& new_order_district, const NewOrderCustomer& new_order_customer, const MaceKey& src, const uint32_t& clientId) {
+  ADD_SELECTORS("SiloDatabaseServer");
+    
+  OrderTableEntry entry(  new_order_warehouse.w_id,
+                          new_order_district.d_id, 
+                          o_id, 
+                          new_order_customer.c_id,
+                          0, 
+                          o_ol_cnt,
+                          true,
+                          100 );
+
+  tableEntries.push_back(entry);
+  
+  uint32_t cnoId = getContextID( new_order_customer.c_id, N_CUSTOMER_PER_CONTEXT, newOrderCtxIdMap );
+  if( cnoId == 0 ) {
+    cnoId = createNewContext("NewOrderTable");
+    mace::string myCtxName = generateContextName("OrderTable", coId);
+    mace::string childCtxName = generateContextName("NewOrderTable", cnoId);
+
+    createNewOwnership(myCtxName, childCtxName);
+    updateContextID( new_order_customer.c_id, cnoId, N_CUSTOMER_PER_CONTEXT, newOrderCtxIdMap);
+  }
+
+  broadcast_NewOrderTransactionNewOrder( cnoId, o_id, new_order_district.d_id, new_order_warehouse.w_id);
+
+  uint32_t colId = getContextID( new_order_customer.c_id, N_CUSTOMER_PER_CONTEXT, orderLineCtxIdMap );
+  if( colId == 0 ) {
+    colId = createNewContext("OrderLineTable");
+    mace::string myCtxName = generateContextName("OrderTable", coId);
+    mace::string childCtxName = generateContextName("OrderLineTable", colId);
+
+    createNewOwnership(myCtxName, childCtxName);
+    updateContextID( new_order_customer.c_id, colId, N_CUSTOMER_PER_CONTEXT, orderLineCtxIdMap );
+  }
+  broadcast_NewOrderTransactionOrderLine( colId, o_id, new_order_warehouse, new_order_district, new_order_customer, src, clientId);
+}
+
+broadcast [NewOrderTable<cnoId>] NewOrderTransactionNewOrder(const uint32_t& cnoId, const int& no_o_id, const int& no_d_id, const int& no_w_id){
+  ADD_SELECTORS("SiloDatabaseServer");
+  if( tableEntries.size() == 0 ){
+    maceout << "First enter NewOrderTable["<< cnoId <<"]!" << Log::endl;
+  }
+  NewOrderTableEntry entry( no_w_id, no_d_id, no_o_id );
+  tableEntries.push_back(entry);
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+broadcast [OrderLineTable<colId>] NewOrderTransactionOrderLine(const uint32_t& colId, const int& ol_o_id, const NewOrderWarehouse& new_order_warehouse, const NewOrderDistrict& new_order_district, const NewOrderCustomer& new_order_customer, const MaceKey& src, const uint32_t& clientId){
+  ADD_SELECTORS("SiloDatabaseServer");
+  if( tableEntries.size() == 0 ){
+    maceout << "First enter OrderLineTable["<< colId <<"]!" << Log::endl;
+  }
+  const mace::vector<NewOrderItemStock>& items = new_order_warehouse.items;
+
+  for(uint32_t ol_number=0; ol_number<items.size(); ol_number++ ){
+    const NewOrderItemStock& item = items[ol_number];
+
+    int ol_i_id = item.i_id;
+    int ol_quantity = item.s_quantity;
+
+    float ol_amount = ol_quantity * item.i_price * (1+new_order_warehouse.w_tax+new_order_district.d_tax) * (1-new_order_customer.c_discount);
+
+    OrderLineTableEntry entry(  new_order_warehouse.w_id,
+                                new_order_district.d_id, 
+                                ol_o_id, 
+                                ol_number, 
+                                ol_i_id,
+                                100, 
+                                ol_amount,
+                                new_order_warehouse.w_id, 
+                                ol_quantity );
+    tableEntries.push_back(entry);
+  }
+  if( clientId > 0 ){
+    downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+  }
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+// The Payment Transaction
+upcall [WarehouseTable<msg.w_id>] deliver(const MaceKey& src, const MaceKey& dest, const PaymentTransactionMessage& msg) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  reqCount ++;
+  paymentReqCount ++;
+  if( reqCount % OUTPUT_COUNT == 0 ){
+    maceout << "In WarehouseTable[] reqCount="<< reqCount << " newOrderReqCount=" << newOrderReqCount << " paymentReqCount=" << paymentReqCount << " orderStatusReqCount=" << orderStatusReqCount << " deliveryReqCount=" << deliveryReqCount << " stockLevelReqCount=" << stockLevelReqCount << Log::endl;
+  }
+  
+  PaymentWarehouse payment_warehouse;
+  for( uint32_t i=0; i<warehouseTableEntries.size(); i++ ) {
+    WarehouseTableEntry& entry = warehouseTableEntries[i];
+
+    if( msg.w_id == entry.w_id ) {
+      entry.w_ytd = entry.w_ytd + msg.h_amount;
+
+      payment_warehouse.w_id = entry.w_id;
+      payment_warehouse.w_street_1 = entry.w_street_1;
+      payment_warehouse.w_street_2 = entry.w_street_2;
+      payment_warehouse.w_city = entry.w_city;
+      payment_warehouse.w_state = entry.w_state;
+      payment_warehouse.w_zip = entry.w_zip;
+      payment_warehouse.w_name = entry.w_name;
+      break;
+    }
+  }
+
+  uint32_t cdId = getContextID( msg.d_id, N_DISTRICT_PER_CONTEXT, districtCtxIdMap );
+  broadcast_PaymentTransactionDistrict( cdId, msg.d_id, msg.c_id, msg.c_last, msg.h_amount, payment_warehouse, src, msg.client_id);
+
+  // usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+broadcast [DistrictTable<cdId>] PaymentTransactionDistrict(const uint32_t& cdId, const int32_t& d_id, const int32_t& c_id, const mace::string& c_last, const int32_t& h_amount, const PaymentWarehouse& payment_warehouse, const MaceKey& src, const uint32_t& clientId) {
+  
+  ADD_SELECTORS("SiloDatabaseServer");
+  PaymentDistrict payment_district;
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    DistrictTableEntry& entry = tableEntries[i];
+
+    if( d_id == entry.d_id ) {
+      entry.d_ytd = entry.d_ytd + h_amount;
+
+      payment_district.d_id = entry.d_id;
+      payment_district.d_street_1 = entry.d_street_1;
+      payment_district.d_street_2 = entry.d_street_2;
+      payment_district.d_city = entry.d_city;
+      payment_district.d_state = entry.d_state;
+      payment_district.d_zip = entry.d_zip;
+      payment_district.d_name = entry.d_name;
+      break;
+    }
+  }
+
+  int32_t new_c_id = c_id;
+  uint32_t ccId = 0;
+  if( c_last != "" ) {
+    int32_t customer_id = getCustomerContextIDByName( c_last, c_last_idx);
+    if( customer_id == 0 ) {
+      maceout << "Fail to find c_last("<< c_last <<")!" << Log::endl;
+      if( clientId > 0){
+        downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+      }
+      return;
+    }
+    new_c_id = customer_id;
+    ccId = getContextID( new_c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap );
+  } else {
+    ccId = getContextID( new_c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap );
+  }
+  if( ccId == 0 ) {
+    if( clientId > 0){
+      downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+    }
+    return;
+  }
+  broadcast_PaymentTransactionCustomer( ccId, new_c_id, h_amount, payment_warehouse, payment_district, src, clientId);
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+broadcast [CustomerTable<ccId>] PaymentTransactionCustomer(const uint32_t& ccId, const int32_t& c_id, const int32_t& h_amount, const PaymentWarehouse& payment_warehouse, const PaymentDistrict& payment_district, const MaceKey& src, const uint32_t& clientId) {
+ 
+  ADD_SELECTORS("SiloDatabaseServer");
+  PaymentCustomer payment_customer;
+  mace::string h_data;
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    CustomerTableEntry& entry = tableEntries[i];
+
+    if( c_id == entry.c_id ) {
+      payment_customer.c_id = entry.c_id;
+      payment_customer.c_first = entry.c_first;
+      payment_customer.c_middle = entry.c_middle;
+      payment_customer.c_last = entry.c_last;
+      payment_customer.c_street_1 = entry.c_street_1;
+      payment_customer.c_street_2 = entry.c_street_2;
+      payment_customer.c_city = entry.c_city;
+      payment_customer.c_state = entry.c_state;
+      payment_customer.c_zip = entry.c_zip;
+      payment_customer.c_phone = entry.c_phone;
+      payment_customer.c_credit = entry.c_credit;
+      payment_customer.c_credit_lim = entry.c_credit_lim;
+      payment_customer.c_discount = entry.c_discount;
+      payment_customer.c_balance = entry.c_balance;
+      payment_customer.c_since = entry.c_since;
+
+
+      int32_t c_balance = h_amount + payment_customer.c_balance;
+      if( payment_customer.c_credit == "BC") {
+        mace::string c_new_data ="|" + c_id + payment_district.d_id + payment_warehouse.w_id + payment_district.d_id + payment_warehouse.w_id + h_amount;
+
+        entry.c_data = entry.c_data + c_new_data;
+      } 
+      entry.c_balance = c_balance;
+
+      h_data = payment_warehouse.w_name + '\0' + payment_district.d_name;
+      break;
+    }
+  }
+
+  
+  uint32_t chId = getContextID( c_id, N_CUSTOMER_PER_CONTEXT, historyCtxIdMap );
+
+  if( chId == 0 ) {
+    chId = createNewContext("HistoryTable");
+    mace::string myCtxName = generateContextName("CustomerTable", ccId);
+    mace::string childCtxName = generateContextName("HistoryTable", chId);
+
+    createNewOwnership(myCtxName, childCtxName);
+    updateContextID( c_id, chId, N_CUSTOMER_PER_CONTEXT, historyCtxIdMap);
+  }
+
+  broadcast_PaymentTransactionHistory(chId, c_id, payment_district.d_id, payment_warehouse.w_id, payment_district.d_id,  payment_warehouse.w_id, "datatime", h_amount, h_data);
+
+  if( clientId > 0){
+    downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+  }
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+broadcast [HistoryTable<chId>] PaymentTransactionHistory( const uint32_t& chId, const int32_t h_c_id, const int32_t& h_c_d_id, const int32_t& h_c_w_id, const int32_t& h_d_id, const int32_t& h_w_id, const mace::string& h_date, const int32_t& h_amount, const mace::string& h_data){
+  
+  ADD_SELECTORS("SiloDatabaseServer");
+  if( tableEntries.size() == 0 ){
+    maceout << "First enter HistoryTable["<< chId <<"]!" << Log::endl;
+  }
+  HistoryTableEntry entry( h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data);
+  tableEntries.push_back(entry);
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+// The Order-Status Transaction
+upcall [DistrictTable<msg.d_id>] deliver(const MaceKey& src, const MaceKey& dest, const OrderStatusTransactionMessage& msg) {
+  int32_t new_c_id = msg.c_id;
+  mace::string c_last = msg.c_last;
+  uint32_t clientId = msg.client_id;
+
+  uint32_t ccId = 0;
+  if( c_last != "" ) {
+    int32_t customer_id = getCustomerContextIDByName( c_last, c_last_idx);
+    if( customer_id <= 0 ){
+      maceout << "Fail to find c_id for " << c_last <<". To reply directly!"<< Log::endl;
+      if( msg.client_id >0 ){
+        downcall_route(src, RequestReply(msg.client_id, false, 0, 0, 0) );
+      }
+      return;
+    }
+    new_c_id = customer_id;
+    ccId = getContextID( new_c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap );
+  } else {
+    ccId = getContextID( new_c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap );
+  }
+  
+  broadcast_OrderStatusTransactionCustomer( ccId, new_c_id, src, clientId );
+}
+
+broadcast [CustomerTable<ccId>] OrderStatusTransactionCustomer(const uint32_t& ccId, const int32_t& c_id, const MaceKey& src, const uint32_t& clientId) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  OrderStatusCustomer order_status_customer;
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    CustomerTableEntry& entry = tableEntries[i];
+
+    if( c_id == entry.c_id ) {
+      order_status_customer.c_id = entry.c_id;
+      order_status_customer.c_balance = entry.c_balance;
+      order_status_customer.c_first = entry.c_first;
+      order_status_customer.c_middle = entry.c_middle;
+      order_status_customer.c_last = entry.c_last;
+      break;
+    }
+  }
+  uint32_t coId = getContextID( c_id, N_CUSTOMER_PER_CONTEXT, orderCtxIdMap );
+  if( coId == 0 ) {
+    maceout << "There is no order for customer("<< c_id <<")! To Reply Client["<< clientId <<"] directly!" << Log::endl;
+    if( clientId >0 ){
+      downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+    }
+    return;
+  }
+  
+  broadcast_OrderStatusTransactionOrder(coId, order_status_customer, src, clientId );
+}
+
+broadcast [OrderTable<coId>] OrderStatusTransactionOrder( const uint32_t& coId, const OrderStatusCustomer& order_status_customer, const MaceKey& src, const uint32_t& clientId){
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  int32_t o_id = 0;
+
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    OrderTableEntry& entry = tableEntries[i];
+
+    if( order_status_customer.c_id == entry.o_c_id && (o_id == 0 || o_id<entry.o_id) ){
+      o_id = entry.o_id;
+    }
+  }
+  if( o_id == 0 ) {
+    maceout << "There is no order for customer("<< order_status_customer.c_id <<")! To Reply Client["<< clientId <<"] directly!" << Log::endl;
+    if( clientId >0 ){
+      downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+    }
+    return;
+  }
+
+  uint32_t colId = getContextID( order_status_customer.c_id, N_CUSTOMER_PER_CONTEXT, orderLineCtxIdMap);
+  broadcast_OrderStatusTransactionOrderLine( colId, o_id, src, clientId );
+}
+
+broadcast [OrderLineTable<colId>] OrderStatusTransactionOrderLine( const uint32_t& colId, const int32_t& o_id, const MaceKey& src, const uint32_t& clientId){
+  ADD_SELECTORS("SiloDatabaseServer");
+  
+  mace::vector<OrderStatusOrderLine> order_lines;
+
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    OrderLineTableEntry& entry = tableEntries[i];
+
+    OrderStatusOrderLine line;
+    if( o_id == entry.ol_o_id ) {
+      line.ol_i_id = entry.ol_i_id;
+      line.ol_supply_w_id = entry.ol_supply_w_id;
+      line.ol_quantity = entry.ol_quantity;
+      line.ol_amount = entry.ol_amount;
+      line.ol_delivery_d = entry.ol_delivery_d;
+      order_lines.push_back(line);
+    }
+  }
+
+  if( clientId >0 ){
+    downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+  }
+}
+
+// The Delivery Transaction
+upcall [DistrictTable<msg.d_id>] deliver(const MaceKey& src, const MaceKey& dest, const DeliveryTransactionMessage& msg ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  int32_t d_id = msg.d_id; 
+  int32_t o_carrier_id = msg.o_carrier_id;
+  mace::string ol_delivery_d = "datetime";
+  uint32_t clientId = msg.client_id;
+
+  const DistrictTableEntry& entry = tableEntries[0];
+  if( entry.d_next_o_id == 1 ){
+    maceout << "There is no order in DistrictTable["<< d_id <<"] with d_id=" << d_id <<". Reply Delivery transaction to Client["<< clientId <<"] from "<< src << Log::endl;
+    if( clientId >0 ){
+      downcall_route(src, RequestReply(clientId, false, 0, 0, 0) );
+    }
+    return;
+  }
+
+  int32_t no_o_id = oldestNewOrderId ++;
+
+  uint32_t coId = getContextID( no_o_id, 1, orderCtxIdMap );
+  DeliveryOrder delivery_order = DeliveryTransactionOrder(coId, no_o_id, o_carrier_id, ol_delivery_d);
+  
+  uint32_t ccId = getContextID( delivery_order.o_c_id, N_CUSTOMER_PER_CONTEXT, customerCtxIdMap);
+  broadcast_DeliveryTransactionCustomer( ccId, delivery_order.o_c_id, delivery_order.ol_total, src, clientId);
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+broadcast [CustomerTable<ccId>] DeliveryTransactionCustomer(const uint32_t& ccId, const int32_t& c_id, const int32_t& ol_total, const MaceKey& src, const uint32_t& clientId) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    CustomerTableEntry& entry = tableEntries[i];
+
+    if( c_id == entry.c_id ) {
+      entry.c_balance = entry.c_balance + ol_total;
+      break;
+    }
+  }
+
+  if( clientId > 0 ){
+    downcall_route( src, RequestReply(clientId, false, 0, 0, 0) );
+  }
+  usleep(SNAPSHOT_TIME_PERIOD);
+}
+
+
+// The Stock-Level Transaction
+upcall [WarehouseTable<msg.w_id>] deliver(const MaceKey& src, const MaceKey& dest, const StockLevelTransactionMessage& msg) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  reqCount ++;
+  stockLevelReqCount ++;
+  if( reqCount % OUTPUT_COUNT == 0 ){
+    maceout << "In WarehouseTable[] reqCount="<< reqCount << " newOrderReqCount=" << newOrderReqCount << " paymentReqCount=" << paymentReqCount << " orderStatusReqCount=" << orderStatusReqCount << " deliveryReqCount=" << deliveryReqCount << " stockLevelReqCount=" << stockLevelReqCount << Log::endl;
+  }
+  
+  uint32_t cdId = getContextID( msg.d_id, N_DISTRICT_PER_CONTEXT, districtCtxIdMap );
+  
+  uint32_t stock_count = 0;
+  mace::set<int32_t> i_ids = StockLevelTransactionDistrict( cdId, msg.d_id );
+
+  mace::map< uint32_t, mace::set<int32_t> > ctxMap;
+  for( mace::set<int32_t>::iterator i_iter=i_ids.begin(); i_iter!=i_ids.end(); i_iter++ ) {
+    int32_t i_id = *i_iter;
+    uint32_t cisId = getContextID( i_id, N_ITEMSTOCK_PER_CONTEXT, stockCtxIdMap );
+    ctxMap[ cisId ].insert( i_id );    
+  }
+
+  for( mace::map< uint32_t, mace::set<int32_t> >::iterator iter=ctxMap.begin(); iter!=ctxMap.end(); iter++ ){
+    stock_count += StockLevelTransactionStock( iter->first, iter->second, msg.threshold );
+  }
+  downcall_route( src, RequestReply(msg.client_id, false, 0, 0, 0) );
+}
+
+upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  std::ostringstream oss;
+  oss << src <<"["<<msg.clientId<<"]";
+
+  MaceAddr commAddr = getExternalCommContextAddr(src, oss.str() );
+  MaceKey commKey( ipv4, commAddr );
+  downcall_route( src, ConnectionSetup(commKey, msg.clientId) );
+  maceout<< "Assign external communication node("<< commKey <<") to client[] from "<< src <<"!" << Log::endl;
+}
+
+
+}
+
+routines {
+// The New-Order Transaction
+
+[CustomerTable<ccId>] NewOrderCustomerReturnValue NewOrderTransactionCustomer( const uint32_t& ccId, const int& c_id, const uint32_t& o_ol_cnt, const NewOrderWarehouse& new_order_warehouse, const NewOrderDistrict& new_order_district, const MaceKey& src, const uint32_t& clientId) {
+  
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  int o_id = new_order_district.d_next_o_id;
+  uint32_t coId = getContextID( c_id, N_CUSTOMER_PER_CONTEXT, orderCtxIdMap );
+
+  NewOrderCustomerReturnValue new_order_customer_return_value( c_id, o_id, coId, false);
+
+  if( coId == 0 ) {
+    coId = createNewContext("OrderTable");
+    mace::string myCtxName = generateContextName("CustomerTable", ccId);
+    mace::string childCtxName = generateContextName("OrderTable", coId);
+
+    createNewOwnership(myCtxName, childCtxName);
+    
+    new_order_customer_return_value.coId = coId;
+    new_order_customer_return_value.is_new_order_context = true;
+
+    updateContextID( c_id, coId, N_CUSTOMER_PER_CONTEXT, orderCtxIdMap);
+  }
+
+  NewOrderCustomer new_order_customer; 
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    CustomerTableEntry& entry = tableEntries[i];
+
+    if( c_id == entry.c_id ) {
+      new_order_customer.c_id = entry.c_id;
+      new_order_customer.c_discount = entry.c_discount;
+      new_order_customer.c_last = entry.c_last;
+      new_order_customer.c_credit = entry.c_credit;
+      break;
+    }
+  }
+
+  broadcast_NewOrderTransactionOrder(coId, o_id, o_ol_cnt, new_order_warehouse, new_order_district, new_order_customer, src, clientId);
+  usleep(SNAPSHOT_TIME_PERIOD);
+  return new_order_customer_return_value;
+}
+
+// Delivery transaction
+
+[OrderTable<coId>] DeliveryOrder DeliveryTransactionOrder( const uint32_t& coId, const int& o_id, const int32_t& o_carrier_id, const mace::string& ol_delivery_d) {
+  
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  DeliveryOrder delivery_order;
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    OrderTableEntry& entry = tableEntries[i];
+
+    if( o_id == entry.o_id ) {
+      delivery_order.o_id = entry.o_id;
+      delivery_order.o_c_id = entry.o_c_id;
+
+      entry.o_carrier_id = o_carrier_id;
+      break;
+    }
+  }
+  ASSERT( delivery_order.o_c_id > 0);
+  
+  uint32_t colId = getContextID( delivery_order.o_c_id, N_CUSTOMER_PER_CONTEXT, orderLineCtxIdMap );
+  delivery_order.ol_total = DeliveryTransactionOrderLine( colId, o_id, ol_delivery_d );
+  usleep(SNAPSHOT_TIME_PERIOD);
+  return delivery_order;
+}
+
+[OrderLineTable<colId>] uint32_t DeliveryTransactionOrderLine( const uint32_t& colId, const int& o_id, const mace::string& ol_delivery_d ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  uint32_t ol_total = 0;
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    OrderLineTableEntry& entry = tableEntries[i];
+    if( o_id == entry.ol_o_id ) {
+      entry.ol_delivery_d = 100;
+      ol_total ++;      
+    }
+  } 
+  usleep(SNAPSHOT_TIME_PERIOD);
+  return ol_total;
+}
+
+
+// Stock-Level Transaction
+[DistrictTable<cdId>] mace::set<int32_t> StockLevelTransactionDistrict( const uint32_t& cdId, const int32_t& d_id ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  int32_t d_next_o_id = 0;
+
+  for( uint32_t i=0; i<tableEntries.size(); i++ ) {
+    if( tableEntries[i].d_id == d_id ){
+      d_next_o_id = tableEntries[i].d_next_o_id;
+      break;
+    }
+  }
+
+  int32_t max = d_next_o_id;
+  int32_t min = d_next_o_id - 20;
+  if( min<0 ){
+    min = 0;
+  }
+  mace::set<RangeOrderInfo> o_ids = getRangeOrderID( btreeRootNodeId, orderIdx, max, min );
+
+  mace::set<int32_t> i_ids;
+  for( mace::set<RangeOrderInfo>::iterator iter=o_ids.begin(); iter!=o_ids.end(); iter++ ) {
+    const RangeOrderInfo& order_info = *iter;
+    uint32_t coId = getContextID( order_info.o_id, 1, orderCtxIdMap);
+
+    mace::set<int32_t> item_ids = StockLevelTransactionOrder( coId, order_info.c_id, order_info.o_id);
+
+    for( mace::set<int32_t>::iterator i_iter=item_ids.begin(); i_iter!=item_ids.end(); i_iter++ ){
+      const int32_t& item_id = *i_iter;
+      if( i_ids.count(item_id) == 0 ){
+        i_ids.insert(item_id);
+      }
+    }
+  }
+
+  return i_ids;
+}
+
+[OrderTable<coId>] mace::set<int32_t> StockLevelTransactionOrder(const uint32_t& coId, const int32_t& c_id, const int32_t& o_id) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  uint32_t colId = getContextID(c_id, N_CUSTOMER_PER_CONTEXT, orderLineCtxIdMap);
+  return StockLevelTransactionOrderLine(colId, o_id);
+}
+
+[OrderLineTable<colId>] mace::set<int32_t> StockLevelTransactionOrderLine( const uint32_t& colId, const int32_t& o_id){
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  
+  mace::set<int32_t> i_ids;
+
+  for(uint32_t i=0; i<tableEntries.size(); i++){
+    const OrderLineTableEntry& entry = tableEntries[i];
+    if( entry.ol_o_id == o_id ) {
+      if( i_ids.count(entry.ol_i_id) == 0 ){
+        i_ids.insert(entry.ol_i_id);
+      }
+    }
+  }
+  return i_ids;
+}
+
+
+[StockTable<csId>] uint32_t StockLevelTransactionStock( const uint32_t& csId, const mace::set<int32_t>& i_ids, const uint32_t& threshold) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  uint32_t count = 0;
+  for( mace::set<int32_t>::iterator iter=i_ids.begin(); iter!=i_ids.end(); iter++ ) {
+    const int32_t& i_id = *iter; 
+    uint32_t i_iter = i_id % tableEntries.size();
+    StockTableEntry& entry = tableEntries[i_iter];
+    
+    if( entry.s_quantity < (int)threshold ) {
+      count ++;
+    } 
+  }
+
+  return count;
+}
+
+
+[__null] uint32_t getContextID( const int32_t& entryId, const uint32_t& N_ENTRY_PER_CONTEXT, mace::map<uint32_t, uint32_t>& contextIdMap ){
+  uint32_t iter = entryId / N_ENTRY_PER_CONTEXT;
+  if( contextIdMap.find(iter) == contextIdMap.end() ) {
+    return 0;
+  } else {
+    uint32_t ctxId = contextIdMap[iter];
+    return ctxId;
+  }
+}
+
+[__null] void updateContextID( const int32_t& entryId, const uint32_t& ctxId, const uint32_t& N_ENTRY_PER_CONTEXT, mace::map<uint32_t, uint32_t>& contextIdMap ){
+
+  uint32_t iter = entryId / N_ENTRY_PER_CONTEXT;
+  contextIdMap[iter] = ctxId;
+}
+
+[__null] uint32_t getCustomerContextIDByName( const mace::string& c_last, const mace::map< mace::string, mace::set<C_Last_Index_Entry> >& c_last_idx) {
+  mace::map< mace::string, mace::set<C_Last_Index_Entry> >::const_iterator iter = c_last_idx.find( c_last );
+  if( iter == c_last_idx.end() ){
+    return 0;
+  }
+
+  const mace::set<C_Last_Index_Entry>& c_entries = iter->second;
+  if( c_entries.size() == 0 ) {
+    return 0;
+  }
+
+  uint32_t mid = c_entries.size() / 2;
+  mace::set<C_Last_Index_Entry>::const_iterator entry_iter;
+  int32_t c_id = 0;
+  uint32_t i = 0;
+  for( entry_iter=c_entries.begin(); entry_iter!=c_entries.end(); entry_iter++, i++ ) {
+    if( i== mid ){
+      c_id = (*entry_iter).c_id;
+      break;
+    }
+  }
+  return c_id;
+}
+
+[__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+  std::ostringstream oss;
+  oss << ctxName <<"["<<id<<"]";
+  return oss.str();
+}
+
+[__null] int32_t NURand(const int32_t& A, const int32_t& x, const int32_t& y) {
+  int32_t C = RandomUtil::randInt(A+1);
+
+  int32_t r = ((( RandomUtil::randInt(A) | (RandomUtil::randInt(y-x) + x) ) + C) % (y-x+1)) + x;
+  return r;
+} 
+
+[__null] mace::string Lastname( const int& num ){
+    mace::vector<mace::string> n;
+    n.push_back("BAR");
+    n.push_back("OUGHT");
+    n.push_back("ABLE");
+    n.push_back("PRI");
+    n.push_back("ESE");
+    n.push_back("ANTI");
+    n.push_back("CALLY");
+    n.push_back("ATION");
+    n.push_back("EING");
+
+
+    mace::string name = n[ (num/100) %9];
+    name += n[(num/10)%9];
+    name += n[num % 9];
+    return name;
+  }
+
+[__null] mace::string generateRandomString(const uint32_t& l) {
+  uint32_t len = l;
+  if( len == 0 ) {
+    len = RandomUtil::randInt(30) + 1;
+  }
+
+  std::string buf(len-1, 0);
+  uint32_t i = 0;
+  char seed = 'a';
+  while( i<len-1 ) {
+    const char c =  (char)( (uint32_t)seed + RandomUtil::randInt(26) );
+    buf[i++] = c;
+  }
+
+  return buf;
+}
+
+// BTree
+
+[__null] mace::set<RangeOrderInfo> getRangeOrderID( const uint32_t& root, const mace::vector<Order_Index_Node>& orderIdx, const int32_t& max, const int32_t& min) {
+
+  ADD_SELECTORS("SiloDatabaseServer");
+  mace::set<RangeOrderInfo> o_ids;
+  const Order_Index_Node& node = orderIdx[root];
+
+  const EntryArray& keys = node.keys;
+  
+  int32_t last_o_id = 0;
+  for(uint32_t i=0; i<node.size; i++) {
+    const Order_Index_Entry& entry = keys[i];
+
+    if( entry.o_id >= min && entry.o_id < max ) {
+      RangeOrderInfo info(entry.o_id, entry.c_id);
+      o_ids.insert(info);
+    }
+
+    if( min < entry.o_id && entry.l_node >=0 && last_o_id < max ) {
+      getRangeOrderIDFromTree( entry.l_node, orderIdx, max, min, o_ids );
+    }
+
+    if( i==node.size-1 && entry.o_id < max && entry.r_node >=0 ){
+      getRangeOrderIDFromTree( entry.r_node, orderIdx, max, min, o_ids );
+    }
+
+    last_o_id = entry.o_id;
+  } 
+
+  return o_ids;
+}
+
+[__null] void getRangeOrderIDFromTree( const uint32_t& node_id, const mace::vector<Order_Index_Node>& orderIdx, const int32_t& max, const int32_t& min, mace::set<RangeOrderInfo>& o_ids) {
+  const Order_Index_Node& node = orderIdx[node_id];
+
+
+  const EntryArray& keys = node.keys;
+  int32_t last_o_id = 0;
+  for(uint32_t i=0; i<node.size; i++) {
+    const Order_Index_Entry& entry = keys[i];
+    if( entry.o_id >= min && entry.o_id < max ) {
+      RangeOrderInfo info(entry.o_id, entry.c_id);
+      o_ids.insert(info);
+    }
+
+    if( min < entry.o_id && entry.l_node >=0 && last_o_id < max ) {
+      getRangeOrderIDFromTree( entry.l_node, orderIdx, max, min, o_ids );
+    }
+
+    if( i==node.size-1 && entry.o_id < max && entry.r_node >=0 ){
+      getRangeOrderIDFromTree( entry.r_node, orderIdx, max, min, o_ids );
+    }
+
+    last_o_id = entry.o_id;
+  } 
+}
+
+[__null] void insertNewKey( uint64_t& root, mace::vector<Order_Index_Node>& orderIdx, uint64_t& orderIdxIter, const int32_t& o_id, const int32_t& c_id ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  if( orderIdxIter == 0 ) {
+    Order_Index_Entry entry( o_id, c_id, -1, -1);
+    EntryArray keys;
+    keys[0] = entry;
+
+    Order_Index_Node node(-1, keys, 1);
+    orderIdx[orderIdxIter ++ ] = node;
+    root = 0;
+
+    // maceout << "To insert " << entry << " to Node["<< root <<"]!" << Log::endl;
+    return;
+  }
+
+  insertNewKeyToNode( root, orderIdx, orderIdxIter, root, o_id, c_id);
+  return;
+}
+
+[__null] void insertNewKeyToNode( uint64_t& root, mace::vector<Order_Index_Node>& orderIdx, uint64_t& orderIdxIter, const uint64_t& nodeId, const int32_t& o_id, const int32_t& c_id ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+  Order_Index_Node& node = orderIdx[nodeId];
+  EntryArray& keys = node.keys;
+
+  for( uint32_t i=0; i<node.size; i++ ) {
+    Order_Index_Entry& entry = keys[i];
+
+    if( entry.o_id == o_id ) {
+      return;
+    } 
+
+    if( o_id<entry.o_id ) {
+      if( entry.l_node > 0 ) {
+        insertNewKeyToNode( root, orderIdx, orderIdxIter, entry.l_node, o_id, c_id);
+        return;
+      } else {
+        Order_Index_Entry new_entry( o_id, c_id, -1, -1);
+        orderIdx[nodeId].size = insertEntryToArray(keys, node.size, new_entry, i);
+        // maceout << "To insert " << new_entry << " to Node["<< nodeId <<"]!" << Log::endl;
+        break;
+      }
+    }
+
+    if( i==node.size-1 && o_id>entry.o_id ) {
+      if( entry.r_node > 0 ){
+        insertNewKeyToNode( root, orderIdx, orderIdxIter, entry.r_node, o_id, c_id);
+        return;
+      } else {
+        Order_Index_Entry new_entry( o_id, c_id, entry.r_node, -1);
+        entry.r_node = -1;
+        keys[node.size++] = new_entry;
+        // maceout << "To insert " << new_entry << " to Node["<< nodeId <<"]!" << Log::endl;
+        break;
+      }
+    } 
+  }
+
+  if( orderIdx[nodeId].size > N_KEY_PER_NODE ){
+    adjustBTree( root, orderIdx, orderIdxIter, nodeId );
+  }
+  return;
+}
+
+[__null] void adjustBTree( const uint64_t& root, mace::vector<Order_Index_Node>& orderIdx, uint64_t& orderIdxIter, const uint64_t& nodeId ) {
+  ADD_SELECTORS("SiloDatabaseServer");
+
+  Order_Index_Node& node = orderIdx[nodeId];
+
+  // maceout << "To adjust Node["<< nodeId <<"] size=" << node.size << Log::endl;
+  int32_t p_node_id = node.p_node;
+
+  if(  p_node_id < 0 ) {
+    ASSERT( root == nodeId );
+    // maceout << "Split root Node["<< nodeId <<"]!" << Log::endl;
+    EntryArray& keys = node.keys;
+    uint32_t mid = node.size / 2;
+
+    EntryArray l_keys;
+    EntryArray r_keys;
+
+    uint32_t l_iter = 0;
+    uint32_t r_iter = 0;
+    
+    Order_Index_Entry mid_entry;
+
+    uint32_t new_l_node_id = orderIdxIter;
+    uint32_t new_r_node_id = new_l_node_id + 1;
+
+    for(uint32_t i=0; i<node.size; i++ ){
+      Order_Index_Entry entry( keys[i].o_id, keys[i].c_id, keys[i].l_node, keys[i].r_node );
+      if( i<mid ) {
+        if( i == mid-1 ) {
+          entry.r_node = keys[i+1].l_node;
+        }
+        l_keys[l_iter++] = entry;
+      } else if( i == mid ) {
+        mid_entry.o_id = keys[mid].o_id;
+        mid_entry.c_id = keys[mid].c_id;
+        mid_entry.l_node = new_l_node_id;
+        mid_entry.r_node = new_r_node_id;
+      } else {
+        r_keys[r_iter++] = entry;
+      }
+    }
+    
+    keys[0] = mid_entry;
+    node.size = 1;
+
+    Order_Index_Node new_l_node( nodeId, l_keys, l_iter );
+    Order_Index_Node new_r_node( nodeId, r_keys, r_iter );
+    if( orderIdxIter >= orderIdx.size() ){
+      uint64_t new_size = orderIdx.size() + 10;
+      orderIdx.resize( new_size );
+    }
+    orderIdx[orderIdxIter++] = new_l_node;
+    if( orderIdxIter >= orderIdx.size() ){
+      uint64_t new_size = orderIdx.size() + 10;
+      orderIdx.resize( new_size );
+    }
+    orderIdx[orderIdxIter++] = new_r_node;
+    // maceout << "Create New Node["<< new_l_node <<"] and Node["<< new_r_node <<"]!" << Log::endl;
+
+    //Order_Index_Node& new_node = orderIdx[nodeId];
+    //maceout << "After adjust Node["<< nodeId <<"] " << new_node << Log::endl;
+    return;
+  }
+
+  Order_Index_Node& p_node = orderIdx[node.p_node];
+  EntryArray& p_keys = p_node.keys;
+
+  int32_t l_sibling_id = -1;
+  int32_t r_sibling_id = -1;
+
+  int r_pos = -1;
+  int l_pos = -1;
+
+  int pos = -1;
+  for(uint32_t i=0; i<p_node.size; i++) {
+    if( p_keys[i].l_node == (int)nodeId ){
+      pos = i;
+      if(i>0) {
+        l_sibling_id = p_keys[i-1].l_node;
+        l_pos = i - 1;
+      }
+
+      if( i == p_node.size-1 ) {
+        r_sibling_id = p_keys[i].r_node;
+        r_pos = i;
+      } else {
+        r_sibling_id = p_keys[i+1].l_node;
+        r_pos = i;
+      }
+      break;
+    } else if( i==p_node.size-1 && p_keys[i].r_node == (int)nodeId ) {
+      l_sibling_id = p_keys[i].l_node;
+      l_pos = i;
+      pos = i;
+      break;
+    }
+  }
+        
+  if( l_sibling_id > 0 ) {
+    Order_Index_Node& l_node = orderIdx[l_sibling_id];
+    EntryArray& l_keys = l_node.keys;
+    if( l_node.size < N_KEY_PER_NODE ) {
+      // maceout << "Move entry from Node["<< nodeId <<"] to Node["<< l_sibling_id <<"]!" << Log::endl;
+      EntryArray& keys = node.keys;
+      Order_Index_Entry move_entry = keys[0];
+      node.size = removeEntryFromArray( keys, node.size, 0 );
+      
+      Order_Index_Entry move_p_entry = p_keys[l_pos];
+
+      int32_t tmp = move_entry.l_node;
+      move_entry.l_node = move_p_entry.l_node;
+      move_entry.r_node = move_p_entry.r_node;
+
+      move_p_entry.l_node = l_keys[ l_node.size-1 ].r_node;
+      l_keys[ l_node.size-1 ].r_node = -1;
+      move_p_entry.r_node = tmp;
+
+      p_keys[l_pos] = move_entry;
+      l_keys[l_node.size++] = move_p_entry;
+      return;
+    }
+  }
+  
+  if( r_sibling_id > 0 ) {
+    Order_Index_Node& r_node = orderIdx[r_sibling_id];
+    EntryArray& r_keys = r_node.keys;
+    if( r_node.size < N_KEY_PER_NODE ) {
+      // maceout << "Move entry from Node["<< nodeId <<"] to Node["<< r_sibling_id <<"]!" << Log::endl;
+      EntryArray& keys = node.keys;
+      Order_Index_Entry move_entry = keys[node.size-1];
+      node.size --;
+      
+      keys[node.size-1].r_node = move_entry.l_node;
+      int32_t tmp = move_entry.r_node;
+      
+      Order_Index_Entry move_p_entry = p_keys[r_pos];
+      move_entry.l_node = move_p_entry.l_node;
+      move_entry.r_node = move_p_entry.r_node;
+
+      move_p_entry.l_node = tmp;
+
+      p_keys[r_pos] = move_entry;
+      r_node.size = insertEntryToArray( r_keys, r_node.size, move_p_entry, 0 );
+      return;
+    }
+  }
+
+  // maceout << "Split Node["<< nodeId <<"]!" << Log::endl;
+  EntryArray& keys = node.keys;
+  uint32_t mid = node.size / 2;
+
+  EntryArray l_keys;
+  EntryArray r_keys;
+
+  uint32_t l_iter = 0;
+  uint32_t r_iter = 0;
+  
+  Order_Index_Entry mid_entry;
+
+  uint32_t new_r_node = orderIdxIter;
+  
+  for(uint32_t i=0; i<node.size; i++ ){
+    Order_Index_Entry entry( keys[i].o_id, keys[i].c_id, keys[i].l_node, keys[i].r_node );
+    if( i<mid ) {
+      if( i == mid-1 ) {
+        entry.r_node = keys[i+1].l_node;
+      }
+      l_keys[l_iter++] = entry;
+    } else if( i == mid ) {
+      mid_entry.o_id = keys[mid].o_id;
+      mid_entry.c_id = keys[mid].c_id;
+      mid_entry.l_node = keys[mid].l_node;
+      mid_entry.r_node = keys[mid].r_node;
+    } else {
+      r_keys[r_iter++] = entry;
+    }
+  }
+
+  if( p_keys[pos].l_node == (int)nodeId ) {
+    p_keys[pos].l_node = new_r_node;
+    mid_entry.l_node = nodeId;
+    p_node.size = insertEntryToArray( p_keys, p_node.size, mid_entry, pos );
+  } else {
+    p_keys[pos].r_node = -1;
+    mid_entry.l_node = nodeId;
+    mid_entry.r_node = new_r_node;
+    p_keys[p_node.size++] = mid_entry;
+  }
+
+  node.size = l_iter;
+  node.keys = l_keys;
+  
+  Order_Index_Node r_node( orderIdx[nodeId].p_node, r_keys, r_iter );
+  
+  if( orderIdxIter >= orderIdx.size() ){
+    uint64_t new_size = orderIdx.size() + 10;
+    orderIdx.resize( new_size );
+  }
+  orderIdx[orderIdxIter++] = r_node;
+  
+  if( orderIdx[p_node_id].size > N_KEY_PER_NODE ) {
+    adjustBTree( root, orderIdx, orderIdxIter, p_node_id );
+  }
+  return;
+}
+
+[__null] uint32_t insertEntryToArray( EntryArray& array, const uint32_t size, const Order_Index_Entry& entry, const uint32_t& pos ){
+  if( pos >= size ){
+    return size;
+  }
+
+  EntryArray new_array;
+  uint32_t new_i = 0;
+  for( uint32_t i=0; i<size; ){
+    if( new_i==pos ){
+      new_array[ new_i++ ] = entry;
+    } else {
+      new_array[ new_i++ ] = array[ i++ ];
+    }
+  }
+
+  for( uint32_t i=0; i<new_i; i++ ){
+    array[i] = new_array[i];
+  }
+
+  return new_i;
+} 
+
+[__null] uint32_t removeEntryFromArray( EntryArray& array, const uint32_t size, const uint32_t& pos ){
+  if( pos >= size ){
+    return size;
+  }
+
+  EntryArray new_array;
+  uint32_t new_i = 0;
+  for( uint32_t i=0; i<size; i++){
+    if( i != pos ){
+      new_array[new_i++] = array[i];
+    }
+  }
+
+  for( uint32_t i=0; i<new_i; i++ ){
+    array[i] = new_array[i];
+  }
+
+  return new_i;
+}
+
+} // routines
+

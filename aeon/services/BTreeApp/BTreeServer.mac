@@ -1,0 +1,1438 @@
+
+#include <stdlib.h>
+
+service BTreeServer;
+provides Null;
+
+typedefs {
+
+}
+
+services {
+  Transport t;
+}
+
+constants {
+  uint8_t READ_OP = 0;
+  uint8_t INSERT_OP = 1;
+  uint8_t DELETE_OP = 2;
+  uint8_t SCAN_OP = 3;
+
+  uint8_t REMOVE_OWNERSHIP = 1;
+  uint8_t CREATE_OWNERSHIP = 2;
+
+  uint16_t LOG_LEVEL_1 = 1;
+  uint16_t LOG_LEVEL_2 = 2;
+  uint16_t LOG_LEVEL_3 = 3;
+}
+
+constructor_parameters {
+  uint32_t MAX_NKEY_PER_NODE = 10;
+  uint32_t MIN_NKEY_PER_NODE = 5;
+  uint64_t OUTPUT_COUNT = 10;
+  
+  uint16_t LOG_LEVEL = 1;
+}
+
+#minclude "BTreeMessages.mi"
+
+auto_types {
+  KeyInfo {
+    int key;
+    uint32_t l_node;
+    uint32_t r_node;
+  }
+
+  OpInfo {
+    int key;
+    uint8_t opType;
+  }
+}
+ 
+state_variables {
+  context BTree {
+    uint32_t rootNodeId;
+  }
+
+  context BTreeNode<uint32_t nodeId> {
+    mace::vector<KeyInfo> keyInfos;
+    
+    uint32_t parentId;
+    uint32_t myNodeId;
+    bool root_flag;
+    bool leaf_flag;
+  }
+
+}
+
+
+ 
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("BTreeServer");
+    async_initBTree();
+  }
+
+  async [BTree] initBTree() [ locking = ownership ] {
+    ADD_SELECTORS("BTreeServer");
+    maceout<< "Initialize BTree!" << Log::endl;
+    rootNodeId = createNewContext("BTreeNode");
+    mace::string contextName = generateContextName("BTreeNode", rootNodeId);
+    createNewOwnership("BTree", contextName);
+    broadcast_initializeBTreeNode(rootNodeId, 0, true, true);
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("BTreeServer");
+    std::ostringstream oss;
+    oss << src <<"["<<msg.clientId<<"]";
+
+    MaceAddr commAddr = getExternalCommContextAddr( src, oss.str() );
+    maceout << "commAddr=" << commAddr << Log::endl;
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(commKey, msg.clientId) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< msg.clientId <<") from " << src << Log::endl;
+  }
+
+  upcall [BTree] deliver(const MaceKey& src, const MaceKey& dest, const SearchRequest& msg) [locking = read] {
+    ADD_SELECTORS("BTreeServer");
+    if( rootNodeId <= 0){
+      maceout <<"ERROR: rootNodeId=" << rootNodeId << Log::endl; 
+      return;
+    }
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") Search key("<< msg.key <<") on BTree!" << Log::endl;
+    }
+    mace::vector<int> min_keys;
+    mace::vector<int> max_keys;
+    mace::vector<uint32_t> nodeIds;
+    
+    broadcast_searchKeyInBTreeNode(rootNodeId, src, msg.clientId, msg.key, nodeIds, min_keys, max_keys);
+  }
+
+  upcall [BTreeNode<msg.nodeId>] deliver(const MaceKey& src, const MaceKey& dest, const CacheSearchRequest& msg) [locking = read] {
+    ADD_SELECTORS("BTreeServer");
+    
+    uint32_t nodeId = msg.nodeId;
+    int key = msg.key;
+    uint32_t clientId = msg.clientId;
+
+    mace::vector<int> min_keys;
+    mace::vector<int> max_keys;
+    mace::vector<uint32_t> nodeIds;
+
+    int min_key = 0;
+    int max_key = 0;
+
+    if( keyInfos.size() > 0 ){
+      nodeIds.push_back(nodeId);
+      min_keys.push_back( keyInfos[0].key );
+      max_keys.push_back( keyInfos[ keyInfos.size()-1].key );
+
+      min_key = keyInfos[0].key;
+      max_key = keyInfos[ keyInfos.size()-1 ].key;
+    }
+
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") Cache Search key("<< key <<") on BTreeNode("<< nodeId <<")!" << Log::endl;
+    }
+
+    if( key < min_key || key > max_key ){
+      if(LOG_LEVEL >= LOG_LEVEL_2 ){
+        maceout << "SEARCH: in BTreeNode["<< msg.nodeId <<"], key("<< msg.key <<") is not between "<< min_key <<" and "<< max_key << Log::endl;
+      }
+      async_searchKeyInBTree( src, msg.clientId, msg.key ); 
+      return;
+    }
+
+    uint32_t i;
+    uint32_t nextNodeId = 0;
+    for(i=0; i<keyInfos.size(); i++) {
+      if( keyInfos[i].key == key ) {
+        
+        replyClientSearchRequest(src, clientId, key, nodeIds, min_keys, max_keys);
+        return;
+      } else if( keyInfos[i].key > key ) {
+        nextNodeId = keyInfos[i].l_node;
+        break;
+      }
+
+      if( i+1 == keyInfos.size() && key > keyInfos[i].key ) {
+        nextNodeId = keyInfos[i].r_node;
+        break;
+      }
+    }
+
+    if( nextNodeId > 0 ) {
+      broadcast_searchKeyInBTreeNode( nextNodeId, src, clientId, key, nodeIds, min_keys, max_keys );
+    } else {
+      replyClientSearchRequest(src, clientId, key, nodeIds, min_keys, max_keys);
+      return;
+    } 
+  }
+
+  async [BTree] searchKeyInBTree( const MaceKey& src, const uint32_t& cId, const int& key ) [locking = read] {
+    ADD_SELECTORS("BTreeServer");
+    if( rootNodeId <= 0){
+      maceout <<"ERROR: rootNodeId=" << rootNodeId << Log::endl; 
+      return;
+    }
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") Search key("<< key <<") on BTree!" << Log::endl;
+    }
+
+    mace::vector<int> min_keys;
+    mace::vector<int> max_keys;
+    mace::vector<uint32_t> nodeIds;
+
+    broadcast_searchKeyInBTreeNode(rootNodeId, src, cId, key, nodeIds, min_keys, max_keys );
+  }
+
+  upcall [BTree] deliver(const MaceKey& src, const MaceKey& dest, const InsertRequest& msg) {
+    ADD_SELECTORS("BTreeServer");
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") BTree: INSERT key=" << msg.key << Log::endl;
+    }
+    async_insertKeyToBTree(src, msg.clientId, msg.key);
+  }
+
+  async [BTree] insertKeyToBTree( const MaceKey& src, const uint32_t& clientId, const int& key ) [locking = ownership] {
+    broadcast_insertKeyToBTreeNode(rootNodeId, src, clientId, key);
+  }
+
+  upcall [BTreeNode<msg.nodeId>] deliver(const MaceKey& src, const MaceKey& dest, const CacheInsertRequest& msg) {
+    ADD_SELECTORS("BTreeServer");
+    async_cacheInsertKeyToBTreeNode( msg.nodeId, msg.key, msg.clientId, src);
+  }
+
+  async [BTreeNode<nodeId>] cacheInsertKeyToBTreeNode( const uint32_t& nodeId, const int& key, const uint32_t& clientId, 
+      const MaceKey& src) [ locking = ownership ] {
+
+    ADD_SELECTORS("BTreeServer");
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") Cache Insert key("<< key <<") on BTreeNode("<< nodeId <<")!" << Log::endl;
+    }
+    int min_key = keyInfos[0].key;
+    int max_key = keyInfos[ keyInfos.size()-1 ].key;
+    if( key < min_key || key > max_key ){
+      if(LOG_LEVEL >= LOG_LEVEL_3 ){
+        maceout << "INSERT: in BTreeNode["<< nodeId <<"], key("<< key <<") is not between "<< min_key <<" and "<< max_key << Log::endl;
+      }
+      async_insertKeyToBTree( src, clientId, key ); 
+      return;
+    }
+
+    mace::vector<KeyInfo>::iterator k_iter; 
+    uint32_t nextNodeId = 0;
+    uint32_t i = 0;
+    for( k_iter = keyInfos.begin(); k_iter != keyInfos.end(); k_iter++, i++ ) {
+      if( keyInfos[i].key == key ) {
+        replyClientRequest(src, clientId, keyInfos, nodeId, key);
+        return;
+      } else if( keyInfos[i].key > key ) {
+        nextNodeId = keyInfos[i].l_node;
+        break;
+      }
+
+      if( i+1==keyInfos.size() && keyInfos[i].key < key ) {
+        nextNodeId = keyInfos[i].r_node;
+      }
+    } 
+
+    if(nextNodeId == 0) {
+      KeyInfo newKey(key, 0, 0);
+      
+      if( k_iter == keyInfos.end() ) {
+        keyInfos.push_back(newKey);
+      } else {
+        keyInfos.insert(k_iter, newKey);
+      }
+      if(LOG_LEVEL >= LOG_LEVEL_2 ){
+        maceout<< "Insert a new key("<< key <<") into BTreeNode("<< nodeId <<")! key_size="<< keyInfos.size() << Log::endl;
+      }
+      if( keyInfos.size() > MAX_NKEY_PER_NODE ) {
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "BTreeNode("<< nodeId<<") should be adjusted!"<< Log::endl;
+        }
+        if( parentId == 0 ) {
+          async_adjust(myNodeId, myNodeId);
+        } else {
+          async_adjust(parentId, myNodeId);
+        }
+      }
+      
+      replyClientRequest(src, clientId, keyInfos, nodeId, key);
+      return;
+    } else {
+      broadcast_insertKeyToBTreeNode(nextNodeId, src, clientId, key);
+    }
+  }
+
+  upcall [BTree] deliver(const MaceKey& src, const MaceKey& dest, const DeleteRequest& msg) {
+    async_cacheDeleteFromBTreeNode(rootNodeId, msg.key, msg.clientId, src);
+  }
+
+  async [BTree] deleteKeyFromBTree( const MaceKey& src, const uint32_t& clientId, const int& key ) [locking = ownership] {
+    broadcast_deleteKeyFromBTreeNode(rootNodeId, src, clientId, key);
+  }
+
+  upcall [BTreeNode<msg.nodeId>] deliver(const MaceKey& src, const MaceKey& dest, const CacheDeleteRequest& msg) {
+    async_cacheDeleteFromBTreeNode( msg.nodeId, msg.key, msg.clientId, src );
+  }
+
+  async [BTreeNode<nodeId>] cacheDeleteFromBTreeNode( const uint32_t& nodeId, const int& key, const uint32_t& clientId,
+      const MaceKey& src ) [ locking = ownership ] {
+    ADD_SELECTORS("BTreeServer");
+
+    int min_key = keyInfos[0].key;
+    int max_key = keyInfos[ keyInfos.size()-1 ].key;
+    if( key < min_key || key > max_key ){
+      if(LOG_LEVEL >= LOG_LEVEL_2 ){
+        maceout << "DELETE: in BTreeNode["<< nodeId <<"], key("<< key <<") is not between "<< min_key <<" and "<< max_key << Log::endl;
+      }
+      async_deleteKeyFromBTree( src, clientId, key ); 
+      return;
+    }
+    
+    uint32_t nextNodeId = 0;
+    mace::vector<KeyInfo>::iterator k_iter = keyInfos.begin();
+    int tempKey = 0;
+    for(; k_iter != keyInfos.end(); k_iter ++ ) {
+      tempKey = (*k_iter).key;
+      if( tempKey == key ) {
+        break;
+      } else if( tempKey > key ) {
+        nextNodeId = (*k_iter).l_node;
+        break;
+      }
+
+      if( k_iter+1 == keyInfos.end() && key > tempKey ) {
+        nextNodeId = (*k_iter).r_node;
+      } 
+    } 
+
+    if( tempKey == key ){
+      uint32_t r_node = 0;
+      uint32_t l_node = (*k_iter).l_node;
+      if( k_iter+1 == keyInfos.end() ) {
+        r_node = (*k_iter).r_node;
+      } else {
+        k_iter ++;
+        r_node = (*k_iter).l_node;
+        k_iter --;
+      }
+
+      if( r_node != 0 ) {
+        KeyInfo new_key = removeMostLeftKeyFromBTree(r_node);
+        if( new_key.key == 0 ){
+          replyClientRequest(src, clientId, keyInfos, 0, key);
+          return;
+        }
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "DeleteKey: To replace key("<< (*k_iter).key <<") with key("<< new_key.key <<") in BTreeNode("<< myNodeId <<")!" << Log::endl;
+        }
+        (*k_iter).key = new_key.key;
+      } else if( l_node != 0 ) {
+        KeyInfo new_key = removeMostRightKeyFromBTree(l_node);
+        if( new_key.key == 0 ){
+          replyClientRequest(src, clientId, keyInfos, 0, key);
+          return;
+        }
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "DeleteKey: To replace key("<< (*k_iter).key <<") with key("<< new_key.key <<") in BTreeNode("<< myNodeId <<")!" << Log::endl;
+        }
+        (*k_iter).key = new_key.key;
+      } else {
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Delete key("<< key <<") from BTreeNode("<< myNodeId <<") directly!" << Log::endl;
+        }
+        keyInfos.erase(k_iter);
+
+        if( keyInfos.size() < MIN_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "To adjust BTreeNode("<< myNodeId <<"). keyInfos=" << keyInfos << Log::endl;
+          }
+          if( parentId ==0 ) async_adjust(myNodeId, myNodeId);
+          else async_adjust(parentId, myNodeId);
+        } 
+      }
+      replyClientRequest(src, clientId, keyInfos, 0, key);
+      return;
+    }
+      
+    if( nextNodeId != 0 ) {
+      broadcast_deleteKeyFromBTreeNode(nextNodeId, src, clientId, key);
+    } else {
+      replyClientRequest(src, clientId, keyInfos, 0, key);
+      return;
+    }
+  }
+
+  async [BTreeNode<nodeId>] adjust(const uint32_t& nodeId, const uint32_t& childId) [ locking = ownership ] {
+    ADD_SELECTORS("BTreeServer");
+    if(LOG_LEVEL >= LOG_LEVEL_2 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") adjust BTreeNode("<< nodeId <<")->BTreeNode("<< childId <<")"<< Log::endl; 
+    }
+    if( nodeId == childId ){
+      // it's the root
+      if( keyInfos.size() > MAX_NKEY_PER_NODE) {
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Event("<< ThreadStructure::myEventID() <<") splits root BTreeNode("<< myNodeId <<")" << Log::endl;
+        }
+        uint32_t mid = (uint32_t)( keyInfos.size() / 2);
+        mace::vector<KeyInfo> l_node_keys;
+        mace::vector<KeyInfo> r_node_keys;
+
+        mace::vector<uint32_t> toRemoveNodeIds;
+      
+        mace::string my_contextName = generateContextName("BTreeNode", myNodeId);
+        for(uint32_t i=0; i<keyInfos.size(); i++) {
+          uint32_t nodeId = keyInfos[i].l_node;
+          if( nodeId > 0 ) {
+            toRemoveNodeIds.push_back(nodeId);
+          }
+
+          if( i+1 == keyInfos.size() ) {
+            nodeId = keyInfos[i].r_node;
+            if( nodeId > 0 ) {
+              toRemoveNodeIds.push_back(nodeId);
+            }
+          }
+
+          if( i<mid ){
+            l_node_keys.push_back(keyInfos[i]);
+          } else if( i==mid ){
+            KeyInfo& tmp_key = l_node_keys[ l_node_keys.size()-1 ];
+            tmp_key.r_node = keyInfos[i].l_node;
+          } else if( i>mid ){
+            r_node_keys.push_back(keyInfos[i]);
+          }
+        }
+
+        KeyInfo new_key = keyInfos[mid];
+
+        keyInfos.clear();
+
+        for( uint32_t i=0; i<toRemoveNodeIds.size(); i++ ){
+          lockBTreeNode( toRemoveNodeIds[i] );
+        }
+
+        uint32_t l_node_id = createNewContext("BTreeNode");
+        uint32_t r_node_id = createNewContext("BTreeNode");
+
+        mace::string l_contextName = generateContextName("BTreeNode", l_node_id);
+        mace::string r_contextName = generateContextName("BTreeNode", r_node_id);
+        
+        createNewOwnership(my_contextName, l_contextName);
+        createNewOwnership(my_contextName, r_contextName);
+
+        for( uint32_t i=0; i<toRemoveNodeIds.size(); i++ ){
+          changePCRelation(myNodeId, toRemoveNodeIds[i], REMOVE_OWNERSHIP);
+        }
+
+        initializeBTreeNode2(l_node_id, myNodeId, false, l_node_keys);
+        initializeBTreeNode2(r_node_id, myNodeId, false, r_node_keys);
+
+        new_key.l_node = l_node_id;
+        new_key.r_node = r_node_id;
+        keyInfos.push_back(new_key);
+        leaf_flag = false;
+        
+      } else if( keyInfos.size() < MIN_NKEY_PER_NODE ) {
+        //maceout << "Something wrong!" << Log::endl;
+      }
+    } else {
+      if( !checkParentChild(keyInfos, childId) ) {
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Event("<< ThreadStructure::myEventID() <<") Now BTreeNode("<< myNodeId <<") is not the parent of BTreeNode("<< childId <<")!" << Log::endl;
+        }
+        return;
+      }
+
+      uint32_t l_sibling_id = 0;
+      uint32_t r_sibling_id = 0;
+
+      int l_pos = -1;
+      int r_pos = -1;
+      int child_pos = -1;
+        
+      for(uint32_t i=0; i<keyInfos.size(); i++) {
+        if( keyInfos[i].l_node == childId ){
+          child_pos = i;
+          if( i == keyInfos.size()-1 ) {
+            r_sibling_id = keyInfos[i].r_node;
+            r_pos = i;
+          } else {
+            r_sibling_id = keyInfos[i+1].l_node;
+            r_pos = i+1;
+          }
+          break;
+        } else if( i==keyInfos.size()-1 && keyInfos[i].r_node == childId ) {
+          child_pos = i;
+          l_pos = i;
+          l_sibling_id = keyInfos[i].l_node;
+          break;
+        }
+
+        l_sibling_id = keyInfos[i].l_node;
+        l_pos = i;
+      }
+
+      if(LOG_LEVEL >= LOG_LEVEL_2 ){
+        maceout << "Event("<< ThreadStructure::myEventID() <<") Adjust: l_sibling_id=" << l_sibling_id << ", r_sibling_id=" << r_sibling_id 
+        << Log::endl;
+      }
+
+      if( getKeySize(childId) > MAX_NKEY_PER_NODE ) {
+        if( l_sibling_id > 0 && getKeySize(l_sibling_id) < MAX_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Event("<< ThreadStructure::myEventID() <<") Before movement BTreeNode("<< myNodeId<<") keyInfos="<< keyInfos << Log::endl;
+          }
+          KeyInfo new_key = removeMostLeftKey(childId);
+          
+          int tmp = keyInfos[l_pos].key; 
+          keyInfos[l_pos].key = new_key.key;
+          new_key.key = tmp;
+          new_key.r_node = new_key.l_node;
+          new_key.l_node = 0;
+          
+          addMostRightKey(l_sibling_id, new_key);
+
+
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Event("<< ThreadStructure::myEventID() <<") Move one key from BTreeNode("<< childId <<") to left sibling BTreeNode("<<l_sibling_id<<"). BTreeNode("<< myNodeId <<")   keyInfos="<< keyInfos << Log::endl;
+          }
+          return; 
+        }
+        
+        if( r_sibling_id > 0 &&  getKeySize(r_sibling_id) < MAX_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Event("<< ThreadStructure::myEventID() <<") Before movement BTreeNode("<< myNodeId<<") keyInfos="<< keyInfos << Log::endl;
+          }
+          KeyInfo new_key = removeMostRightKey(childId);
+          int tmp = keyInfos[child_pos].key; 
+          keyInfos[child_pos].key = new_key.key;
+          new_key.key = tmp;
+          new_key.l_node = new_key.r_node;
+          new_key.r_node = 0;
+
+          addMostLeftKey(r_sibling_id, new_key);
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Event("<< ThreadStructure::myEventID() <<") Move one key from BTreeNode("<< childId <<") to right sibling BTreeNode("
+            <<r_sibling_id<<"). BTreeNode("<< myNodeId <<")   keyInfos="<< keyInfos << Log::endl;
+          }
+          return;
+        }
+
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Event("<< ThreadStructure::myEventID() <<") Before split BTreeNode("<< childId <<"), BTreeNode("<< myNodeId<<") keyInfos="<< keyInfos << Log::endl;
+        }
+        mace::vector<KeyInfo> new_l_keys = splitLeftKeys(childId);
+        
+        KeyInfo new_key = new_l_keys.back();
+        new_l_keys.pop_back();
+        new_l_keys[ new_l_keys.size()-1 ].r_node = new_key.l_node;
+        new_key.l_node = 0;
+        new_key.r_node = 0;
+
+        uint32_t new_l_id = createNewContext("BTreeNode");
+        mace::string my_contextName = generateContextName("BTreeNode", myNodeId);
+        mace::string l_contextName = generateContextName("BTreeNode", new_l_id);
+        createNewOwnership( my_contextName, l_contextName);
+
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Event("<< ThreadStructure::myEventID() <<") initialize BTreeNode("<< new_l_id <<")!" << Log::endl;
+        }
+        initializeBTreeNode2(new_l_id, myNodeId, false, new_l_keys);
+
+        new_key.l_node = new_l_id;
+        
+        for( mace::vector<KeyInfo>::iterator iter=keyInfos.begin(); iter!=keyInfos.end(); iter++ ) {
+          KeyInfo& keyInfo = *iter;
+          if( keyInfo.l_node == childId ) {
+            keyInfos.insert( iter, new_key );
+            break;
+          }
+
+          if( iter+1 == keyInfos.end() && keyInfo.r_node == childId ){
+            keyInfo.r_node = 0;
+            new_key.r_node = childId;
+            new_key.l_node = new_l_id;
+            keyInfos.push_back(new_key);
+            break;
+          }
+        }
+
+        if( keyInfos.size() > MAX_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Event("<< ThreadStructure::myEventID() <<") To further adjust BTreeNode("<< myNodeId<<") key_size=" << keyInfos.size() << Log::endl;
+          }
+          if( parentId == 0){
+            async_adjust(myNodeId, myNodeId);
+          } else {
+            async_adjust(parentId, myNodeId);
+          }
+        }
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Event("<< ThreadStructure::myEventID() <<") After split BTreeNode("<< childId <<"), BTreeNode("<< myNodeId<<") keyInfos="<< keyInfos << Log::endl;
+        }
+      } else if( getKeySize(childId) < MIN_NKEY_PER_NODE ){
+        // move one key from left sibling node
+        if( l_sibling_id > 0 && getKeySize(l_sibling_id) > MIN_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Before movement BTreeNode("<< myNodeId<<") keyInfos="<< keyInfos << Log::endl;
+          }
+          KeyInfo new_key = removeMostRightKey(l_sibling_id);
+          int tmp = keyInfos[l_pos].key; 
+          keyInfos[l_pos].key = new_key.key;
+          new_key.key = tmp;
+          new_key.l_node = new_key.r_node;
+          new_key.r_node = 0;
+          addMostLeftKey(childId, new_key);
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Move one key from BTreeNode("<< l_sibling_id <<") to right sibling BTreeNode("<<childId<<"). BTreeNode("<< myNodeId <<")   keyInfos="<< keyInfos << Log::endl;
+          }
+          return; 
+        }
+        
+        // move one key from right sibling node
+        if( r_sibling_id > 0 && getKeySize(r_sibling_id) > MIN_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Before movement BTreeNode("<< myNodeId<<") keyInfos="<< keyInfos << Log::endl;
+          }
+          KeyInfo new_key = removeMostLeftKey(r_sibling_id);
+          int tmp = keyInfos[child_pos].key; 
+          keyInfos[child_pos].key = new_key.key;
+          new_key.key = tmp;
+          new_key.r_node = new_key.l_node;
+          new_key.l_node = 0;
+          addMostRightKey(childId, new_key);
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "Move one key from BTreeNode("<< r_sibling_id <<") to left sibling BTreeNode("<<childId<<"). BTreeNode("<< myNodeId <<")   keyInfos="<< keyInfos << Log::endl;
+          }
+          return;
+        }
+  
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Before concatenate BTreeNode("<< myNodeId <<"). keyInfos="<< keyInfos << Log::endl;
+        }
+        if( keyInfos.size() == 1 ) {
+          uint32_t l_node_id = keyInfos[0].l_node;
+          uint32_t r_node_id = keyInfos[0].r_node;
+          
+          keyInfos[0].l_node = 0;
+          keyInfos[0].r_node = 0;          
+
+          mace::vector<KeyInfo> l_keyInfos;
+          mace::vector<KeyInfo> r_keyInfos;
+
+          if( l_node_id > 0 ){
+            l_keyInfos = getKeys( l_node_id );
+          }
+          if( r_node_id > 0 ){
+            r_keyInfos = getKeys( r_node_id );
+          }
+
+          mace::vector<KeyInfo> new_key_infos;
+          mace::vector<uint32_t> toAddChildIds;
+
+          for( uint32_t i=0; i<l_keyInfos.size(); i++ ) {
+            if( l_keyInfos[i].l_node > 0 ){
+              toAddChildIds.push_back(l_keyInfos[i].l_node);
+            }
+            if( i==l_keyInfos.size()-1 ) {
+              if( l_keyInfos[i].r_node > 0 ) {
+                toAddChildIds.push_back(l_keyInfos[i].r_node); 
+              }
+              keyInfos[0].l_node = l_keyInfos[i].r_node;
+              l_keyInfos[i].r_node = 0;
+            }
+            new_key_infos.push_back(l_keyInfos[i]);
+          }
+          new_key_infos.push_back(keyInfos[0]);
+          for( uint32_t i=0; i<r_keyInfos.size(); i++ ) {
+            if( r_keyInfos[i].l_node > 0 ){
+              toAddChildIds.push_back(r_keyInfos[i].l_node);
+            }
+            if( i==r_keyInfos.size()-1 && r_keyInfos[i].r_node > 0 ) {
+              toAddChildIds.push_back(r_keyInfos[i].r_node); 
+            }
+            new_key_infos.push_back(r_keyInfos[i]);
+          }
+
+          addChildNodes(myNodeId, toAddChildIds);
+          if( l_node_id>0 ){
+            removeAllChildren(l_node_id);
+          }
+          if( r_node_id>0 ) {
+            removeAllChildren(r_node_id);
+          }
+          if( l_node_id>0 ){
+            changePCRelation(myNodeId, l_node_id, REMOVE_OWNERSHIP);
+          }
+          if( r_node_id>0 ) {
+            changePCRelation(myNodeId, r_node_id, REMOVE_OWNERSHIP);
+          }
+
+          keyInfos = new_key_infos;
+          return;
+        } else {
+          uint32_t l_node_id = 0;
+          uint32_t r_node_id = 0;
+
+          KeyInfo pKeyInfo;
+
+          if( l_sibling_id > 0 ){
+            l_node_id = l_sibling_id;
+            r_node_id = childId;
+            pKeyInfo = keyInfos[l_pos];
+          } else if( r_sibling_id > 0 ){
+            l_node_id = childId;
+            r_node_id = r_sibling_id;
+            pKeyInfo = keyInfos[child_pos];
+          } else { // no left & right sibling
+            if( keyInfos[child_pos].r_node == childId ) {
+              r_node_id = childId;
+            } else {
+              l_node_id = childId;
+            }
+            pKeyInfo = keyInfos[child_pos];
+          }
+
+          ASSERT( l_node_id>0 || r_node_id>0 );
+          pKeyInfo.l_node = 0;
+          pKeyInfo.r_node = 0;
+
+          mace::vector<KeyInfo> l_keyInfos;
+          mace::vector<KeyInfo> r_keyInfos;
+
+          if( l_node_id > 0 ){
+            l_keyInfos = getKeys( l_node_id );
+          }
+          if( r_node_id > 0 ){
+            r_keyInfos = getKeys( r_node_id );
+          }
+
+          mace::vector<KeyInfo> new_key_infos;
+          
+          for( uint32_t i=0; i<l_keyInfos.size(); i++ ) {
+            if( i==l_keyInfos.size()-1 ) {
+              pKeyInfo.l_node = l_keyInfos[i].r_node;
+              l_keyInfos[i].r_node = 0;
+            }
+            new_key_infos.push_back(l_keyInfos[i]);
+          }
+          new_key_infos.push_back(pKeyInfo);
+          for( uint32_t i=0; i<r_keyInfos.size(); i++ ) {
+            new_key_infos.push_back(r_keyInfos[i]);
+          }
+
+          for( mace::vector<KeyInfo>::iterator iter=keyInfos.begin(); iter!=keyInfos.end(); iter++ ) {
+            if( (*iter).key == pKeyInfo.key ) {
+              if( iter+1 == keyInfos.end() ) {
+                if( r_node_id > 0 ) {
+                  mace::vector<KeyInfo>::iterator cur_iter = iter-1;
+                  (*cur_iter).r_node = r_node_id; 
+                } else {
+                  ASSERT( l_node_id > 0);
+                  mace::vector<KeyInfo>::iterator cur_iter = iter-1;
+                  (*cur_iter).r_node = l_node_id;
+                }
+              } else {
+                if( r_node_id == 0 ) {
+                  ASSERT( l_node_id > 0 );
+                  mace::vector<KeyInfo>::iterator cur_iter = iter+1;
+                  (*cur_iter).l_node = l_node_id;
+                }
+              }
+              keyInfos.erase(iter);
+              break;
+            }
+          }
+
+          if( r_node_id > 0 ){
+            updateKeyInfos(r_node_id, new_key_infos);
+            if( l_node_id > 0 ) {
+              removeAllChildren( l_node_id );
+              changePCRelation(myNodeId, l_node_id, REMOVE_OWNERSHIP);
+            }
+          } else if( l_node_id > 0 ){
+            updateKeyInfos(l_node_id, new_key_infos);
+          }
+        }
+
+      } // < MIN and > MAX
+    } // is root
+   
+  } //async adjust 
+
+  broadcast [BTreeNode<nodeId>] initializeBTreeNode( const uint32_t& nodeId, const uint32_t& pNodeId, const bool& r_flag, 
+      const bool&  l_flag ) {
+    
+    myNodeId = nodeId;
+    keyInfos.clear();
+    
+    parentId = pNodeId;
+    root_flag = r_flag;
+    leaf_flag = l_flag;
+  }
+
+  broadcast [BTreeNode<nodeId>] searchKeyInBTreeNode( const uint32_t& nodeId, const MaceKey& src, const uint32_t& clientId, 
+      const int& key, const mace::vector<uint32_t>& nIds, const mace::vector<int>& minkeys, const mace::vector<int>& maxkeys) [locking = read] {
+    ADD_SELECTORS("BTreeServer");
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") BTreeNode("<< nodeId <<"): SEARCH key=" << key <<Log::endl;
+    }
+
+    mace::vector<int> min_keys = minkeys;
+    mace::vector<int> max_keys = maxkeys;
+    mace::vector<uint32_t> nodeIds = nIds;
+
+    if( keyInfos.size() > 0 ){
+      nodeIds.push_back(nodeId);
+      min_keys.push_back( keyInfos[0].key );
+      max_keys.push_back( keyInfos[ keyInfos.size()-1].key );
+    } 
+
+    uint32_t i;
+    uint32_t nextNodeId = 0;
+    for(i=0; i<keyInfos.size(); i++) {
+      if( keyInfos[i].key == key ) {
+        replyClientSearchRequest(src, clientId, key, nodeIds, min_keys, max_keys);
+        return;
+      } else if( keyInfos[i].key > key ) {
+        nextNodeId = keyInfos[i].l_node;
+        break;
+      }
+
+      if( i+1 == keyInfos.size() && key > keyInfos[i].key ) {
+        nextNodeId = keyInfos[i].r_node;
+        break;
+      }
+    }
+
+    if( nextNodeId > 0 ) {
+      if(LOG_LEVEL >= LOG_LEVEL_3 ){
+        maceout << "In BTreeNode("<< nodeId <<"): SEARCH key=" << key <<" nextNodeId=" << nextNodeId <<Log::endl;
+      }
+      broadcast_searchKeyInBTreeNode( nextNodeId, src, clientId, key, nodeIds, min_keys, max_keys );
+    } else {
+      replyClientSearchRequest(src, clientId, key, nodeIds, min_keys, max_keys);
+      return;
+    }
+  }
+
+  broadcast [BTreeNode<nodeId>] insertKeyToBTreeNode( const uint32_t& nodeId, const MaceKey& src, const uint32_t& clientId, const int& key) {
+    ADD_SELECTORS("BTreeServer");
+    if(LOG_LEVEL >= LOG_LEVEL_3 ){
+      maceout << "Event("<< ThreadStructure::myEventID() <<") BTreeNode("<< nodeId <<"): INSERT key=" << key <<Log::endl;
+    }
+    mace::vector<KeyInfo>::iterator k_iter; 
+    uint32_t nextNodeId = 0;
+    uint32_t i = 0;
+    for( k_iter = keyInfos.begin(); k_iter != keyInfos.end(); k_iter++, i++ ) {
+      if( keyInfos[i].key == key ) {
+        replyClientRequest(src, clientId, keyInfos, nodeId, key);
+        return;
+      } else if( keyInfos[i].key > key ) {
+        nextNodeId = keyInfos[i].l_node;
+        break;
+      }
+
+      if( i+1==keyInfos.size() && keyInfos[i].key < key ) {
+        nextNodeId = keyInfos[i].r_node;
+      }
+    } 
+
+    if(nextNodeId == 0) {
+      KeyInfo newKey(key, 0, 0);
+      
+      if( k_iter == keyInfos.end() ) {
+        if( keyInfos.size() > 0 ){
+          KeyInfo& lastKey = keyInfos[ keyInfos.size()-1 ];
+          newKey.l_node = lastKey.r_node;
+          lastKey.r_node = 0;
+        }
+        keyInfos.push_back(newKey);
+      } else {
+        keyInfos.insert(k_iter, newKey);
+      }
+      if(LOG_LEVEL >= LOG_LEVEL_2 ){
+        maceout<< "Insert a new key("<< key <<") into BTreeNode("<< nodeId <<") with size("<< keyInfos.size() <<") keyInfos="<< keyInfos << Log::endl;
+      }
+      if( keyInfos.size() > MAX_NKEY_PER_NODE ) {
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "BTreeNode("<< nodeId<<") should be adjusted!"<< Log::endl;
+        }
+        if( parentId == 0 ) {
+          async_adjust(myNodeId, myNodeId);
+        } else {
+          async_adjust(parentId, myNodeId);
+        }
+      }
+      
+      replyClientRequest(src, clientId, keyInfos, nodeId, key);
+      return;
+    } else {
+      if(LOG_LEVEL >= LOG_LEVEL_3 ){
+        maceout << "In BTreeNode("<< nodeId <<"): INSERT key=" << key <<" nextNodeId=" << nextNodeId <<Log::endl;
+      }
+      broadcast_insertKeyToBTreeNode(nextNodeId, src, clientId, key);
+    }
+  }
+
+  broadcast [BTreeNode<nodeId>] deleteKeyFromBTreeNode( const uint32_t& nodeId, const MaceKey& src, const uint32_t& clientId, const int& key ) {
+    ADD_SELECTORS("BTreeServer");
+    
+    uint32_t nextNodeId = 0;
+    mace::vector<KeyInfo>::iterator k_iter = keyInfos.begin();
+    int tempKey = 0;
+    for(; k_iter != keyInfos.end(); k_iter ++ ) {
+      tempKey = (*k_iter).key;
+      if( tempKey == key ) {
+        break;
+      } else if( tempKey > key ) {
+        nextNodeId = (*k_iter).l_node;
+        break;
+      }
+
+      if( k_iter+1 == keyInfos.end() && key > tempKey ) {
+        nextNodeId = (*k_iter).r_node;
+      } 
+    } 
+
+    if( tempKey == key ){
+      uint32_t r_node = 0;
+      uint32_t l_node = (*k_iter).l_node;
+      if( k_iter+1 == keyInfos.end() ) {
+        r_node = (*k_iter).r_node;
+      } else {
+        k_iter ++;
+        r_node = (*k_iter).l_node;
+        k_iter --;
+      }
+
+      if( r_node != 0 ) {
+        KeyInfo new_key = removeMostLeftKeyFromBTree(r_node);
+        if( new_key.key == 0 ){
+          replyClientRequest(src, clientId, keyInfos, 0, key);
+          return;
+        }
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "DeleteKey: To replace key("<< (*k_iter).key <<") with key("<< new_key.key <<") in BTreeNode("<< myNodeId <<")!" << Log::endl;
+        }
+        (*k_iter).key = new_key.key;
+      } else if( l_node != 0 ) {
+        KeyInfo new_key = removeMostRightKeyFromBTree(l_node);
+        if( new_key.key == 0 ){
+          replyClientRequest(src, clientId, keyInfos, 0, key);
+          return;
+        }
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "DeleteKey: To replace key("<< (*k_iter).key <<") with key("<< new_key.key <<") in BTreeNode("<< myNodeId <<")!" << Log::endl;
+        }
+        (*k_iter).key = new_key.key;
+      } else {
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "Delete key("<< key <<") from BTreeNode("<< myNodeId <<") directly!" << Log::endl;
+        }
+        keyInfos.erase(k_iter);
+
+        if( keyInfos.size() < MIN_NKEY_PER_NODE ) {
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "To adjust BTreeNode("<< myNodeId <<"). keyInfos=" << keyInfos << Log::endl;
+          }
+          if( parentId ==0 ) async_adjust(myNodeId, myNodeId);
+          else async_adjust(parentId, myNodeId);
+        } 
+      }
+      replyClientRequest(src, clientId, keyInfos, 0, key);
+      return;
+    }
+      
+    if( nextNodeId != 0 ) {
+      broadcast_deleteKeyFromBTreeNode(nextNodeId, src, clientId, key);
+    } else {
+      replyClientRequest(src, clientId, keyInfos, 0, key);
+      return;
+    }
+  }
+
+}
+
+routines {
+
+[__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+  std::ostringstream oss;
+  oss << ctxName <<"["<<id<<"]";
+  return oss.str();
+}
+
+  
+
+[BTreeNode<nodeId>] void initializeBTreeNode2( const uint32_t& nodeId, const uint32_t& pNodeId, const bool& r_flag, 
+    const mace::vector<KeyInfo>& k_infos ) {
+  
+  ADD_SELECTORS("BTreeServer");
+  myNodeId = nodeId;
+  keyInfos.clear();
+    
+  parentId = pNodeId;
+  root_flag = r_flag;
+  leaf_flag = true;
+
+  keyInfos = k_infos;
+
+  mace::vector<uint32_t> childNodeIds = getValidChildIDs( keyInfos );
+
+  for( uint32_t i=0; i<childNodeIds.size(); i++ ){
+    changePCRelation(nodeId, childNodeIds[i], CREATE_OWNERSHIP);
+  }  
+
+  for( uint32_t i=0; i<childNodeIds.size(); i++ ){
+    setParentNodeId(childNodeIds[i], myNodeId);
+  }
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "initializeBTreeNode2 BTreeNode("<< myNodeId <<") keyInfos=" <<keyInfos<< Log::endl;
+  }
+}
+
+[BTreeNode<nodeId>] uint32_t getKeySize( const uint32_t& nodeId) {
+  return keyInfos.size();
+}
+
+[BTreeNode<nodeId>] KeyInfo removeMostRightKeyFromBTree(const uint32_t& nodeId) {
+  ADD_SELECTORS("BTreeServer");
+  if( keyInfos.size() > 0 ) {
+    mace::vector<KeyInfo>::iterator iter = keyInfos.begin();
+    while( iter+1 != keyInfos.end() ) {
+      iter ++;
+    }
+
+    KeyInfo keyInfo = *iter;
+    uint32_t r_node = keyInfo.r_node;
+    uint32_t l_node = keyInfo.l_node;
+    if( r_node == 0 ) {
+      if( keyInfos.size() == 1 ) {
+        if( l_node != 0 ) {
+          KeyInfo newKeyInfo = removeMostRightKeyFromBTree(l_node);
+          if( newKeyInfo.key == 0 ) {
+            return newKeyInfo;
+          }
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "removeMostRightKeyFromBTree: To replace key("<< keyInfo.key <<") with key("<< newKeyInfo.key <<") in BTreeNode("<< myNodeId <<")!" << Log::endl;
+          }
+          (*iter).key = newKeyInfo.key;
+          return keyInfo; 
+        } else { // l_node = r_node = 0
+          keyInfos.erase(iter);
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "removeMostRightKeyFromBTree: To remove key("<< keyInfo.key <<") from BTreeNode("<< myNodeId <<")!" << Log::endl;
+          }
+        }
+      } else {
+        KeyInfo& l_sibling_keyInfo = keyInfos[ keyInfos.size() - 2 ];
+        l_sibling_keyInfo.r_node = keyInfo.l_node;
+        keyInfos.erase(iter);
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "removeMostRightKeyFromBTree: To remove key("<< keyInfo.key <<") from BTreeNode("<< myNodeId <<")!" << Log::endl;
+        }
+      }
+    } else {
+      return removeMostRightKeyFromBTree(r_node);
+    }
+    
+    if( keyInfos.size() < MIN_NKEY_PER_NODE ) {
+      if( parentId ==0) async_adjust(myNodeId, myNodeId);
+      else async_adjust(parentId, myNodeId);
+    }
+    return keyInfo;
+  } else {
+    KeyInfo keyInfo(0, 0, 0);
+    return keyInfo;
+  }
+}
+
+[BTreeNode<nodeId>] KeyInfo removeMostLeftKeyFromBTree(const uint32_t& nodeId) {
+  ADD_SELECTORS("BTreeServer");
+  if( keyInfos.size() > 0 ) {
+    mace::vector<KeyInfo>::iterator iter = keyInfos.begin();
+    KeyInfo keyInfo = *iter;
+    uint32_t r_node = 0;
+    uint32_t l_node = keyInfo.l_node;
+
+    if( keyInfos.size() == 1 ){
+      r_node = keyInfo.r_node;
+    } else{
+      r_node = keyInfos[1].l_node;
+    }
+
+    if( l_node == 0 ) { // no left sub-tree
+      if( keyInfos.size() == 1 ) { 
+        if( r_node != 0 ) {
+          KeyInfo newKeyInfo = removeMostLeftKeyFromBTree(r_node);
+          if( newKeyInfo.key == 0 ){
+            return newKeyInfo;
+          }
+          (*iter).key = newKeyInfo.key;
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "removeMostLeftKeyFromBTree: To replace key("<< keyInfo.key <<") with key("<< newKeyInfo.key <<") in BTreeNode("<< myNodeId <<")!" << Log::endl;
+          }
+        } else {
+          keyInfos.erase(iter);
+          if(LOG_LEVEL >= LOG_LEVEL_2 ){
+            maceout << "removeMostLeftKeyFromBTree: To remove key("<< keyInfo.key <<") from BTreeNode("<< myNodeId <<")!" << Log::endl;
+          }
+        }
+      } else {
+        keyInfos.erase(iter);
+        if(LOG_LEVEL >= LOG_LEVEL_2 ){
+          maceout << "removeMostLeftKeyFromBTree: To remove key("<< keyInfo.key <<") from BTreeNode("<< myNodeId <<")!" << Log::endl;
+        }
+      }
+    } else {
+      return removeMostLeftKeyFromBTree(l_node);
+    }
+    
+    if( keyInfos.size() < MIN_NKEY_PER_NODE ) {
+      if(LOG_LEVEL >= LOG_LEVEL_2 ){
+        maceout << "To adjust BTreeNode("<< myNodeId <<") keyInfos=" << keyInfos << Log::endl;
+      }
+      if( parentId ==0) async_adjust(myNodeId, myNodeId);
+      else async_adjust(parentId, myNodeId);
+    }
+    return keyInfo;
+  } else {
+    KeyInfo keyInfo(0, 0, 0);
+    return keyInfo;
+  }
+}
+
+
+[BTreeNode<nodeId>] KeyInfo removeMostLeftKey(const uint32_t& nodeId) {
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") Before removeMostLeftKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+  KeyInfo keyInfo = keyInfos[0];
+  keyInfos.erase( keyInfos.begin() );
+
+  
+  uint32_t nId = keyInfo.l_node;
+  if( nId > 0 ) {
+    lockBTreeNode(nId);
+    changePCRelation(nodeId, nId, REMOVE_OWNERSHIP);
+  }
+  
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") After removeMostLeftKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+  return keyInfo;
+}
+
+[BTreeNode<nodeId>] void addMostRightKey(const uint32_t& nodeId, const KeyInfo& newKeyInfo) {
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") Before addMostRightKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos 
+    << Log::endl;
+  }
+  KeyInfo& keyInfo = keyInfos[keyInfos.size()-1];
+  KeyInfo newKey = newKeyInfo;
+  newKey.l_node = keyInfo.r_node;
+  keyInfo.r_node = 0;
+  keyInfos.push_back(newKey);
+
+  
+  uint32_t nId = newKeyInfo.r_node;
+  if( nId > 0 ) {
+    changePCRelation(nodeId, nId, CREATE_OWNERSHIP);
+    setParentNodeId( nId, myNodeId);
+  }
+  
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") After addMostRightKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+}
+
+[BTreeNode<nodeId>] KeyInfo removeMostRightKey(const uint32_t& nodeId) {
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Before removeMostRightKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+  KeyInfo rKeyInfo = keyInfos[keyInfos.size()-1];
+  keyInfos.pop_back();
+  KeyInfo& keyInfo = keyInfos[keyInfos.size()-1];
+  keyInfo.r_node = rKeyInfo.l_node;
+  rKeyInfo.l_node = 0;
+
+  
+  uint32_t nId = rKeyInfo.r_node;
+  if( nId > 0 ) {
+    lockBTreeNode(nId);
+    changePCRelation(nodeId, nId, REMOVE_OWNERSHIP);
+  }
+  
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") After removeMostRightKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+  return rKeyInfo;
+}
+
+[BTreeNode<nodeId>] void addMostLeftKey(const uint32_t& nodeId, const KeyInfo& newKeyInfo) {
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") Before addMostLeftKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+  keyInfos.insert( keyInfos.begin(), newKeyInfo );
+
+  
+  uint32_t nId = newKeyInfo.l_node;
+  if( nId > 0 ) {
+    changePCRelation(nodeId, nId, CREATE_OWNERSHIP);
+    setParentNodeId( nId, myNodeId);
+  }
+  
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") After addMostLeftKey BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  }
+}
+
+[BTreeNode<nodeId>] void addMostRightKeys(const uint32_t& nodeId, const mace::vector<KeyInfo>& newKeyInfos) {
+  ADD_SELECTORS("BTreeServer");
+  //maceout << "Before addMostRightKeys BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  KeyInfo& keyInfo = keyInfos[keyInfos.size()-1];
+
+  for(uint32_t i=0; i<newKeyInfos.size(); i++ ) {
+    KeyInfo tmp_key = newKeyInfos[i];
+    if( i== 0 ){
+      tmp_key.l_node = keyInfo.r_node;
+      keyInfo.r_node = 0;
+    } else {
+      uint32_t nId = tmp_key.l_node;
+      if( nId > 0 ) {
+        changePCRelation( myNodeId, nId, CREATE_OWNERSHIP);
+      }
+    }
+
+    if( i == newKeyInfos.size() - 1 ) {
+      uint32_t nId = tmp_key.r_node;
+      if( nId > 0 ) {
+        changePCRelation( myNodeId, nId, CREATE_OWNERSHIP);
+      }
+    }
+    keyInfos.push_back(tmp_key);
+  }
+  
+  //maceout << "After addMostRightKeys BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+}
+
+[BTreeNode<nodeId>] void addMostLeftKeys(const uint32_t& nodeId, const mace::vector<KeyInfo>& newKeyInfos) {
+  ADD_SELECTORS("BTreeServer");
+  //maceout << "Before addMostLeftKeys BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+  
+  for(uint32_t i=0; i<newKeyInfos.size(); i++ ) {
+    const KeyInfo& tmp_key = newKeyInfos[i];
+    uint32_t nId = tmp_key.l_node;
+    if( nId > 0 ) {
+      changePCRelation( myNodeId, nId, CREATE_OWNERSHIP);
+    }
+
+    if( i == newKeyInfos.size() - 1 ) {
+      uint32_t nId = tmp_key.r_node;
+      if( nId > 0 ) {
+        changePCRelation( myNodeId, nId, CREATE_OWNERSHIP);
+      }
+    }
+  }
+
+  mace::vector<KeyInfo> new_keyInfos = newKeyInfos;
+
+  for(uint32_t i=0; i<keyInfos.size(); i++ ) {
+    new_keyInfos.push_back(keyInfos[i]);
+  }
+  keyInfos = new_keyInfos;
+  //maceout << "After addMostRightKeys BTreeNode("<< myNodeId <<"): keyInfos = " << keyInfos << Log::endl;
+}
+
+[BTreeNode<nodeId>] mace::vector<KeyInfo> splitLeftKeys(const uint32_t& nodeId) {
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") BTreeNode("<< nodeId <<") splitLeftKeys: " << keyInfos << Log::endl;
+  }
+  uint32_t mid = (uint32_t)( keyInfos.size() / 2 );
+  mace::vector<KeyInfo> remain_keys;
+  mace::vector<KeyInfo> l_keys;
+  for(uint32_t i=0; i<keyInfos.size(); i++) {
+    if( i<=mid ) {
+      l_keys.push_back( keyInfos[i] );
+    } else {
+      remain_keys.push_back( keyInfos[i] );
+    }
+  }
+  mace::vector<uint32_t> rChildIds = getValidChildIDs( l_keys );
+  for( uint32_t i=0; i<rChildIds.size(); i++ ){
+    lockBTreeNode( rChildIds[i] );
+  }
+
+  for( uint32_t i=0; i<rChildIds.size(); i++ ){
+    changePCRelation( nodeId, rChildIds[i], REMOVE_OWNERSHIP );
+  }
+
+
+  keyInfos = remain_keys;
+  if(LOG_LEVEL >= LOG_LEVEL_2 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") BTreeNode("<< nodeId <<") l_keys=" << l_keys << " keyInfos=" << keyInfos << Log::endl;
+  }
+  return l_keys;
+}
+
+[BTreeNode<nodeId>] mace::vector<KeyInfo> getKeys(const uint32_t& nodeId) {
+  return keyInfos;
+}
+
+[BTreeNode<nodeId>] void removeAllChildren(const uint32_t& nodeId) {
+  ADD_SELECTORS("BTreeServer");
+  //maceout << "To remove all children of BTreeNode("<< myNodeId <<") keyInfos=" << keyInfos << Log::endl;
+  leaf_flag = true;
+  for(uint32_t i=0; i<keyInfos.size(); i++) {
+    uint32_t nId = keyInfos[i].l_node;
+    if( nId > 0 ) {
+      changePCRelation( myNodeId, nId, REMOVE_OWNERSHIP);
+    }
+
+    if( i+1 == keyInfos.size() ) {
+      nId = keyInfos[i].r_node;
+      if( nId > 0 ) {
+        changePCRelation( myNodeId, nId, REMOVE_OWNERSHIP);
+      }
+    }
+  }
+}
+
+[BTreeNode<nodeId>] void removeChildNode(const uint32_t& nodeId, const uint32_t& cnodeId) {
+  ADD_SELECTORS("BTreeServer");
+  lockBTreeNode(cnodeId);
+  changePCRelation( myNodeId, cnodeId, REMOVE_OWNERSHIP);
+}
+
+[BTreeNode<nodeId>] void setParentNodeId(const uint32_t nodeId, const uint32_t& pId) {
+  ADD_SELECTORS("BTreeServer");
+  parentId = pId;
+  if(LOG_LEVEL >= LOG_LEVEL_3 ){
+    maceout << "Event("<< ThreadStructure::myEventID() <<") Set BTreeNode("<< myNodeId <<") parentId=" << parentId << Log::endl;
+  }
+}
+
+[BTreeNode<nodeId>] void removeChildrenInChildNode( const uint32_t& nodeId, const mace::vector<uint32_t>& childNodeIds ) {
+  for(uint32_t i=0; i<childNodeIds.size(); i++) {
+    changePCRelation( myNodeId, childNodeIds[i], REMOVE_OWNERSHIP);
+  }
+}
+
+[BTreeNode<nodeId>] void updateKeyInfos( const uint32_t& nodeId, const mace::vector<KeyInfo>& new_key_infos) {
+  mace::vector<uint32_t> childIds = getValidChildIDs( new_key_infos );
+  for( uint32_t i=0; i<childIds.size(); i++ ) {
+    changePCRelation( nodeId, childIds[i], CREATE_OWNERSHIP );
+  }
+
+  keyInfos = new_key_infos;
+}
+
+[BTreeNode<nodeId>] void lockBTreeNode( const uint32_t& nodeId ) {
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_3 ){
+    maceout << "Lock BTreeNode("<< nodeId <<")!" << Log::endl;
+  }
+}
+
+[__null] bool checkParentChild( mace::vector<KeyInfo> const& keyInfos, uint32_t const& childId ) {
+  for(uint32_t i = 0; i<keyInfos.size(); i++ ) {
+    if( keyInfos[i].l_node == childId ) {
+      return true;
+    }
+
+    if( i+1 == keyInfos.size() && keyInfos[i].r_node == childId ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[__null] void split(const std::string& s, char c, std::vector<std::string>& v) {
+  std::string::size_type i = 0;
+  std::string::size_type j = s.find(c);
+
+  while (j != std::string::npos) {
+    v.push_back(s.substr(i, j-i));
+    i = ++j;
+    j = s.find(c, j);
+
+    if (j == std::string::npos) {
+      v.push_back(s.substr(i, s.length()));
+    }
+  }
+}
+
+[__null] void changePCRelation( const uint32_t& pNodeId, const uint32_t& cNodeId, const uint32_t& op) {
+  mace::string p_contextName = generateContextName("BTreeNode", pNodeId);
+  mace::string c_contextName = generateContextName("BTreeNode", cNodeId);
+  if( op == CREATE_OWNERSHIP ){
+    createNewOwnership(p_contextName, c_contextName );
+  } else if ( op == REMOVE_OWNERSHIP ){
+    removeOwnership(p_contextName, c_contextName);
+  }
+}
+
+[__null] void addChildNodes( const uint32_t& pNodeId, const mace::vector<uint32_t>& childNodeIds ) {
+  for(uint32_t i=0; i<childNodeIds.size(); i++) {
+    changePCRelation(pNodeId, childNodeIds[i], CREATE_OWNERSHIP);
+  }
+}
+ 
+[__null] mace::vector<uint32_t> getValidChildIDs( const mace::vector<KeyInfo>& keyInfos) {
+  mace::vector<uint32_t> childIds;
+  for( uint32_t i=0; i<keyInfos.size(); i++ ) {
+    if( keyInfos[i].l_node > 0 ){
+      childIds.push_back( keyInfos[i].l_node );
+    }
+    if( i == keyInfos.size()-1 && keyInfos[i].r_node>0 ){
+      childIds.push_back( keyInfos[i].r_node );
+    }
+  }
+  return childIds;
+}
+
+[__null] void replyClientRequest(const MaceKey& src, const uint32_t& clientId, const mace::vector<KeyInfo>& keyInfos, const uint32_t& nodeId,
+    const int& key) {
+
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_3 ){
+    maceout << "Reply Client("<< clientId <<") with Key("<< key <<")!" << Log::endl;
+  }
+  
+  mace::vector<int> min_keys;
+  mace::vector<int> max_keys;
+  mace::vector<uint32_t> nodeIds;
+
+  if( keyInfos.size() > 0 ){
+    nodeIds.push_back(nodeId);
+    min_keys.push_back( keyInfos[0].key );
+    max_keys.push_back( keyInfos[ keyInfos.size()-1].key );
+  }
+  
+  downcall_route( src, Response(clientId, key, min_keys, max_keys, nodeIds) );
+}
+
+[__null] void replyClientSearchRequest(const MaceKey& src, const uint32_t& clientId, const int& key, const mace::vector<uint32_t>& nodeIds, const mace::vector<int>& min_keys,
+    const mace::vector<int>& max_keys) {
+
+  ADD_SELECTORS("BTreeServer");
+  if(LOG_LEVEL >= LOG_LEVEL_3 ){
+    maceout << "Reply Client("<< clientId <<") with Key("<< key <<")!" << Log::endl;
+  }
+  
+  downcall_route( src, Response(clientId, key, min_keys, max_keys, nodeIds) );
+}  
+
+}
+

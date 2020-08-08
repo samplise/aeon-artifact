@@ -1,0 +1,6 @@
+serviceclass ServComp {
+  handlers ServCompUpcall;
+  virtual uint32_t request(uint32_t n );
+  //virtual void enter( uint32_t n );
+  //virtual void setUpcallHandler(registration_uid_t regId) ;
+};

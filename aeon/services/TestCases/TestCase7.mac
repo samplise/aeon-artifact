@@ -1,0 +1,41 @@
+/**
+yoo: test case 6 will create async events, only with given CNT_LIMIT numbers.
+*/
+service TestCase7;
+provides Null;
+trace=high;
+typedefs {
+}
+services {
+
+}
+
+constructor_parameters {
+  int32_t CNT_LIMIT = 5000;
+}
+ 
+state_variables {
+  context A{
+  }
+}
+
+messages {
+}
+ 
+transitions {
+  downcall (state == init)maceInit()  {
+    async_createMoreEvents(1);
+  }
+  async [A] createMoreEvents(int32_t cnt){
+    if( cnt < CNT_LIMIT) {
+      if( cnt % 100 == 0 ) {
+        std::cout << "CNT = " << cnt << std::endl;
+      }
+
+      async_createMoreEvents(cnt+1);
+    } else {
+      std::cout << "Reached limit. Stopping." << std::endl;
+    }
+  }
+}
+

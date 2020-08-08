@@ -1,0 +1,4 @@
+SET(APPS firstping ping)
+SET(SERVICES TcpTransport UdpTransport MaceTransport FirstPing Ping)
+
+INCLUDE(${CMAKE_CURRENT_BINARY_DIR}/../application.cmake)

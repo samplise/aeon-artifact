@@ -1,0 +1,279 @@
+#include <functional>
+#include <random>
+
+#include <sys/file.h>
+#include <fcntl.h>
+
+#define get16bits(d) ((((uint32_t)(((const uint8_t *)(d))[1])) << 8)\
+                       +(uint32_t)(((const uint8_t *)(d))[0]) )
+
+service MemcachedDatabase;
+
+provides Null;
+
+time = MaceTime;
+
+constants {
+  
+}
+
+constructor_parameters {
+  uint32_t TABLE_NUMBER = 4;
+  uint64_t OUTPUT_COUNT = 2000;
+}
+
+typedefs {
+  
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  ReadRequest {
+    uint32_t clientId;
+    mace::string key;
+    uint32_t tableId;
+  }
+
+  ReadReply {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+    bool isCacheMiss;
+  }
+
+  WriteRequest {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+    uint32_t tableId;
+  }
+
+  WriteReply {
+    uint32_t clientId;
+    mace::string key;
+    bool isCacheMiss;
+  }
+
+  ReadDatabase {
+    uint32_t clientId;
+    mace::string key;
+    MaceKey clientAddr;
+    uint32_t tableId;
+  }
+
+  WriteDatabase {
+    mace::string key;
+    mace::string value;
+    uint32_t tableId;
+  }
+
+  ReadDatabaseReply {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+    MaceKey clientAddr;
+    uint32_t tableId;
+  }
+
+  ReportClientNumber {
+    uint32_t client_number;
+  }
+
+}
+
+auto_types {
+  
+}
+
+state_variables {
+  context DatabaseTable<uint32_t id> {
+    uint32_t dId;
+    mace::string database_file_name;
+
+    uint64_t request_count;
+  }
+
+  context Controller {
+    mace::map<MaceKey, uint32_t> client_numbers;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    srand( mace::getmtime() );
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;
+    for(uint32_t i=0; i<TABLE_NUMBER; i++){
+      std::ostringstream oss1;
+      oss1 << "DatabaseTable[" << i << "]";
+      mace::pair<mace::string, mace::string> ownership2("globalContext", oss1.str() );
+      ownerships.insert(ownership2);
+      
+      std::ostringstream oss2;
+      oss2 << "database_file_" << i << ".txt";
+      async_initDatabaseTable(i, oss2.str() ); 
+    }
+    mace::pair<mace::string, mace::string> ownership("globalContext", "Controller");
+    ownerships.insert(ownership);
+    async_initController();
+
+    addNewOwnerships(ownerships);
+  }
+
+  async [Controller] initController() {
+    ADD_SELECTORS("MemcachedDatabase");
+    maceout<< "Initialize the Controller!" << Log::endl; 
+  }
+
+ 
+  async [ DatabaseTable<id> ] initDatabaseTable(const uint32_t id, mace::string const& file_name) {
+    ADD_SELECTORS("MemcachedDatabase");
+    dId = id;
+    request_count = 0;
+    database_file_name = file_name;
+
+    if( creat(database_file_name.c_str(), 0666 ) < 0 ) {
+      maceout << "Fail to create the database file in context Database(" << id << ")" << Log::endl;
+      return;
+    }
+
+    int fd = open(database_file_name.c_str(), O_WRONLY, 0);
+    if( fd < 0) {
+      maceout << "Fail to open the database file in context Database(" << id << ")" << Log::endl;
+      return; 
+    }
+
+    mace::string value_str = getDefaultValue();
+    write(fd, value_str.c_str(), value_str.length() );
+    close(fd);
+    maceout<< "Initialize DatabaseTable("<< id <<") successfully!" << Log::endl;
+  }
+
+  upcall [DatabaseTable<get_bucket(msg.key)>] deliver(const MaceKey& src, const MaceKey& dest, const ReadDatabase& msg)  {
+    ADD_SELECTORS("MemcachedDatabase");
+    char buffer[2048];
+    request_count ++;
+    if( request_count % OUTPUT_COUNT == 0 ){
+      //maceout<< "DatabaseTable("<< dId<<") received request_count=" << request_count << Log::endl;
+    }
+
+    int fd = open(database_file_name.c_str(), O_RDONLY, 0);
+    if( fd < 0) {
+      maceout << "Fail to open the database file in context Database(" << dId << ") for read operation!" << Log::endl;
+      return; 
+    }
+    if( read(fd, buffer, 2048 ) < 0 ) {
+      close(fd);
+      maceout<< "Fail to read database file in context Database(" << dId << ")" << Log::endl;
+      return;
+    }
+    close(fd);
+    mace::string value_str = buffer;
+    downcall_route(src, ReadDatabaseReply(msg.clientId, msg.key, value_str, msg.clientAddr, msg.tableId) );
+  }
+
+  upcall [DatabaseTable<get_bucket(msg.key)>] deliver(const MaceKey& src, const MaceKey& dest, const WriteDatabase& msg) {
+    ADD_SELECTORS("MemcachedDatabase");
+    
+    int fd = open(database_file_name.c_str(), O_WRONLY, 0);
+    if( fd < 0) {
+      maceout << "Fail to open the database file in context Database(" << dId << ") for write operation!" << Log::endl;
+      return; 
+    }
+    if( write(fd, msg.value.c_str(), msg.value.length() ) < 0 ) {
+      close(fd);
+      maceout<< "Fail to write database file in context Database(" << dId << ")" << Log::endl;
+      return;
+    }
+    close(fd);
+
+  }
+
+  upcall [Controller] deliver(const MaceKey& src, const MaceKey& dest, const ReportClientNumber& msg) {
+    ADD_SELECTORS("MemcachedDatabase");
+    client_numbers[src] = msg.client_number;
+
+    mace::map<MaceKey, uint32_t>::iterator iter = client_numbers.begin();
+    uint32_t total_client_number = 0;
+    for( ; iter!=client_numbers.end(); iter++ ) {
+      total_client_number += iter->second;
+    } 
+    maceout<< "Current Active Clients=" << total_client_number << Log::endl;
+  }
+}
+
+
+routines {
+  /*
+   * Refer to http://www.azillionmonkeys.com/qed/hash.html */
+  [__null] uint32_t get_bucket(const mace::string& key) {
+    uint32_t len = key.length();
+    char * cstr = new char [key.length()+1];
+    char * data = cstr;
+    uint32_t hash = len, tmp;
+    int rem;
+
+    if (len == 0) {
+      delete[] cstr;
+      return 0;
+    }
+
+    rem = len & 3;
+    len >>= 2;
+
+    /* Main loop */
+    for (; len > 0; len--) {
+      hash  += get16bits (data);
+      tmp    = (get16bits (data+2) << 11) ^ hash;
+      hash   = (hash << 16) ^ tmp;
+      data  += 2*sizeof (uint16_t);
+      hash  += hash >> 11;
+    }
+
+    /* Handle end cases */
+    switch (rem) {
+      case 3: hash += get16bits (data);
+              hash ^= hash << 16;
+              hash ^= ((signed char)data[sizeof (uint16_t)]) << 18;
+              hash += hash >> 11;
+              break;
+      case 2: hash += get16bits (data);
+              hash ^= hash << 11;
+              hash += hash >> 17;
+              break;
+      case 1: hash += (signed char)*data;
+              hash ^= hash << 10;
+              hash += hash >> 1;
+    }
+
+    /* Force "avalanching" of final 127 bits */
+    hash ^= hash << 3;
+    hash += hash >> 5;
+    hash ^= hash << 4;
+    hash += hash >> 17;
+    hash ^= hash << 25;
+    hash += hash >> 6;
+
+    delete[] cstr;
+    return hash % (TABLE_NUMBER);
+  }
+
+  [__null] mace::string getDefaultValue() {
+    mace::string str_value = "";
+    mace::string seed_str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for(uint32_t i=0; i<19; i++) {
+      str_value += seed_str;
+    }
+    return str_value;
+  }
+
+}
+
+

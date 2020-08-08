@@ -1,0 +1,254 @@
+/* 
+ * ReliableRequestTransport.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, James W. Anderson, Ryan Braud
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "RequestTransportCommon.h"
+using mace::map;
+using mace::set;
+using std::string;
+using RequestTransport::RequestId;
+
+service ReliableRequestTransport;
+
+provides RequestTransport;
+
+trace = med;
+time = MaceTime;
+
+services {
+  BufferedTransport router::transport_rid = auto(shared, [], []);
+}
+
+constructor_parameters {
+  registration_uid_t transport_rid = -1;
+}
+
+constants {
+  uint64_t RETRY_DELAY = 1*1000*1000;
+}
+
+auto_types {
+  RequestInfo __attribute((private(yes), comparable(lessthan=default))) {
+    string data;
+    NodeList alternates;
+    uint32_t next;
+
+    RequestInfo(const string& d, const MaceKey& dest, const NodeList& alt) :
+      data(d), alternates(alt), next(0) {
+      alternates.push_back(dest);
+    }
+
+    const string& getData() const {
+      return data;
+    }
+
+    const MaceKey& getNext() {
+      uint32_t prev = next;
+      next++;
+      if (next == alternates.size()) {
+	next = 0;
+      }
+      return alternates[prev];
+    }
+
+  };
+}
+
+typedefs {
+  typedef map<RequestId, RequestInfo> RequestMap;
+  typedef set<RequestId> RequestSet;
+  typedef map<MaceKey, RequestSet> ServerRequestMap;
+}
+
+method_remappings {
+  uses {
+    upcall_deliverRequest(const RequestId& -> const std::string&, const std::string&, registration_uid_t);
+  }
+  implements {
+    downcalls {
+      cancelRequest(const RequestId& <- const std::string&, registration_uid_t);
+      routeResponse(const RequestId& <- const std::string&, const std::string&, registration_uid_t);
+    }
+  }
+}
+
+state_variables {
+  RequestMap requests;
+  ServerRequestMap outstanding;
+
+  timer<MaceKey, RequestId, string> retransmissionTimer __attribute((multi(yes)));
+  timer<RequestId, uint64_t> requestTimer __attribute((multi(yes)));
+}
+
+messages {
+  Request {
+    RequestId req;
+    string data;
+  };
+
+  Response {
+    RequestId req;
+    string data;
+  };
+}
+
+transitions {
+
+  downcall std::string routeRequest(const MaceKey& dest, const std::string& s,
+				    uint64_t timeout, registration_uid_t rid) {
+    static const NodeList empty;
+    return routeRequest(dest, empty, s, timeout, rid);
+  } // downcall routeRequest
+
+
+  downcall std::string routeRequest(const MaceKey& dest,
+				    const NodeList& alternates,
+				    const std::string& s,
+				    uint64_t timeout,
+				    registration_uid_t rid) {
+    uint64_t r = mace::getmtime();
+    RequestId req(__local_address, r, rid);
+    requests[req] = RequestInfo(s, dest, alternates);
+    routeRequest(dest, req, s);
+    if (timeout) {
+      requestTimer.schedule(timeout, req, timeout);
+    }
+
+    return mace::serialize(&req);
+  } // downcall routeRequest
+
+  downcall void cancelRequest(const RequestId& req) {
+    requests.erase(req);
+    removeOutstanding(req);
+    requestTimer.cancel(req);
+  } // downcall cancelRequest
+
+  downcall void cancelRequests(const MaceKey& dest) {
+    retransmissionTimer.cancel(dest);
+    ServerRequestMap::const_iterator si = outstanding.find(dest);
+    if (si != outstanding.end()) {
+      const RequestSet& rs = si->second;
+      for (RequestSet::const_iterator i = rs.begin(); i != rs.end(); i++) {
+	const RequestId& req = *i;
+	requests.erase(req);
+	requestTimer.cancel(req);
+      }
+      outstanding.erase(dest);
+    }
+  } // downcall cancelRequests
+
+  downcall void routeResponse(const RequestId& req, const std::string& s) {
+    ASSERT(downcall_route(req.client, Response(req, s)));
+  }
+
+  // SHYOO : test purpose only!!!
+
+//  upcall deliver(src, dest, const Request& m) [locking=read] {
+//    upcall_deliverRequest(m.req, m.data, m.req.rid);
+//  }
+
+  upcall deliver(const MaceKey& src,const MaceKey&  dest, const Request& m) {
+    upcall_deliverRequest(m.req, m.data, m.req.rid);
+  }
+
+
+  upcall deliver(const MaceKey& src,const MaceKey&  dest, const Response& m) {
+    if (requests.containsKey(m.req)) {
+      requests.erase(m.req);
+      removeOutstanding(m.req);
+      upcall_deliverResponse(src, m.data, mace::serialize(&m.req), m.req.rid);
+    }
+    requestTimer.cancel(m.req);
+  }
+
+  upcall void error(const MaceKey& src, TransportError::type code,
+		    const string& message) {
+    ServerRequestMap::const_iterator si = outstanding.find(src);
+    if (si != outstanding.end()) {
+      RequestSet rs = si->second; // copy
+      for (RequestSet::const_iterator i = rs.begin(); i != rs.end(); i++) {
+	const RequestId& req = *i;
+	RequestMap::iterator ri = requests.find(req);
+	if (ri != requests.end()) {
+	  RequestInfo& info = ri->second;
+	  const MaceKey& dest = info.getNext();
+	  if (dest != src) {
+	    routeRequest(dest, req, info.getData());
+	  }
+	  else {
+	    retransmissionTimer.schedule(RETRY_DELAY, dest, req, info.getData());
+	  }
+	}
+      }
+    }
+  } // upcall error
+
+  scheduler requestTimer(RequestId& req, uint64_t& t) {
+    RequestMap::iterator i = requests.find(req);
+    ASSERT(i != requests.end());
+    RequestInfo& r = i->second;
+    routeRequest(r.getNext(), req, r.getData());
+    requestTimer.schedule(t, req, t);
+  } // requestTimer
+
+  scheduler retransmissionTimer(MaceKey& dest, RequestId& req, string& s) {
+    routeRequest(dest, req, s);
+  } // retransmissionTimer
+
+}
+
+routines {
+
+  void routeRequest(const MaceKey& dest, const RequestId& req,
+		    const string& s) {
+    outstanding[dest].insert(req);
+    downcall_route(dest, Request(req, s));
+  }
+
+  void removeOutstanding(const RequestId& req) {
+    ServerRequestMap::iterator i = outstanding.begin();
+    while (i != outstanding.end()) {
+      RequestSet& s = i->second;
+      s.erase(req);
+      if (s.empty()) {
+	outstanding.erase(i++);
+      }
+      else {
+	i++;
+      }
+    }
+  }
+  
+  /*static MaceKey getSource(const std::string& req) {
+    RequestId r;
+    r.deserializeStr(req);
+    return r.client;
+  }*/
+
+}

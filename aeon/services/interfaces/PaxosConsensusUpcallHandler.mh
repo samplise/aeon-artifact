@@ -1,0 +1,4 @@
+handler PaxosConsensusUpcall {
+	virtual void propose_accepted(const uint64_t& clientID, const uint64_t& key, const uint64_t& round, const std::string& value);
+	virtual void propose_refused(const uint64_t& clientID, const uint64_t& key, const uint64_t& round, const std::string& value);
+}; // PaxosConsensusUpcall

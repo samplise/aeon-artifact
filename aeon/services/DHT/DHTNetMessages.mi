@@ -1,0 +1,24 @@
+messages {
+  DHTGet __attribute((number(0))) {
+    MaceKey key;
+  }
+  DHTContainsKey {
+    MaceKey key;
+  }
+  DHTReply {
+    MaceKey key;
+    bool found;
+    string payload __attribute((dump(no)));
+  }
+  DHTKeyResult {
+    MaceKey key;
+    bool found;
+  }
+  DHTPut {
+    MaceKey key;
+    string payload __attribute((dump(no)));
+  }
+  DHTDelete {
+    MaceKey key;
+  }
+}

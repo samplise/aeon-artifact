@@ -1,0 +1,104 @@
+service EManagerMigration;
+provides Null;
+
+typedefs {
+}
+services {
+
+}
+
+constants {
+  
+}
+
+
+constructor_parameters {
+    uint32_t N_NODES = 100;
+    uint32_t N_MIGRATING_NODES = 10;
+    uint32_t CONTEXT_SIZE = 1000;
+    
+    uint32_t WAITING_TIME_PERIOD = 10;
+}
+ 
+state_variables {
+  context Node<uint32_t nId>{
+    mace::string str;
+  }
+
+  context Controller {
+    mace::set<uint32_t> cIds;
+  }
+
+}
+
+messages {
+}
+ 
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("EManagerMigration");
+    maceout <<"Start eManager measurement!!" << Log::endl;
+    for(uint32_t i=0; i<N_NODES; i++) {
+      mace::string nodeCtxName = generateContextName("Node", i);
+      createNewOwnership("globalContext", nodeCtxName);
+    }
+    
+    createNewOwnership("globalContext", "Controller");
+    async_initController();
+  }
+
+  async [Controller] initController( ){
+    ADD_SELECTORS("EManagerMigration");
+    maceout <<"Initialize controller!!" << Log::endl;
+
+    cIds.clear();
+
+    for(uint32_t i=0; i<N_NODES; i++) {
+      async_initNode(i);
+    }
+  }
+
+  async [Controller] clientIsReady( const uint32_t& cId ){
+    ADD_SELECTORS("EManagerMigration");
+    if( cIds.count(cId) == 0 ){
+      cIds.insert(cId);
+    }
+
+    if( cIds.size() == N_NODES ) {
+      maceout <<"Start to migrate "<< N_MIGRATING_NODES <<" Nodes!!" << Log::endl;
+      for( uint32_t i=0; i < N_MIGRATING_NODES; i++ ){
+        migrateNode(i);
+      }
+    }
+  }
+
+  async [Node<nId>] initNode( const uint32_t& nId ) {
+    ADD_SELECTORS("EManagerMigration");
+    maceout<< "Initialize Node "<< nId << Log::endl;
+
+    str = "";
+    for( uint32_t i=0; i<CONTEXT_SIZE/2; i++ ){
+      str += "aA";
+    }
+
+    async_clientIsReady(nId);
+  }
+
+  
+}
+
+routines {
+
+  [__null] mace::string generateContextName(const mace::string& ctxName, const uint32_t& ctxId ) {
+    std::ostringstream oss;
+    oss<< ctxName << "[" << ctxId << "]";
+    return oss.str();
+  }
+ 
+  [__null] void migrateNode( const uint32_t& nId ) {
+    std::ostringstream oss;
+    oss<< "migrateNode" <<  nId ;
+    migrateContext( oss.str() );
+  }
+}
+

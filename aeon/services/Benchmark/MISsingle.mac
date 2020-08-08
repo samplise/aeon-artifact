@@ -1,0 +1,364 @@
+#include "SysUtil.h"
+#include "mlist.h"
+#include <gsl/gsl_rng.h>
+
+service MISsingle;
+
+//provides MIS;
+provides Null;
+
+//trace=low;
+time = MaceTime;
+
+constructor_parameters {
+  uint64_t NUM_VERTEX = 0;
+  uint64_t NUM_EDGES = 0;
+  uint64_t SEED = 0;
+}
+
+
+// { 0 = out; 1 = in } // if num_neighbors_high > 0, then this vertex has not decided its state.
+
+state_variables {
+  // graph information (global)
+  uint64_t num_vertex;
+  uint64_t num_edges;
+  mace::set<uint32_t> mis_set;
+  //uint32_t num_duplicates;
+
+  // graph information (context)
+  context Vertex<uint32_t vertex_id> {
+    uint32_t num_neighbors_high; // decremented when one comes OUT; set to zero when state is decided.
+    uint32_t num_neighbors_low;
+    bool is_in;
+    bool is_decided;
+    mace::vector<uint32_t> neighbors;
+  }
+
+  // master-specific information
+  int32_t num_ready_nodes;
+  double ts_start;
+  double ts_mis;
+  double ts_end;
+
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("MIS::start");
+
+    /* initialize graph */
+
+    ts_start = (double)TimeUtil::timeu();
+
+    num_edges = NUM_EDGES;
+    num_vertex = NUM_VERTEX; 
+
+    ASSERT(0 < num_vertex);
+    ASSERT(std::numeric_limits<uint32_t>::max() > num_vertex);
+    ASSERT(num_vertex-1 <= num_edges);
+    ASSERT(num_edges <= num_vertex * ((uint64_t)num_vertex-1) / 2);
+    ASSERT(0 < SEED);
+    ASSERT(std::numeric_limits<uint64_t>::max() > SEED);
+
+    /* initialize */
+    for( uint64_t i=0; i<num_vertex; i++ )
+    {
+      async_initialize(i);
+    }
+
+    gsl_rng * GSL_RNG = gsl_rng_alloc(gsl_rng_mt19937);
+
+
+    /*
+     * graph generation - first time
+     */
+
+    gsl_rng_set(GSL_RNG, (unsigned long int)SEED);
+
+    /* randomly generate graph:  connected, via non-preferential attachment */
+
+    //std::cout << "generating random graph" << std::endl;
+
+    for (uint64_t i = 1; i < num_vertex; i++)
+    {
+      uint32_t high_id = i;
+      uint32_t low_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, (unsigned long int) i);
+
+      ASSERT(0 <= low_id && low_id < high_id);
+      
+      async_add_nlow(high_id, low_id);
+      async_add_nhigh(high_id, low_id);
+    }
+
+    num_edges -= num_vertex - 1;
+
+
+    /* add remaining edges Erdos-Renyi style */
+    
+    //std::cout << "generating ER style" << std::endl;
+
+    while (num_edges > 0) 
+    {
+      uint32_t high_id, low_id;
+      do
+      {
+        high_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, num_vertex);
+        low_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, num_vertex); 
+      } while (high_id == low_id);
+
+      if (high_id < low_id) {
+        uint32_t r = high_id;
+        high_id = low_id;
+        low_id = r;
+      }  /* swap */
+
+      async_add_nlow(high_id, low_id);
+      async_add_nhigh(high_id, low_id);
+      num_edges--;
+
+    }
+
+    /* allocate neighbor arrays */
+
+    //std::cout << "allocating neighbor arrays" << std::endl;
+
+    for( uint64_t i=0; i<num_vertex; i++ )
+    {
+//      fprintf(stderr, "reserving vertex[%ld] with neighbors[%d]\n", i, vertex[i].num_neighbors_low);
+      async_reserve_neighbors(i);
+
+    }
+
+    num_edges = NUM_EDGES;
+
+
+    /*
+     * graph generation - second time
+     */
+
+    gsl_rng_set(GSL_RNG, (unsigned long int)SEED);
+
+    //std::cout << "2nd graph generation" << std::endl;
+
+    /* randomly generate graph:  connected, via non-preferential attachment */
+    for (uint64_t i = 1; i < num_vertex; i++)
+    {
+      async_add_edge(i, (uint32_t)gsl_rng_uniform_int(GSL_RNG, (unsigned long int) i));
+    }
+
+    num_edges -= num_vertex - 1;
+
+    /* add remaining edges Erdos-Renyi style */
+
+    while (num_edges > 0) 
+    {
+      uint32_t high_id, low_id;
+      do
+      {
+        high_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, num_vertex);
+        low_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, num_vertex); 
+      } while (high_id == low_id);
+
+      if (high_id < low_id) {
+        uint32_t r = high_id;
+        high_id = low_id;
+        low_id = r;
+      }  /* swap */
+
+      async_add_edge(high_id, low_id);
+      num_edges--;
+
+    }
+
+    /* find duplicates */
+    //num_duplicates = 0;
+
+    //get_memory_usage();
+    // NOTE : We do not add duplicate since duplicates introduce replayability problem among
+    // the distributed nodes without knowing the total number of duplicates.
+    // For a while, just report the number of duplicates.
+
+//    for (uint32_t vertex_id = 0; vertex_id < num_vertex / node_list.size(); vertex_id++)
+//    {
+//      uint32_t before_edges = vertex[vertex_id].neighbors.size();
+//      vertex[vertex_id].neighbors.unique();
+//      uint32_t after_edges = vertex[vertex_id].neighbors.size();
+//
+//      ASSERT(before_edges>=after_edges);
+//
+//      num_duplicates+=(before_edges-after_edges);
+//    }
+
+    /* add duplicates */
+
+
+//    for( uint32_t i=0; i<num_duplicates; )
+//    {
+//      do
+//      {
+//        high_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, num_vertex);
+//        low_id = (uint32_t)gsl_rng_uniform_int(GSL_RNG, num_vertex); 
+//      } while (high_id == low_id);
+//
+//      if (high_id < low_id) {
+//        r = high_id;
+//        high_id = low_id;
+//        low_id = r;
+//      }  /* swap */
+//
+//      if( add_edge(high_id, low_id, true) == false )
+//      {
+//        i++;  // increment only success
+//      }
+//    }
+//
+
+//regId = rid;
+
+
+    std::cout << curtime << " initiate" << std::endl;
+
+    /* assume that initialization all finished here.. */
+    ts_mis = (double)TimeUtil::timeu();
+
+    for (uint32_t i = 0; i < num_vertex; i++) {
+      //std::cout << curtime << " marking(" << i << ")" << std::endl;
+      async_mark_top(i);
+    }
+
+    //std::cout << curtime << " async_mark_top finished" << std::endl;
+
+    // you should wait until it all finishes -- it is hard to achieve.
+    ts_end = (double)TimeUtil::timeu();
+  }
+
+  async [Vertex<id>] initialize(const uint32_t id)
+  {
+    is_in = 0;
+    is_decided = 0;
+    num_neighbors_low = 0;
+    num_neighbors_high = 0;
+  }
+
+  async [Vertex<high_id>] add_nlow(const uint32_t high_id, const uint32_t low_id)
+  {
+    num_neighbors_low++;
+  }
+
+  async [Vertex<low_id>] add_nhigh(const uint32_t high_id, const uint32_t low_id)
+  {
+    num_neighbors_high++;
+  }
+
+  async [Vertex<id>] reserve_neighbors(const uint32_t id)
+  {
+    if( num_neighbors_low > 0 )
+      neighbors.reserve( num_neighbors_low );
+  }
+  
+  async [Vertex<high_id>] add_edge(const uint32_t high_id, const uint32_t low_id) 
+  {
+    //if( high_id % 100 == 0 ) {
+      //std::cout << curtime << " " << me << " add_edge " << high_id << "," << low_id << std::endl;
+    //}
+
+    ASSERT(0 <= low_id && low_id < high_id);
+    ASSERT(neighbors.size() < num_neighbors_low);
+    neighbors.push_back(low_id);
+  }
+
+  async [Vertex<id>] mark_top(const uint32_t id)
+  {
+    //std::cout << "testing vertex " << (id) << std::endl;
+    //std::cout << "  is_decided = " << (is_decided) << std::endl;
+    //std::cout << "  is_in = " << (is_in) << std::endl;
+    //std::cout << "  num_neighbors_high = " << (num_neighbors_high) << std::endl;
+    //std::cout << "  num_neighbors_low = " << (num_neighbors_low) << std::endl;
+
+    if (!is_decided && num_neighbors_high == 0) {
+      is_in = 1;
+      is_decided = 1;
+      async_decide(id, 1);
+
+      //std::cout << "vertex " << (id) << " is IN" << std::endl;
+
+      // For all lower neighbors, they would get expel_out.
+      for(mace::vector<uint32_t>::const_iterator j = neighbors.begin(); j != neighbors.end(); j++ ) {
+        async_mark(*j, 0);
+      }
+    } 
+  }
+
+  async [Vertex<id>] mark(const uint32_t id, const bool is_decrement) 
+  {
+    /*
+     * is_decrement == 1 ; this is decrease out. that means, someone in highest neighbor decided he's out, which would increase my chance of becoming in.
+     * is_decrement == 0 ; this is expel out. someone in higher node stepped up to get in, so I should get out.
+     */
+
+    if (is_decrement) // this is decrease out
+    {
+      if( !is_decided && num_neighbors_high > 0 )
+      {
+        num_neighbors_high--;
+
+        if( num_neighbors_high == 0 )
+        {
+          is_in = 1;
+          is_decided = 1;
+          async_decide(id, 1);
+
+          //std::cout << "vertex " << (id) << " is IN" << std::endl;
+
+          // For each neighbor, do expel_out since I'm in. (expel them!)
+          for(mace::vector<uint32_t>::const_iterator i = neighbors.begin(); i != neighbors.end(); i++ )
+          {
+            async_mark( *i, 0);  // Expel them!
+          }
+        }
+      }
+    }
+    else  // This is expel out
+    {
+      if( !is_decided )
+      {
+        num_neighbors_high = 0;
+        is_in = 0;
+        is_decided = 1;
+        async_decide(id, 0);
+
+        //std::cout << "vertex " << (id) << " is OUT" << std::endl;
+
+        // For each neighbor, do decrease_out. (decrement them)
+        for(mace::vector<uint32_t>::const_iterator i = neighbors.begin(); i != neighbors.end(); i++ )
+        {
+          async_mark( *i, 1);  // decrement them
+        }
+      }
+    }
+  }
+
+  async decide(const uint32_t id, const bool is_in) 
+  {
+    ASSERT(num_vertex > 0);
+    if( is_in ) {
+      mis_set.push_back(id);
+    }
+    num_vertex--;
+
+    if( num_vertex == 0 ) {
+      std::cout << "Result MIS Set : " << mis_set << std::endl;
+      ts_end = (double)TimeUtil::timeu();
+      std::cout << curtime << " finished" << std::endl;
+      exit(0);
+    }
+  }
+}
+
+

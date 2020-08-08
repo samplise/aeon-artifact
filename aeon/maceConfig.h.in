@@ -1,0 +1,69 @@
+#ifndef _maceConfig_h
+#define _maceConfig_h
+
+#cmakedefine EINVAL_IS_NOTCONN
+#cmakedefine STUPID_FD_SET_CONST_HACK
+#cmakedefine OSX_MACELIB_DAEMON
+#cmakedefine OSX_SCHED_YIELD
+
+#cmakedefine HAVE_TOKYO_CABINET
+#cmakedefine HAVE_GSL
+
+#cmakedefine HAVE_UNISTD_H
+#cmakedefine HAVE_SYS_TIME_H
+#cmakedefine HAVE_NETDB_H
+#cmakedefine HAVE_NETINET_IN_H
+#cmakedefine HAVE_NETINET_TCP_H
+#cmakedefine HAVE_ARPA_INET_H
+#cmakedefine HAVE_SYS_SELECT_H
+#cmakedefine HAVE_SYS_WAIT_H
+
+#cmakedefine HAVE_DRAND48
+#cmakedefine HAVE_RAND_S
+#cmakedefine HAVE_RAND
+#cmakedefine HAVE_PIPE
+#cmakedefine HAVE__PIPE
+#cmakedefine HAVE_FCNTL
+#cmakedefine HAVE_IOCTLSOCKET
+#cmakedefine HAVE_SIGACTION
+#cmakedefine HAVE_GETPPID
+#cmakedefine HAVE_WAITPID
+#cmakedefine HAVE__CWAIT
+
+#cmakedefine INCLUDE_CGI
+
+#cmakedefine WINDOWS_FILES
+
+#cmakedefine UINT64T_IS_NOT_ULONGLONG
+
+#cmakedefine SIGNED_SOCKET
+#ifdef SIGNED_SOCKET
+typedef int socket_t;
+#else
+typedef unsigned int socket_t;
+#endif
+
+#cmakedefine HAVE_USECONDS_T
+#ifndef HAVE_USECONDS_T
+typedef unsigned int useconds_t;
+#endif
+
+#cmakedefine HAVE_SUSECONDS_T
+#ifndef HAVE_SUSECONDS_T
+typedef int suseconds_t;
+#endif
+
+#cmakedefine HAVE_UINT
+#ifndef HAVE_UINT
+typedef unsigned int uint;
+typedef unsigned short ushort;
+#endif
+
+#cmakedefine HAVE_IN_ADDR_T
+#ifndef HAVE_IN_ADDR_T
+typedef uint32_t in_addr_t;
+#endif
+
+#cmakedefine USE_SNAPSHOT
+
+#endif //_maceConfig_h

@@ -1,0 +1,4 @@
+#include "marray.h" 
+handler TagClientRGData {
+  virtual void roomMapResponseReceived(uint16_t location, const mace::array<mace::array<int, 50>, 50> & roomMap) { } 
+};

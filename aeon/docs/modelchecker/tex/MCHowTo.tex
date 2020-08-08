@@ -1,0 +1,803 @@
+% 
+% MCHowTo.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Meg Walraed-Sullivan, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\documentclass[12pt,letterpaper]{article}
+\usepackage{amsfonts}
+
+
+
+\newenvironment{code}
+{\begin{list}{}{\setlength{\leftmargin}{1em}}\item\scriptsize\bfseries}
+{\end{list}}
+
+\usepackage{fullpage}
+\usepackage{epsfig}
+\usepackage{eepic,epic}
+\usepackage{latexsym}
+\usepackage{multirow}
+\usepackage{multicol}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Page styles
+
+\setlength{\evensidemargin}{0in}
+\setlength{\oddsidemargin}{0in}
+\setlength{\textwidth}{6.5in}
+\setlength{\textheight}{8.7in}
+\setlength{\topmargin}{-0.5in}
+\setlength{\headheight}{0.2in}
+\setlength{\headsep}{0.55in}
+\setlength{\footskip}{0.55in}
+\renewcommand{\baselinestretch}{1}
+\renewcommand{\arraystretch}{1.1}
+
+\setlength{\fboxsep}{10pt}
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+
+\newlength{\saveparindent}
+\setlength{\saveparindent}{\parindent}
+\newlength{\saveparskip}
+\setlength{\saveparskip}{\parskip}
+
+\setlength{\columnsep}{-.15in}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\title{Mace ModelChecker How-To}
+\author{Meg Walraed-Sullivan, Chip Killian}
+\date{\today}
+
+\begin{document}
+ \maketitle
+
+
+\section{Overview} 
+\label{Overview}
+Model checking involves several files, including multiple layers of services/applications.  The service to be checked sits in this stack of layers, above whichever services it uses (such as transport layer services), and below the \emph{SimApplication} service, the service which emulates an application in order to test the checked service.  Above the \emph{SimApplication} is the modelchecker itself.   One other file is necessary, and is usually called something like \emph{ServiceTests.cc}.  The modelchecker uses this file to build the hierarchy of services and to load its tests, once for each execution of the service to be tested.  The following will go through an example using the \texttt{BrokenTree} service. Figure \ref{Hierarchy} depicts the relationships between the various files used to modelcheck a service.
+
+\begin{figure}[t]
+\begin{center}
+\begin{picture}(150,150)
+\put(-80,-20){\special{psfile = services.eps hscale = 45 vscale = 45}}
+\end{picture}\\
+\caption{Service/Application Stack \label{Hierarchy}}
+\end{center}
+\end{figure}
+
+
+\section{Files} 
+\label{Files}
+This section contains an overview of the files necessary for the \texttt{BrokenTree} example.
+
+\subsection{BrokenTree Service} 
+\label{BrokenTree Service}
+The \texttt{BrokenTree} service is based on a protocol used to reorganize a tree periodically in such a way that bandwidth is distributed according to a particular scheme.  An assumed invariant of the correct version of this protocol is that no loops are ever formed; however, the \texttt{BrokenTree} protocol allows for such loops to be formed, i.e. it is broken.  The code for \texttt{BrokenTree} can be found in the file \emph{BrokenTree.mac}.
+
+Note that the \texttt{BrokenTree} service has 3 states, \texttt{init, joining, and joined}.  Each node keeps track of its parent and children, and uses this info to suggest reorganizations to its children, based on their parents, grandparents, and children.  A node joins the tree by sending a \texttt{Join} message to its parent.  The parent replies with a \texttt{JoinReply} message.  A timer (\texttt{reorg}) is set at the time of this request so that the node can retry its request if necessary.  The root overloads this timer in order to decide when to start a reorganization.  When it decides to do so, it sends a message to its children, who recursively continue the reorganization process.
+To work through this example:
+\begin{itemize} 
+\item If it does not already exist, create a directory called \emph{BrokenTree} under \emph{[Path-to-Mace-Source]/services}.  
+\item Copy \emph{BrokenTree.mac} into this directory.  
+\item Copy \emph{CMakeLists.txt.BrokenTree} into this directory and remove \emph{.BrokenTree} from the file name.
+\item Open \emph{[Path-to-Mace-Source]/services/CMakeLists.txt} and add \texttt{BrokenTree} to the line beginning with \texttt{SET(SERVICE\_DIRS}, if not already present.  This tells Mace to build the \texttt{BrokenTree} service.
+\end{itemize}
+
+\subsection{SimTreeApp Service} 
+\label{SimTreeApp Service}
+The \texttt{SimTreeApp} service is the service used to test the \texttt{BrokenTree} service.  Code for this service can be found in the file \emph{SimTreeApp.mac}.  The code is explained below:
+
+\begin{code}
+\begin{verbatim}
+service SimTreeApp;
+
+provides SimApplication;
+trace=med;
+\end{verbatim}
+\end{code}
+
+The name of this service is \texttt{SimTreeApp} and it provides the \texttt{SimApplication} interface (which is characterized by the implementation of the \texttt{eventsWaiting} and \texttt{simulateEvent} downcalls).  
+
+\begin{code}
+\begin{verbatim}
+constants {
+  int INIT = 0;
+  int JOINED = 1;
+  int ROOT_ONLY = 0;
+  int NEXT_NODE = 1;
+}
+\end{verbatim}
+\end{code}
+
+The \texttt{ROOT\_ONLY} and \texttt{NEXT\_NODE} constants are used to make this application a generic tree simulator.  They determine how a node joins the tree, by using the root or by using the next node as a ``parent'' via which to join.  
+
+\begin{code}
+\begin{verbatim}
+constructor_parameters {
+  int PEERSET_STYLE = ROOT_ONLY;
+  int SHOULD_JOIN = 1;
+  MaceKey me = MaceKey::null;
+  int num_nodes = -1;
+}
+\end{verbatim}
+\end{code}
+
+For the purpose of this example, nodes join via the root.  
+
+\begin{code}
+\begin{verbatim}
+states {
+  needJoin;
+  done;
+}
+\end{verbatim}
+\end{code}
+
+This application keeps track of two states.  The \texttt{needJoin} state indicates that the current node needs to send a \texttt{Join} request.  The \texttt{done} state indicates that the node has sent such a request.  \textit{Note that it does not indicate that such a request has been received by the parent or accepted.}
+
+\begin{code}
+\begin{verbatim}  
+services {
+  Tree tree_;
+  Overlay treeo_ = tree_;
+}
+\end{verbatim}
+\end{code}
+
+This service implements both the \texttt{Tree} and \texttt{Overlay} interfaces.
+
+\begin{code}
+\begin{verbatim}
+transitions {
+
+  downcall (state == init) maceInit() {
+    state = needJoin;
+  } 
+\end{verbatim}
+\end{code}
+
+When it begins, this service has not yet sent a \texttt{Join} request.
+
+\begin{code}
+\begin{verbatim} 
+  downcall (state == done) eventsWaiting() {
+    return false;
+  }
+\end{verbatim}
+\end{code}
+
+The \texttt{eventsWaiting} downcall must be implemented in any service which implements the \texttt{SimApplication} interface.  It returns either \texttt{true} or \texttt{false}, in order to let the modelchecker know whether more events need to be run on behalf of the application.  If the service is in the \texttt{done} state, the node has sent a \texttt{Join} request.  The sending of a \texttt{Join} message  the only application event for this example, so the \texttt{eventsWaiting} downcall always returns false from this downcall.
+
+\begin{code}
+\begin{verbatim} 
+  downcall eventsWaiting() {
+    return true;
+  }
+\end{verbatim}
+\end{code}
+
+In any other state besides \texttt{done}, the \texttt{eventsWaiting} downcall can return true, since possible such states include \texttt{init} and \texttt{needJoin}, both states which hold before the \texttt{Join} request is sent.  
+
+\begin{code}
+\begin{verbatim}
+  downcall (state == needJoin) simulateEvent() {
+    state = done;
+    NodeSet peers;
+    if(PEERSET_STYLE == NEXT_NODE) {
+      peers.insert(upcall_getMaceKey((upcall_getNodeNumber()+1) % upcall_getNodeCount()));
+    } else {
+      peers.insert(upcall_getMaceKey(0)); //BrokenTree and Overcast expect the root to be passed in.
+    }
+    downcall_joinOverlay(peers);
+    return "joinOverlay(" + peers.toString() + ")";
+  } 
+\end{verbatim}
+\end{code}
+
+Based on the type of join, when the modelchecker calls the \texttt{simulateEvent} downcall, the node attempts to join the tree and changes its state accordingly.  A string indicating the ``short verion'' of what the event did is returned.  
+
+\begin{code}
+\begin{verbatim} 
+  downcall (state == init) simulateEvent() {
+    maceInit();
+    return "maceInit()";
+  }
+\end{verbatim}
+\end{code}
+
+In the \texttt{init} state, when the modelchecker calls the \texttt{simulateEvent} downcall, the \texttt{maceInit} downcall is called for this service.  It is interesting to note that for this type of service, the invoking application, i.e. the modelchecker, does not call \texttt{maceInit} itself, as is generally the case for Mace services.  
+
+
+To work through this example [Note that none of these steps should be necessary with a standard Mace repository]:
+\begin{itemize} 
+\item If it does not already exist, create a directory called \emph{SimApplication} under \emph{[Path-to-Mace-Source]/services}.  
+\item If one does not already exist, copy \emph{SimTreeApp.mac} into this directory.  
+\item If one does not already exist, copy \emph{CMakeLists.txt.SimTreeApp} into this directory and remove \emph{.SimTreeApp} from the file name.
+\item Open \emph{[Path-to-Mace-Source]/services/CMakeLists.txt} and add \texttt{SimApplication} to the line beginning with \texttt{SET(SERVICE\_DIRS}, if not already present.  This tells Mace to build the \texttt{BrokenTree} service.
+\end{itemize}
+
+\subsection{BrokenTreeTest}
+\label{BrokenTreeTest}
+
+This file tells the modelchecker how to create and invoke each of these services.  It implements the method \texttt{loadTest} which is called by the modelchecker on every execution of the service to be tested.  The following code can be found in \emph{BrokenTreeTest.cc}.
+
+\begin{code}
+\begin{verbatim} 
+namespace macemc {
+
+#ifdef UseBrokenTree
+\end{verbatim}
+\end{code}
+
+This is included so that the tests for multiple services can be combined into one file. 
+
+\begin{code}
+\begin{verbatim} 
+  class BrokenTreeMCTest : public MCTest {
+    public:
+      const mace::string& getTestString() {
+        const static mace::string s("BrokenTree");
+        return s;
+      }
+\end{verbatim}
+\end{code}
+
+This function is required for the modelchecker to determine which service it is testing.  It must match the \texttt{CHECKED\_SERVICE} parameter in the \emph{params.default} file.
+
+\begin{code}
+\begin{verbatim} 
+      void loadTest(TestPropertyList& propertiesToTest, 
+                    ServiceList& servicesToDelete, 
+                    NodeServiceClassList& servicesToPrint, 
+                    SimApplicationServiceClass** appNodes, 
+                    int num\_nodes) {
+\end{verbatim}
+\end{code}
+
+The modelchecker passes \emph{BrokenTreeTest.cc} a variety of arguments to fill in, via this function. The \texttt{TestPropertyList} is of type \texttt{mace::vector<TestProperties*, mace::SoftState>}.  \texttt{TestProperties} is a list of properties to be tested (as specified in \emph{SimTreeApp.mac}, \emph{BrokenTree.mac}, or as pre-defined in \emph{[Path-to-Mace-Source]/application/modelchecker/Properties.h}) and \texttt{mace::SoftState} is an indicator that the properties are not to be serialized.  The list of \texttt{servicesToDelete} is created to help the modelchecker know what services must be cleaned up after it is finished.  Transport services do not need to be added to this list but wrappers do.  For instance, the TCP service needs not be added to the list but the wrapper used to include the \texttt{forward} upcall does need to be added.  The \texttt{servicesToPrint} list stores services to print when the modelchecker displays output.  The \texttt{appNodes} argument stores an array of pointers to the the \texttt{SimTreeApp} Service, one for each node, and the \texttt{SimTreeNodes} map stores a mapping from node number to \texttt{SimTreeApp} service.  The modelchecker passes the \texttt{appNodes} argument to this method and \texttt{appNodes} differs from the \texttt{SimTreeNodes} map in interface and use.  For instance, \texttt{appNodes} has the ability to allow properties to be tested using the information it stores.  The \texttt{num\_nodes} variable stores the number of nodes in the system.  
+
+\begin{code}
+\begin{verbatim} 
+        int base_port = params::get("MACE_PORT", 5377);
+        int queue_size = params::get("queue_size", 20);
+\end{verbatim}
+\end{code}
+
+The \texttt{base\_port} variable is used to specify the port for Mace to use.  However, this is not necessary for modelchecking, since everything is simulated locally.  It is included here because it will be required when the TCP service is instantiated.  The \texttt{queue\_size} variable indicates the queue size to be used for TCP.  Both of these arguments can be specified in the \emph{params.default} file.
+
+\begin{code}
+\begin{verbatim} 
+        mace::map<int, BrokenTree_namespace::BrokenTreeService*, mace::SoftState> brokenTreeNodes;
+        mace::map<int, SimTreeApp_namespace::SimTreeAppService*, mace::SoftState> simTreeNodes;
+\end{verbatim}
+\end{code}
+
+These two maps store pointers from each node to a service, one set of pointers for the \texttt{BrokenTree} service, and one for the \texttt{SimTreeApp} service.
+
+\begin{code}
+\begin{verbatim} 
+        for(int i = 0; i < num_nodes; i++) {
+\end{verbatim}
+\end{code}
+
+Everything is initialized once for each node in the system.
+
+\begin{code}
+\begin{verbatim} 
+          ServiceClassList list;
+\end{verbatim}
+\end{code}
+
+This list is used to keep track of all services created for this node.  Later, these lists of services are added to the \texttt{servicesToPrint} list.
+
+\begin{code}
+\begin{verbatim} 
+          Sim::setCurrentNode(i);
+          MaceKey key = Sim::getCurrentMaceKey();
+          SimulatorTCPService* tcp = new SimulatorTCPService(queue_size, base_port, i);
+          RouteTransportWrapper_namespace::RouteTransportWrapperService* rtw 
+               = new RouteTransportWrapper_namespace::RouteTransportWrapperService(*tcp);
+          servicesToDelete.push_back(rtw);
+          list.push_back(rtw);
+\end{verbatim}
+\end{code}
+
+The TCP service is created with the queue size specified in the \emph{params.default} file, and the wrapper service is created as well.  The wrapper service is pushed onto the list of services to clean up after modelchecking, as well as onto the list of services created for this node.
+
+\begin{code}
+\begin{verbatim} 
+          BrokenTree_namespace::BrokenTreeService* tree 
+               = new BrokenTree_namespace::BrokenTreeService(*rtw, Sim::getMaceKey(0), num_nodes);
+          servicesToDelete.push_back(tree);
+          list.push_back(tree);
+          brokenTreeNodes[i] = tree;
+\end{verbatim}
+\end{code}
+
+The \texttt{BrokenTree} service is created and pushed onto the list of services to clean up after modelchecking, as well as onto the list of services created for this node.  The \texttt{brokenTreeNodes} map is updated to point to the appropriate instance of the \texttt{BrokenTree} service for this node.
+
+\begin{code}
+\begin{verbatim} 
+          SimTreeApp_namespace::SimTreeAppService* app 
+               = new SimTreeApp_namespace::SimTreeAppService(*tree, 
+                                                             *tree, 
+                                                             SimTreeApp_namespace::ROOT_ONLY, 
+                                                             0, 
+                                                             key, 
+                                                             num_nodes);
+          servicesToDelete.push_back(app);
+          list.push_back(app);
+          servicesToPrint.push_back(list);
+          simTreeNodes[i] = app;
+          appNodes[i] = app;
+        }
+\end{verbatim}
+\end{code}
+
+The \texttt{SimTreeApp} service is created with a pointer to the \texttt{BrokenTreeApp} service and pushed onto the list of services to clean up after modelchecking, as well as onto the list of services created for this node.  The \texttt{simTreeNodes} map is updated to point to the appropriate instance of the \texttt{SimTreeApp} service for this node, as is the \texttt{appNodes} array.  The list of services created for this node is now added to the \texttt{servicesToPrint} list, which is a list of vectors, one vector of services for each node.
+
+\begin{code}
+\begin{verbatim} 
+        propertiesToTest.push_back(new 
+             SpecificTestProperties<BrokenTree_namespace::BrokenTreeService>(brokenTreeNodes));
+        propertiesToTest.push_back(new 
+             SpecificTestProperties<SimTreeApp_namespace::SimTreeAppService>(simTreeNodes));
+      }
+\end{verbatim}
+\end{code}
+
+The properties found in the two service files are pushed back on the list of properties for the modelchecker to verify.
+
+\begin{code}
+\begin{verbatim} 
+      virtual ~BrokenTreeMCTest() {}
+  };
+
+  void addBrokenTree() __attribute__((constructor));
+  void addBrokenTree() {
+    MCTest::addTest(new BrokenTreeMCTest());
+  }
+}
+\end{verbatim}
+\end{code}
+
+This code is ``gcc magic'' to allow for static initialization of the above class.  This lets the class be initialized by the compiler so that users of the modelchecker do not have to alter the modelchecker's source to call the correct \texttt{loadTest} method each time they test a new service.
+
+To work through this example:
+\begin{itemize}
+\item Copy \emph{BrokenTreeTest.cc} into \emph{[Path-to-Mace-Source]/application/modelchecker}.
+\item Open \emph{[Path-to-Mace-Source]/application/modelchecker/CMakeLists.txt} and add the line \texttt{SET(modelchecker\_SRCS BrokenTreeTest.cc {EXTERNAL\_TEST\_SRCS})}, replacing any similar such lines.
+\end{itemize}
+
+\subsection{Params.default}
+\label{Params.default}
+The \emph{params.default} file file specifies arguments which are necessary for the particular service to be tested (the usual use for a \emph{params} file), as well as properties used to tell the modelchecker how to run tests of the service.  The included sample file is explained below.
+
+
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+MACE_PRINT_HOSTNAME_ONLY = 1
+MACE_LOG_LEVEL = 1
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Required for perl to properly print Macekeys
+# This can be increased for more logging but should not be 
+#    decreased.
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+USE_UDP_REORDER = 0		
+USE_UDP_ERRORS = 0		
+USE_NET_ERRORS = 0		
+SIM_NODE_FAILURE = 0		
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Whether to reorder UDP messages	  
+# Whether to allow UDP errors
+# Whether to allow network (e.g. socket) errors 
+# Whether to allow for node failure
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+USE_BEST_FIRST = 0	
+
+
+
+
+	
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Selects between the Search Random Util and Best First Util.  
+#    Best First maintains state about the tree, so that when 
+#    a particular prefix is encountered twice, it does not 
+#    need to be repeated.  This speeds up execution by about 
+#    5% but costs extra memory.
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+MACE_PORT=10201	 		
+max_num_steps=80000		
+search_print_mask=0		
+#search_print_mask=15		
+#search_print_mask=255
+#search_print_mask=4095
+PRINT_SEARCH_PREFIX=0		
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Port for mace to use, unimportant for modelchecking
+# This is the total length of an execution.  Approximates infinity
+# "Granularity" of print, says how often (in number of steps) to 
+#    print state about the current execution
+
+
+# When true, every path that reaches a live state is printed once the 
+#    live state is reached.
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+USE_RANDOM_WALKS=1   		
+USE_GUSTO=1			
+				
+USE_STATE_HASHES=0
+							
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Whether to use walks after tree search, necessary for 
+#    liveness properties
+# Turns off bad things (failures, etc) at random walk part, 
+#    adds weights to types of events (application, network, timer)
+# Helpful to turn on but may not work.  To test, run MC and search 
+#    for "non printable" in output
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+NUM_RANDOM_PATHS=40
+#MAX_PATHS=20			
+#MAX_PATHS=200
+#MAX_PATHS=50000
+#MAX_PATHS=1000000
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Number of paths to search for each path in "binary search" during 
+#    last nail search
+
+
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+COMPARE_CMC = 0			
+RUN_CMC_MEM = 0			
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# For comparison with another modelchecker
+# For comparison with another modelchecker
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+RUN_DIVERGENCE_MONITOR = 0	
+divergence_assert = 1		
+divergence_timeout = 30		
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Used to detect loops in code (by detecting long-running transitions)
+# Whether to assert on timeout of divergence monitor
+# Timeout for divergence monitor
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\begin{multicols}{2}{
+\begin{code}
+\begin{verbatim} 
+CHECKED_SERVICE=BrokenTree			
+
+#BrokenTree                                
+num_nodes=4					
+queue_size=100000				
+
+SEARCH_DEPTH=5
+\end{verbatim}
+\end{code}
+\begin{code}
+\begin{verbatim} 
+# Which service to run
+
+# Number of nodes and all parameters required by tested service
+# MC needs to know how many nodes to simulate
+# Used for TCP
+
+# Bound for the iterative depth first search
+\end{verbatim}
+\end{code}
+}
+\end{multicols}
+
+\section {Properties}
+\label{Properties}
+Properties for the service to be tested can be specified in either the service file for the service being tested, or in the application-emulating service.  For this example, the properties are listed in \emph{SimTreeApp.mac}.
+\subsection {Property Specification}
+\label {PropertySpecification}
+The grammar specification for properties is located (in a Recursive Descent Perl format) in \emph{perl5/Mace/Compiler/MaceGrammar.pm}.  The top-level rule to look at is ``properties'', which uses GrandBExpression and others.  The idea of the language is to use a latex-like language.  In large part, a goal was to be able to copy/paste the property into a latex document, and have it generate the mathematical formula to be tested.
+
+Some common operators and expressions include:
+\begin{itemize}
+\item equality: =
+\item inequality: $\backslash neq$   
+\item Element-Set $\backslash in$, $\backslash notin$
+\item Set-Set: $\backslash subset$, $\backslash propersubset$, $\backslash eq$ (seq equality, not C++ equality)
+\item Numerical: = (C++ equality), \texttt{<, >}, $\backslash geq$, $\backslash leq $
+\item Logical: $\backslash implies$, $\backslash and$, $\backslash or$, $\backslash xor$, $\backslash iff$, $\backslash not$
+\end{itemize}
+
+All properties presently have to start with a quantification over the nodes (special variable $\backslash nodes$).  The quantification options are (n can be any variable name):
+\begin{itemize}
+\item $\backslash forall$ n $\backslash in$ $\backslash nodes$: 
+\item $\backslash exists$ n $\backslash in$ $\backslash nodes$: 
+\item $\backslash for$\{OP\}\{COUNT\} n $\backslash in$ $\backslash nodes$:, Where OP is \texttt{<, >,} $\backslash geq$, $\backslash leq$, or =, and COUNT is a number.
+\end{itemize}
+
+\begin{code}
+\begin{verbatim}
+So \for{=}{4} n \in \nodes would be "for exactly 4 n in nodes".
+\end{verbatim}
+\end{code}
+
+You can use `n' as a reference to a node, and use the dot operator to access its state variables, `state', or a const transition/routine.  
+
+Any variable which is a MaceKey can be ``promoted'' to a node reference.
+That is, suppose your service had a MaceKey variable ``p'' where it stored the address of a peer.
+
+Then you could write a property:
+
+\begin{code}
+\begin{verbatim}
+\forall n \in \nodes: n = n.p.p
+\end{verbatim}
+\end{code}
+
+which would say that for each node, n's peer is n (or n is the peer of its peer).  
+
+You can also compute the closure of a recursion, in a property like
+this:
+
+\begin{code}
+\begin{verbatim}
+\forall n \in \nodes: n.p(.p)* \eq \nodes
+\end{verbatim}
+\end{code}
+
+Which would be:
+The set containing n.p, and the closure formed by continually adding new nodes to the set by referencing each node's .p is the set of all nodes.
+
+We use this property to check that successor pointers in Chord form a ring of all nodes.  You can also take the cardinality of a set like
+this:
+
+
+\begin{code}
+\begin{verbatim}
+\forall n \in \nodes: |n.p(.p)*| = 4
+\end{verbatim}
+\end{code}
+
+Which would test that for each node n, the closure of n.p(.p)* has size exactly 4.
+
+You can use multiple quantifications, and parentheses to designate order of operations.  This gives you something like:
+
+\begin{code}
+\begin{verbatim}
+\forall n \in \nodes: (n.state = init \or (\exists m \in \nodes: m.p = n))
+\end{verbatim}
+\end{code}
+
+Which would say, for all nodes n, either n is in the init state, or there exists a node m such that m.p = n.  The parentheses may not actually be needed here, but can provide clarity.  Additionally, curly braces can be used instead of parentheses for nesting, as desired for clarity.
+
+Each property should begin with a property name and a colon, contain a ``grand boolean expression'' (GrandBExpression in the grammar), and end with a semicolon.
+
+\subsection {Properties for \texttt{BrokenTree}}
+\label{PropertiesForBrokenTree}
+The code shown at the end of \emph{SimTreeApp.mac} is detailed in the following.
+\begin{code}
+\begin{verbatim}
+properties {
+  safety {
+\end{verbatim}
+\end{code}
+\texttt{Safety} properties must be true at the end of each step.
+\begin{code}
+\begin{verbatim}
+    //     joinedImpNotNullParent : \forall n \in \nodes : 
+                   { n.downcall_isJoinedOverlay() \iff ( n.downcall_getParent(MaceKey::null) \neq \null ) };
+\end{verbatim}
+\end{code}
+This property specifies that every joined node has a parent, and that every node with a parent is joined.
+\begin{code}
+\begin{verbatim}
+    //     isRootEqSelfParent : \forall n \in \nodes : 
+                   { n.downcall_isRoot(MaceKey::null) \iff ( n.downcall_getParent(MaceKey::null) = n ) };
+\end{verbatim}
+\end{code}
+This property specifies that the root must list itself as its parent and that any node claiming to be its own parent is the root.
+\begin{code}
+\begin{verbatim}
+    noLoops : \forall n \in \nodes : 
+                   { \exists m \in n.(downcall_getParent(MaceKey::null))* : 
+                                      { m.downcall_isRoot(MaceKey::null) \or \not m.downcall_isJoinedOverlay() } };
+  }
+\end{verbatim}
+\end{code}
+This property specifies that there are no loops within the tree hierarchy.
+\begin{code}
+\begin{verbatim}
+  liveness {
+\end{verbatim}
+\end{code}
+\texttt{Liveness} properties must eventually be reached.
+\begin{code}
+\begin{verbatim}
+    allJoined : \forall n \in \nodes : n.downcall_isJoinedOverlay();
+\end{verbatim}
+\end{code}
+Eventually, all nodes must have joined the overlay.
+\begin{code}
+\begin{verbatim}
+    oneRoot : \for{=}{1} n \in \nodes : n.downcall_isRoot(MaceKey::null);
+\end{verbatim}
+\end{code}
+Eventually, only one node may think itself the root.
+\begin{code}
+\begin{verbatim}
+    kidsMatch : \forall n \in \nodes :
+            {
+              (n.downcall_isRoot(MaceKey::null) 
+                \or n 
+                \in n.downcall_getParent(MaceKey::null).downcall_getChildren(MaceKey::null))
+              \and 
+              (\forall m \in n.downcall_getChildren(MaceKey::null) : n = m.downcall_getParent(MaceKey::null))
+            };
+  }
+}
+\end{verbatim}
+\end{code}
+Eventually, it must be the case that every node is either the root or is one of its parent's children, and all of each node's children must believe that node to be their parent.
+
+
+\section{Building the ModelChecker}
+\label{BuildingMC}
+The modelchecker is built with Mace, so now that all files are moved to the proper place, simply build Mace as usual:
+\begin{itemize} 
+\item Create a build directory at \emph{[Path-to-Mace-Source]/builds}.
+\item Move to \emph{[Path-to-Mace-Source]/builds}.
+\item Generate makefiles:  \texttt{cmake ../}
+\item Build Mace: \texttt{make}
+\end{itemize}
+
+\section{Running the ModelChecker}
+\label{RunningMC}
+Finally, to run the modelchecker:
+\begin{itemize} 
+\item Move to the directory in which the modelchecker was built: \emph{[Path-to-Mace-Source]/builds/application/modelchecker}.
+\item Create a test directory to store output and cd into this directory.
+\item Copy \emph{Params.default} into the test directory.
+\item Run the modelchecker:  \texttt{./modelchecker params.default}
+\item Alternatively, the modelchecker can be run with a perl script which can be copied into the build directory for the modelchecker (\emph{[Path-to-Mace-Source]/builds/application/modelchecker}) from \emph{[Path-to-Mace-Source]/application/modelchecker}.  In this case, run with \texttt{../run-modelchecker.pl} from within the test directory.
+\end{itemize}
+
+As it runs, the modelchecker will create several files.  \emph{error.log} and \emph{error.graph} are useful for debugging, as are \emph{live.log} and \emph{live.graph}, if created.  
+
+\section{Debugging with the ModelChecker}
+\label{DebuggingMC}
+Use \texttt{mdb error.log} to step through and graphically view a trace.  Once running mdb, typing h will display a list of commands, enabling you to move forward or back a step, view the event graph, etc. The following gives more detailed explanations for these commands:
+[TODO: this is not more detailed right now!]
+\begin{itemize}
+\item h: print help
+\item j: jump to step
+\item n: next step
+\item p: previous step
+\item P: display current step in pager
+\item l: list current step
+\item L: list step to external program state-dump.sh
+\item s: regex search
+\item d: diff states
+\item m: diff states across log files (non-interactive only)
+\item I: filter include selectors
+\item E: filter exclude selectors
+\item i: filter include
+\item e: filter exclude
+\item w: select which node to step
+\item t: disable/enable properties
+\item c: clear the screen
+\item x: search all steps
+\item g: generate event graph
+\item q: quit
+\item r: choose random number (interactive only)
+\item a: show possible next steps (interactive only)
+\item R: run until live (interactive only)
+\item B: branch modelchecker from current step (interactive only)
+\item P: print to file: path, path to current step, event graph, output log (interactive only)
+\item G: toggle gusto (interactive only)
+\end{itemize}
+
+
+\end{document}

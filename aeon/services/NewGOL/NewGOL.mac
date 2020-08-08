@@ -1,0 +1,328 @@
+/* 
+ * NewGOL.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2012, Bo Sang, Wei-Chiu Chuang
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- 
+*/
+
+#include "mlist.h"
+#include "marray.h"
+#include "mdeque.h"
+
+#include <sys/time.h>
+#include <time.h>
+
+#include <algorithm>
+
+
+#define STATE_LIVE  1
+#define STATE_DEAD  0
+using mace::NodeCollection;
+
+service NewGOL;
+//provides GenericGameOfLife;
+trace = med;
+
+constants{
+    uint64_t RESEND_TIMEOUT = 0.5*1000*1000;
+    uint64_t TIMEOUT = 1*1000;
+    int TOTAL_CONTEXT_NUM = 4;
+
+    int TOTAL_ROUND=10000;
+
+    uint8_t TOPLEFT     = 0;
+    uint8_t TOP         = 1;
+    uint8_t TOPRIGHT    = 2;
+    uint8_t LEFT        = 3;
+    uint8_t RIGHT       = 4;
+    uint8_t BOTTOMLEFT  = 5;
+    uint8_t BOTTOM      = 6;
+    uint8_t BOTTOMRIGHT = 7;
+}
+
+services {
+    Transport tcp = TcpTransport();
+}
+
+states {
+    WaitingResults;		//Master is waiting for compute results from workers
+
+    Ready;			//Workers: have finished computation
+    Computing;		//Workers: are computing
+}
+
+constructor_parameters {
+    // Master: the number of workers
+    uint32_t GRID_WIDTH = 3200;
+    uint32_t GRID_HEIGHT = 3200;
+
+    uint32_t NODE_WIDTH = 2;
+    uint32_t NODE_HEIGHT = 2;
+
+    uint32_t GRID_WIDTH_PERNODE = 1600; //GRID_WIDTH/NODE_WIDTH;
+    uint32_t GRID_HEIGHT_PERNODE = 1600; //GRID_HEIGHT/NODE_HEIGHT;
+}
+
+auto_types {
+}
+
+
+state_variables {
+    int round;
+    /* chuangw: TODO: use multi-key context */
+    context Block<uint32_t row, uint32_t column>{
+    /*context Row<uint32_t row>{
+        context Column<uint32_t column>{*/
+            mace::vector< PositionValueMap> myStates;
+            mace::vector< PositionValueMap> nextStates;
+            uint32_t initRows;
+            uint16_t neighborsExchanged;
+    /*    }
+    }*/
+    }
+}
+
+#minclude "golMessage.mi"
+
+transitions {
+  	downcall (state == init) maceInit() {
+        scatterInitialState();	
+  	}
+
+  	downcall (state != init) maceExit() {
+					      			
+  	}
+
+    /* store a line of initial state */
+    async [Block<row,column>] setInitState( uint32_t row,  uint32_t column, uint32_t datarow, PositionValueMap data) {
+    //async [Row<row>::Column<column>] setInitState( uint32_t row,  uint32_t column, uint32_t datarow, PositionValueMap data) {
+        if( myStates.empty() ){
+            myStates.resize(GRID_HEIGHT_PERNODE+2 );
+            for(uint32_t r=0;r< myStates.size();r++ ){
+                myStates[r].resize( GRID_WIDTH_PERNODE+2 );
+            }
+        }
+
+        copy( data.begin(), data.end(), myStates[ datarow+1 ].begin()+1 );
+
+        if( ++ initRows == GRID_HEIGHT_PERNODE ){
+            exchangeCells(row,column);
+        }
+
+    }
+    //async [Row<row>::Column<column>] updateNeighbor( uint32_t row,  uint32_t column, uint8_t from, const PositionValueMap& values) {
+    async [Block<row,column>] updateNeighbor( uint32_t row,  uint32_t column, uint8_t from, const PositionValueMap& values) {
+        switch( from ){
+            case TOPLEFT:
+                myStates[0][0] = values[0];
+                break;
+            case TOP:
+                copy( values.begin(), values.end(), myStates[0].begin()+1 );
+                break;
+            case TOPRIGHT:
+                myStates[0][GRID_WIDTH_PERNODE+1] = values[0];
+                break;
+
+            case LEFT:
+                for( uint32_t idx=1; idx <= GRID_HEIGHT_PERNODE+1; idx++ ){
+                    myStates[idx][0] = values[idx];
+                }
+                break;
+            case RIGHT:
+                for( uint32_t idx=1; idx <= GRID_HEIGHT_PERNODE+1; idx++ ){
+                    myStates[idx][GRID_WIDTH_PERNODE+1] = values[idx];
+                }
+                break;
+
+            case BOTTOMLEFT:
+                myStates[GRID_HEIGHT_PERNODE+1][0] = values[0];
+                break;
+            case BOTTOM:
+                copy( values.begin(), values.end(), myStates[GRID_HEIGHT_PERNODE+1].begin()+1 );
+                break;
+            case BOTTOMRIGHT:
+                myStates[GRID_HEIGHT_PERNODE+1][GRID_WIDTH_PERNODE+1] = values[0];
+                break;
+
+        }
+        if( ++ neighborsExchanged == 8 ){
+            neighborsExchanged = 0;
+            determineNextState(row, column); // compute the next state
+        }
+    }
+
+}
+
+routines {
+    /**
+     [global context]
+     read from file the initial state. assign data values to the contexts
+     */
+    void scatterInitialState( ) {
+        round=1;
+
+        std::ifstream in("initstate.txt");
+ 
+        uint8_t buf[3500];
+        // load the entire initial state map
+        uint32_t noderow = 0;
+        uint32_t datarow = 0;
+        while( !in.eof() ){
+            in.getline((char *)buf, 3500);
+            int len = std::strlen( (char *)buf);
+            PositionValueMap data;
+            data.assign(buf, buf+len);
+            if( in.eof() ){ std::cout<<"eof"<<std::endl; }
+            if( len == 0 ){ std::cout<<"strlen=0"<<std::endl; }
+            for(uint32_t nodeoffset=0; nodeoffset< NODE_WIDTH; nodeoffset++){
+                uint8_t* dataStart = &buf[ (nodeoffset*GRID_WIDTH_PERNODE) ];
+                PositionValueMap values;
+                values.assign( dataStart, dataStart + GRID_WIDTH_PERNODE );
+                async_setInitState(noderow, nodeoffset, datarow, values );
+            }
+            if( ++datarow == GRID_HEIGHT_PERNODE ){ datarow = 0; noderow++; }
+        }
+        in.close();
+    }
+    //[Row<row>::Column<column>] void exchangeCells( uint32_t row, uint32_t column ){
+    [Block<row,column>] void exchangeCells( uint32_t row, uint32_t column ){
+        Position upperLeft =    getNeighbor(row, column, -1, -1 );
+        Position top =          getNeighbor(row, column, -1,  0 );
+        Position upperRight =   getNeighbor(row, column, -1, +1 );
+        Position left =         getNeighbor(row, column,  0, -1 );
+        Position right =        getNeighbor(row, column,  0, +1 );
+        Position bottomLeft =   getNeighbor(row, column, +1, -1 );
+        Position bottom =       getNeighbor(row, column, +1,  0 );
+        Position bottomRight =  getNeighbor(row, column, +1, +1 );
+
+        PositionValueMap valTopLeft ( myStates[1].begin()+1, myStates[1].begin()+2 );
+        PositionValueMap valTop     ( myStates[1].begin()+1, myStates[1].begin()+(GRID_WIDTH_PERNODE+1) );
+        PositionValueMap valTopRight( myStates[1].begin()+GRID_WIDTH_PERNODE, myStates[1].begin()+(GRID_WIDTH_PERNODE+1) );
+
+        PositionValueMap valLeft;
+        for( mace::vector<PositionValueMap>::iterator it = myStates.begin()+1; it != myStates.begin()+1+GRID_HEIGHT_PERNODE; it++ ){
+            valLeft.push_back( *(it->begin()+1) );
+        }
+
+        PositionValueMap valRight;
+        for( mace::vector<PositionValueMap>::iterator it = myStates.begin()+1; it != myStates.begin()+1+GRID_HEIGHT_PERNODE; it++ ){
+            valRight.push_back( *(it->begin()+(GRID_WIDTH_PERNODE+1)  ) );
+        }
+
+        PositionValueMap valBottomLeft( myStates[GRID_HEIGHT_PERNODE].begin()+1, myStates[GRID_HEIGHT_PERNODE].begin()+2 );
+        PositionValueMap valBottom( myStates[GRID_HEIGHT_PERNODE].begin()+1, myStates[GRID_HEIGHT_PERNODE].begin()+GRID_WIDTH_PERNODE+2 );
+        PositionValueMap valBottomRight( myStates[GRID_HEIGHT_PERNODE].begin()+GRID_WIDTH_PERNODE+1, myStates[GRID_HEIGHT_PERNODE].begin()+GRID_WIDTH_PERNODE+2 );
+
+        // upper left
+        async_updateNeighbor( upperLeft.first, upperLeft.second, BOTTOMRIGHT, valTopLeft  );
+        // top
+        async_updateNeighbor( top.first, top.second, BOTTOM, valTop  );
+        // upper right
+        async_updateNeighbor( upperRight.first, upperRight.second, BOTTOMLEFT, valTopRight  );
+        // left
+        async_updateNeighbor( left.first, left.second, RIGHT, valLeft  );
+        // right
+        async_updateNeighbor( right.first, right.second, LEFT, valRight  );
+        // bottom left
+        async_updateNeighbor( bottomLeft.first, bottomLeft.second, TOPRIGHT, valBottomLeft  );
+        // bottom
+        async_updateNeighbor( bottom.first, bottom.second, TOP, valBottom  );
+        // bottom right
+        async_updateNeighbor( bottomRight.first, bottomRight.second, TOPLEFT, valBottomRight  );
+    }
+    [__null] Position getNeighbor(uint32_t row, uint32_t column,int32_t rowOffset, int32_t columnOffset ){
+        Position neighbor;
+        neighbor.first = (uint32_t)((int32_t)row + rowOffset + NODE_HEIGHT) % NODE_HEIGHT;
+        neighbor.second = (uint32_t)((int32_t)column + columnOffset + NODE_WIDTH)% NODE_WIDTH;
+
+        return neighbor;
+    }
+
+    //[Row<block_row>::Column<block_column>] void determineNextState(uint32_t block_row,  uint32_t block_column){
+    [Block<block_row,block_column>] void determineNextState(uint32_t block_row,  uint32_t block_column){
+        for(uint32_t row=1;row<=GRID_HEIGHT_PERNODE;row++){
+            for(uint32_t column=1;column<=GRID_WIDTH_PERNODE;column++){
+                int liveCount=0, deadCount=0;
+                // countNeighborState()
+                for(uint32_t neighbor_row=row-1;neighbor_row<=row+1;neighbor_row++){
+                    for( uint32_t neighbor_column=column-1;neighbor_column<=column+1;neighbor_column++ ){
+                        if( myStates[neighbor_row][neighbor_column] == STATE_LIVE ) liveCount++;
+                        else if( myStates[neighbor_row][neighbor_column] == STATE_DEAD )deadCount++;
+                        else {
+                            //std::cout<<"unexpected state at node "<<myRank<<" (row,column)=("<<neighbor_row<<","<<neighbor_column<<")"<<std::endl;
+                        }
+                    }
+                }
+                determineCellState(block_row,block_column,row,column,liveCount,deadCount);
+            }
+        }
+        for(uint32_t idx=1;idx<= GRID_HEIGHT_PERNODE;idx++){
+            //memcpy(myStates[idx]+1, nextStates[idx]+1, sizeof(uint8_t)*GRID_WIDTH_PERNODE );
+            copy( myStates[idx].begin()+1, myStates[idx].begin() + ( 1 + GRID_WIDTH_PERNODE), nextStates[idx].begin()+1 );
+        }
+    }
+
+    /*[Row<row>::Column<column>] void countNeighborState( int row, int column, int*liveCount, int*deadCount ){
+        for(int neighbor_row=row-1;neighbor_row<=row+1;neighbor_row++){
+            for( int neighbor_column=column-1;neighbor_column<=column+1;neighbor_column++ ){
+                if( myStates[neighbor_row][neighbor_column] == STATE_LIVE ) (*liveCount)++;
+                else if( myStates[neighbor_row][neighbor_column] == STATE_DEAD )(*deadCount)++;
+                else {
+                    std::cout<<"unexpected state at node "<<myRank<<" (row,column)=("<<neighbor_row<<","<<neighbor_column<<")"<<std::endl;
+                }
+            }
+        }
+        //cout<<"live="<<*liveCount<<",deadCount="<<*deadCount<<endl;
+    }*/
+    [Block<block_row, block_column>] void determineCellState( uint32_t block_row, uint32_t block_column, uint32_t row, uint32_t column, int liveCount, int deadCount){
+    //[Row<block_row>::Column<block_column>] void determineCellState( uint32_t block_row, uint32_t block_column, uint32_t row, uint32_t column, int liveCount, int deadCount){
+        //cout<<"live="<<liveCount<<",deadCount="<<deadCount<<endl;
+        if( myStates[row][column] == STATE_LIVE ){
+            liveCount--;
+            if( liveCount < 2 ) nextStates[row][column] = STATE_DEAD;
+            else if( liveCount == 2 || liveCount == 3 ) nextStates[row][column] = STATE_LIVE;
+            else nextStates[row][column] = STATE_DEAD;
+        }else if( myStates[row][column] == STATE_DEAD ){ 
+            deadCount--;
+            if( liveCount == 3 )
+                nextStates[row][column] = STATE_LIVE;
+            else
+                nextStates[row][column] = STATE_DEAD;
+
+        }else{
+            // no...this shouldn't happen
+            //std::cout<<"unexpected state value on worker "<<myRank<<",(row,column)=("<<row<<","<<column<<"),state="<<(uint32_t)myStates[row][column]<<std::endl;
+        }
+
+        /*myReport[( row-1)*GRID_WIDTH_PERNODE+column-1].state = nextStates[row][column];
+        myReport[( row-1)*GRID_WIDTH_PERNODE+column-1].generation = myGeneration;*/
+    }
+
+}
+
+

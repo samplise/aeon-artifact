@@ -1,0 +1,327 @@
+
+#include <stdlib.h>
+
+service ListServer;
+provides Null;
+
+typedefs {
+
+}
+
+services {
+  Transport t;
+}
+
+constants {
+  int HEAD_LIST_NODE_ID = 0;
+  int MAX_RANDOM_VALUE = 10;
+}
+
+constructor_parameters {
+  
+}
+
+#minclude "ListMessages.mi"
+
+auto_types {
+  
+}
+ 
+state_variables {
+  context ListHead {
+    mace::vector<uint32_t> firstNodeIds;
+  }
+
+  context ListNode<uint32_t> {
+    int key;
+    
+    uint32_t nodeHeight;
+    mace::vector<int> nextNodeIds;
+  }
+}
+
+
+ 
+transitions {
+  downcall maceInit()  {
+    createNewOwnership("globalContext", "ListHead");
+    async_initListHead();
+  }
+
+  async [ListHead] initListHead( ) {
+    ADD_SELECTORS("ListServer");
+    maceout << "To initialize ListHead!" << Log::endl;
+    firstNodeIds.clear();
+  }
+
+  upcall [ListHead] deliver(const MaceKey& src, const MaceKey& dest, const InsertRequest& msg) {
+    ADD_SELECTORS("ListApp");
+    int key = msg.key;
+
+    maceout << "Insert key("<< key <<") into the list from Client("<< msg.clientId <<")!" << Log::endl;
+    if( firstNodeIds.size() == 0 ) {
+      uint32_t new_node_id = createNewContext("ListNode");
+      mace::string nodeCtxName = generateContextName("ListNode", new_node_id);
+      createNewOwnership("ListHead", nodeCtxName);
+      maceout << "Create ownership between ListHead and " << nodeCtxName << Log::endl; 
+
+      uint32_t height = randomHeight();
+
+      maceout << "Create a new node("<< new_node_id <<") with height " << height << Log::endl;
+
+      initListNode(new_node_id, height, key );
+
+      for(uint32_t i=0; i<=height; i++) {
+        firstNodeIds.push_back(new_node_id);
+      }
+
+      downcall_route( src, Reply(msg.clientId) );
+      return;
+    }
+
+    uint32_t height = randomHeight();
+    int new_node_id = -1;
+    if( firstNodeIds[0] == 0 || key <= getKey(firstNodeIds[0]) ){
+      new_node_id = createNewContext("ListNode");
+      mace::string newNextNodeCtxName = generateContextName("ListNode", new_node_id);
+      
+      createNewOwnership("ListHead", newNextNodeCtxName);
+      initListNode( new_node_id, height, key );
+
+      setNextListNode( new_node_id, 0, firstNodeIds[0] );
+
+      if( firstNodeIds[0] != 0 ){
+        mace::string oldNextNodeCtxName = generateContextName("ListNode", firstNodeIds[0]);
+        removeOwnership("ListHead", oldNextNodeCtxName);
+      }
+      firstNodeIds[0] = new_node_id;
+    } else {
+      new_node_id = insertKey( firstNodeIds[0], height, key );
+    }
+
+
+    if( new_node_id > 0 ) {
+      maceout << "Have a new node("<< new_node_id <<") with height " << height << Log::endl;
+
+      for(uint32_t i=1; i<=height; i++) {
+        if( firstNodeIds.size() <= i ) {
+          firstNodeIds.push_back(0);
+        }
+
+        int old_node_id = firstNodeIds[i];
+        if( old_node_id == 0 || getKey( old_node_id ) < key ) {
+          setNextListNode(new_node_id, i, old_node_id);
+
+          if( old_node_id > 0 ){
+            mace::string oldNextNodeCtxName = generateContextName("ListNode", old_node_id);
+            removeOwnership("ListHead", oldNextNodeCtxName);
+          }
+          firstNodeIds[i] = new_node_id;
+        }
+      }
+      broadcast_insertNodeToList(firstNodeIds[0], height, key, new_node_id);
+    }
+
+    downcall_route( src, Reply(msg.clientId) );
+  }
+
+  upcall [ListHead] deliver(const MaceKey& src, const MaceKey& dest, const InsertRequest& msg){
+    ADD_SELECTORS("ListServer");
+    int key = msg.key;
+    maceout << "Delete key("<< key <<") from the list from Client("<< msg.clientId <<")!" << Log::endl;
+
+    for( int i=0; i<firstNodeIds.size(); i++ ){
+      uint32_t next_node_id = firstNodeIds[i];
+      if( next_node_id != 0 && getKey(next_node_id) == key ){
+        uint32_t new_next_node = getNextLinkNode( next_node_id, i );
+        firstNodeIds[i] = new_next_node;
+        mace::string oldNextNodeCtxName = generateContextName("ListNode", next_node_id);
+        removeOwnership("ListHead", oldNextNodeCtxName);
+      }
+    }
+    broadcast_deleteKeyFromList(firstNodeIds[0], key);
+    downcall_route( src, Reply(msg.clientId) );
+  }
+
+  upcall [ListHead] deliver(const MaceKey& src, const MaceKey& dest, const QueryRequest& msg) {
+    ADD_SELECTORS("ListApp");
+    int key = msg.key;
+    maceout << "Search key("<< key <<") in the list from Client("<< msg.clientId <<")!" << Log::endl;
+
+    if( firstNodeIds.size() == 0 ) {
+      downcall_route( src, Reply(msg.clientId) );
+      return;
+    }
+
+    for( uint32_t i=firstNodeIds.size()-1; i>=0; i-- ){
+      int next_node_id = firstNodeIds[i];
+      if( next_node_id > 0 && getKey(next_node_id) < key ) {
+        broadcast_searchKey(src, msg.clientId, next_node_id, i, key);
+        break;
+      }
+    }
+  }
+
+  broadcast [ListNode<nodeId>] insertNodeToList(const uint32_t& nodeId, const uint32_t& h, const int& k, const uint32_t& new_node_id) {
+    ADD_SELECTORS("ListServer");
+    if( k == key ){
+      return;
+    }
+    maceout << "To insert ListNode("<< new_node_id <<") in ListNode("<< nodeId <<") with height "<< h << Log::endl;
+    int i=1;
+
+    while( i<=height && i<= h ){
+      int next_node_id = nextNodeIds[i];
+
+      if( next_node_id <=0 || getKey(next_node_id) > k ) {
+        addLink( nodeId, new_node_id );
+        
+        setNextListNode( new_node_id, h, next_node_id );
+        if( next_node_id > 0 ){
+          removeLink( nodeId, next_nodeId );
+        }
+        nextNodeIds[i] = new_node_id;    
+      }
+    }
+    broadcast_insertNodeToList( nextNodeIds[0], h, k, new_node_id );
+  }
+
+  broadcast [ListNode<nodeId>] deleteKeyFromList(const uint32_t& nodeId, const int& k){
+    ADD_SELECTORS("ListServer");
+    
+    for( int i=0; i<nextNodeIds.size(); i++ ){
+      uint32_t next_node_id = nextNodeIds[i];
+      if( next_node_id != 0 && getKey(next_node_id) == key ){
+        uint32_t new_next_node = getNextLinkNode( next_node_id, i );
+        firstNodeIds[i] = new_next_node;
+        mace::string oldNextNodeCtxName = generateContextName("ListNode", next_node_id);
+        removeOwnership("ListHead", oldNextNodeCtxName);
+      }
+    }
+    broadcast_deleteKeyFromList(nextNodeIds[0], key);
+  }
+
+  broadcast [ListNode<nodeId>] searchKey( const MaceKey& src, const uint32_t& cId, const uint32_t& nodeId, const uint32_t& h, const int& k ) {
+    ASSERT( nextNodeIds.size()> h );
+    ADD_SELECTORS("ListServer");
+    maceout << "Search key("<< k <<") in the listNode("<< nodeId <<") from Client("<< cId <<") at level "<< h << Log::endl;
+
+    if( k > key ) {
+      for( uint32_t i=h; i>=0; i-- ){
+        int next_node_id = nextNodeIds[i];
+        if( next_node_id > 0 && getkey(next_node_id) < key ) {
+          broadcast_searchKey(src, cId, next_node_id, i, key);
+          return;
+        }
+      }
+    } else {
+      downcall_route( src, Reply(cId) );
+    }
+  }
+
+}
+
+routines {
+
+[__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+  std::ostringstream oss;
+  oss << ctxName <<"["<<id<<"]";
+  return oss.str();
+}
+
+
+[ListNode<nodeId>] int insertKey( const uint32_t& nodeId, const uint32_t& h, const int& k ) {
+  ADD_SELECTORS("ListServer");
+  maceout << "Insert key("<< k <<") in the ListNode("<< nodeId << Log::endl;
+
+  if( key == k ){
+    return 0;
+  } else if( nextNodeIds[0] == 0 || k < getKey(nextNodeIds[0]) ){
+    int new_node_id = createNewContext("ListNode");
+    mace::string myCtxName = generateContextName("ListNode", nodeId);
+    mace::string newNextNodeCtxName = generateContextName("ListNode", new_node_id);
+      
+    createNewOwnership(myCtxName, newNextNodeCtxName);
+    initListNode( new_node_id, h, k );
+
+    setNextListNode( new_node_id, 0, firstNodeIds[0] );
+
+    if( firstNodeIds[0] != 0 ){
+      mace::string oldNextNodeCtxName = generateContextName("ListNode", firstNodeIds[0]);
+      removeOwnership("ListHead", oldNextNodeCtxName);
+    }
+    firstNodeIds[0] = new_node_id;
+    return new_node_id;
+  } else {
+    return insertKey( nextNodeIds[0], h, k );
+  }
+
+}
+
+[ListNode<nodeId>] void initListNode( const uint32_t& nodeId, const uint32_t& h, const int& k ) {
+  ADD_SELECTORS("ListServer");
+  maceout << "To initialize ListNode("<< nodeId <<") with nodeHeight="<< h << " key="<< k << Log::endl;
+
+  nodeHeight = h;
+  key = k;
+  
+  for( uint32_t i=0; i<=h; i++ ) {
+    nextNodeIds.push_back(0);
+  }
+}
+
+[ListNode<nodeId>] void setNextListNode( const uint32_t& nodeId, const uint32_t& h, const int& nextNodeId ) {
+  ADD_SELECTORS("ListServer");
+    
+  ASSERT( nextNodeIds.size() > h );
+
+  mace::string myCtxName = generateContextName("ListNode", nodeId);
+  mace::string newNextNodeCtxName = generateContextName("ListNode", new_node_id);
+      
+  createNewOwnership(myCtxName, newNextNodeCtxName);
+  nextNodeIds[h] = nextNodeId;
+}
+
+[ListNode<nodeId>] int getNextListNode( const uint32_t& nodeId, const uint32_t& h ) {
+  ADD_SELECTORS("ListServer");
+    
+  ASSERT( nextNodeIds.size() > h );
+
+  return nextNodeIds[h];
+}
+
+[ListNode<nodeId>] int getKey( const uint32_t& nodeId) {
+  return key;
+}
+
+
+
+[__null] void addLink( const uint32_t& node1, const uint32_t& node2 ){
+  mace::string ctxName1 = generateContextName("ListNode", node1);
+  mace::string ctxName2 = generateContextName("ListNode", node2);
+  createNewOwnership( ctxName1, ctxName2 );
+}
+
+[__null] void removeLink( const uint32_t& node1, const uint32_t& node2 ){
+  mace::string ctxName1 = generateContextName("ListNode", node1);
+  mace::string ctxName2 = generateContextName("ListNode", node2);
+  removeOwnership( ctxName1, ctxName2 );
+}
+
+
+[__null] uint32_t randomHeight() {
+  ADD_SELECTORS("ListServer");
+  double rand_d_value =( (double)RandomUtil::randInt(MAX_RANDOM_VALUE) )/ MAX_RANDOM_VALUE;
+
+  uint32_t height = 0;
+  double cur_value = 0.5;
+  while( rand_d_value <= cur_value ) {
+    height ++;
+    cur_value = cur_value / 2;
+  }
+
+  return height;
+}
+
+}
+

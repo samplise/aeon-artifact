@@ -1,0 +1,56 @@
+/**
+chuangw: test case 5 tests upcalls out of fullcontext world.
+
+*/
+service TestCase5;
+provides ServComp;
+trace=high;
+typedefs {
+}
+services {
+}
+
+constants {
+}
+
+constructor_parameters {
+  uint32_t NCONTEXTS = 100;
+}
+ 
+state_variables {
+  context Contexts<uint32_t n>{
+  }
+}
+
+messages {
+}
+ 
+transitions {
+  downcall (state == init)maceInit()  {
+    for(uint32_t n =0; n< NCONTEXTS; n++ ){
+      async_initContexts(n);
+    }
+    
+  }
+  async [Contexts<n>] initContexts(uint32_t n ){
+    async_createEvent(n);
+  }
+
+  async [Contexts<n>] createEvent(uint32_t n ){
+    upcall_respond( n );
+
+
+    uint32_t v = upcall_ask( n );
+    ASSERT( v == n );
+
+    v = upcall_ask( n );
+    ASSERT( v == n );
+
+    async_createEvent( n );
+  }
+  
+  downcall [Contexts<x>] request( uint32_t x ){
+    return x;
+  }
+}
+

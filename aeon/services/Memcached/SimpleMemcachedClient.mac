@@ -1,0 +1,222 @@
+#include <random>
+
+service SimpleMemcachedClient;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  NodeSet DHT_NODES = NodeSet(); /* Should be only one node */
+  
+  uint64_t PAIRS_NUMBER = 40000000;
+  uint64_t PAIRS_NUMBER_PER_CLIENT = 40000000; 
+  uint32_t CLIENT_NUMBER = 8;
+
+  uint32_t KEY_BYTES = 10;
+  uint32_t POINTS_PER_SERVER = 5;
+
+  uint64_t OUTPUT_COUNT = 100;
+  uint8_t KEY_VALUE_TEST_FLAG = 0;
+
+  uint32_t MESSAGE_WINDOW = 10;
+}
+
+typedefs {
+  typedef mace::vector< mace::pair<mace::string, mace::string> > Pairs;
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  ConnectionRequest {
+
+  }
+
+  ConnectionSetup {
+    MaceKey proxyAddr;
+  }
+
+  ReadRequest {
+    uint32_t clientId;
+    mace::string key;
+  }
+
+  ReadReply {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+    bool isCacheMiss;
+  }
+
+  WriteRequest {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+  }
+
+  WriteReply {
+    uint32_t clientId;
+    mace::string key;
+    bool isCacheMiss;
+  }
+}
+
+auto_types {
+  
+}
+
+state_variables {
+  context Client<uint32_t clientId> {
+    bool isActive;
+
+    uint64_t request_count;
+    uint64_t cache_miss_count;
+    uint64_t cache_hit_count;
+
+    uint64_t start_pair_number;
+    uint64_t end_pair_number;
+
+    uint64_t current_message_number;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    srand( mace::getmtime() );
+    ASSERT( DHT_NODES.size() == 1 );
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;  
+    for( uint32_t i=0; i<CLIENT_NUMBER; i++) {
+      std::ostringstream oss;
+      oss<< "Client[" << i << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initClient(i);
+      //async_setActive(i, true);
+    }
+    addNewOwnerships(ownerships);
+  }
+
+  
+  async [Client<clientId>] initClient( uint32_t const& clientId ) {
+    ADD_SELECTORS("SimpleMemcachedClient");
+  
+    request_count = 0;
+    cache_miss_count = 0;
+    cache_hit_count = 0;
+    current_message_number = 0;
+
+    isActive = false;
+    if( PAIRS_NUMBER == PAIRS_NUMBER_PER_CLIENT ) {
+      start_pair_number = 1;
+      end_pair_number = PAIRS_NUMBER;
+    } else {
+      randomGenerateKeyRange(start_pair_number, end_pair_number);
+    }
+    maceout << "To initialize client(" << clientId <<") start_pair_number="<< start_pair_number<< " end_pair_number="<< end_pair_number << Log::endl;
+  }
+
+  async [Client<clientId>] launchRequest( uint32_t const& clientId ) {
+    /*
+    if( current_message_number >= MESSAGE_WINDOW ) {
+      return;
+    }
+    */
+
+    ADD_SELECTORS("SimpleMemcachedClient");
+    
+    downcall_route( *( DHT_NODES.begin() ), ReadRequest(clientId, "100") );
+    current_message_number ++;
+    //async_launchRequest(clientId);
+  }
+
+  async [Client<clientId>] setActive( uint32_t const& clientId, bool const& active ) {
+    ADD_SELECTORS("SimpleMemcachedClient");
+    if( active ) {
+      maceout<< "Set Client("<< clientId <<") active!" << Log::endl;
+    } else {
+      maceout<< "Set Client("<< clientId <<") inactive" << Log::endl;
+    }
+
+    isActive = active;
+    if( isActive ) {
+      async_launchRequest(clientId);
+    }
+  }
+
+  async [Client<clientId>] readReply( uint32_t const& clientId, const ReadReply& msg) {
+    ADD_SELECTORS("SimpleMemcachedClient");
+    
+    request_count ++;
+    if( msg.isCacheMiss ) {
+      cache_miss_count ++;
+    } else {
+      cache_hit_count ++;
+    }
+
+    if( request_count % OUTPUT_COUNT == 0 ) {
+      maceout<< "Client("<< clientId <<"): requestCount=" << request_count << " cacheMissCount=" << cache_miss_count <<   " cacheHitCount=" << cache_hit_count<< Log::endl;
+      
+      cache_miss_count = 0;
+      cache_hit_count = 0;
+    }
+
+    current_message_number --;
+    if( isActive ) {
+      async_launchRequest( clientId );
+    }
+  }
+
+  
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ReadReply& msg) {
+    ADD_SELECTORS("MemcachedClient");
+    async_readReply( msg.clientId, msg );
+  }
+
+  
+}
+
+
+routines {
+
+[__null] mace::string generateRandomKey( const uint64_t start_pair_number, const uint64_t end_pair_number ) {
+  ASSERT(end_pair_number >= start_pair_number);
+  uint64_t uint_key;
+  if( start_pair_number == end_pair_number ) {
+    uint_key = start_pair_number;
+  } else {
+    uint64_t size = end_pair_number - start_pair_number;
+    uint_key = start_pair_number + (uint64_t) rand()%size;
+    ASSERT( uint_key <= end_pair_number );
+  }
+
+  std::ostringstream oss;
+  oss<< uint_key;
+  return oss.str();
+}
+
+[__null] void randomGenerateKeyRange(uint64_t& start_pair_number, uint64_t& end_pair_number ) {
+  const uint64_t start_range = PAIRS_NUMBER - PAIRS_NUMBER_PER_CLIENT;
+
+  start_pair_number = (uint64_t) rand()%start_range;
+  if( start_pair_number == 0) {
+    start_pair_number = 1;
+  }
+
+  end_pair_number = start_pair_number + PAIRS_NUMBER_PER_CLIENT - 1;
+  ASSERT( end_pair_number <= PAIRS_NUMBER);
+  return;
+}
+
+}
+
+
+

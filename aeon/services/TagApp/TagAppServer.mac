@@ -1,0 +1,268 @@
+#include "marray.h"
+#include "m_map.h"
+#include "RandomUtil.h"
+#include "mace-macros.h"
+
+service TagAppServer;
+
+provides Null;
+
+ 
+services {
+  Transport t;
+}
+
+constants {
+  
+}
+ 
+constructor_parameters {
+  uint16_t N_BUILDINGS = 1;
+  uint16_t N_ROOMS = 10;
+
+  uint64_t SNAPSHOT_PERIOD = 10;
+  uint64_t CONTEXT_SIZE = 1; // 100 Bytes
+  mace::string SNAPSHOT_FOLDER = "snapshot";
+}
+
+typedefs {
+  
+}
+
+auto_types {
+  
+}
+
+#minclude "TagAppMessages.mi"
+
+/*
+ * I use a two dimension array to represent the map.
+ * The initial number on each block is -1 which represent that the block is vacant.
+ * If the number in each block is positive, that means there is a kid with the 
+ * positive number as his kidID is standing on this block.
+ */
+
+state_variables {
+  context Controller {
+
+  }
+
+  context World {
+    uint32_t nextPlayerId;
+    mace::vector<uint16_t> buildingIds;
+  }  
+
+  context Building <uint16_t nBuilding> {
+  	uint16_t buildingId;
+    mace::vector<uint16_t> roomIds; 
+
+    uint32_t nextRoomIter;
+  }
+    
+  context Room <uint16_t nRoom> {
+		uint16_t roomId;
+		mace::vector<uint32_t> playerIds;
+	}
+
+  context Player <uint16_t nPlayer> {
+  	//indicates the ID of a kid
+    uint16_t playerId;
+    mace::vector<mace::string> data;
+    
+    uint32_t count;
+  }
+}
+
+transitions {
+  downcall maceInit() {
+    async_worldInit();
+    async_snapshotTimer(20);
+  }
+
+  async [World] worldInit() [ locking = ownership ] {
+    ADD_SELECTORS("TagAppServer");
+    maceout << "Initilaize world!" << Log::endl;
+    nextPlayerId = 1;
+    
+    // Initialize the building entrance
+    for (int i = 1; i <= N_BUILDINGS; i++) {
+      uint16_t buildingId = i;
+      buildingIds.push_back(buildingId);
+      mace::string buildingCtxName = generateContextName("Building", buildingId);
+      createNewOwnership("World", buildingCtxName);
+      async_buildingInit(buildingId);
+    }
+  }
+
+  async [Controller] snapshotTimer(const uint64_t sleep_period) {
+    sleep(sleep_period);
+    if( SNAPSHOT_PERIOD == 0 ){
+      return;
+    }
+
+    async_snapshotWorld();
+    async_snapshotTimer( SNAPSHOT_PERIOD );
+  }
+
+  async [World] snapshotWorld() {
+    ADD_SELECTORS("TagAppServer");
+    for( uint32_t i =0; i<buildingIds.size(); i++ ) {
+      broadcast_snapshotBuilding( buildingIds[i] );
+    }
+
+    maceout << "To snapshot the World!" << Log::endl;
+    mace::string file = SNAPSHOT_FOLDER + "/World";
+    snapshotContext( file );
+  }
+
+  broadcast [Building<nBuilding>] snapshotBuilding( const uint16_t& nBuilding ) {
+    ADD_SELECTORS("TagAppServer");
+    for( uint32_t i=0; i<roomIds.size(); i++ ){
+      broadcast_snapshotRoom( roomIds[i] );
+    }
+
+    maceout << "To snapshot the Building " << nBuilding << Log::endl;
+    std::ostringstream oss;
+    oss << SNAPSHOT_FOLDER <<"/Building-"<<nBuilding;
+    snapshotContext( oss.str() );
+  }
+
+  broadcast [Room<nRoom>] snapshotRoom( const uint16_t& nRoom ) {
+    ADD_SELECTORS("TagAppServer");
+    for( uint32_t i=0; i<playerIds.size(); i++ ){
+      broadcast_snapshotPlayer( playerIds[i] );
+    }
+
+    maceout << "To snapshot the Room " << nRoom << Log::endl;
+    std::ostringstream oss;
+    oss << SNAPSHOT_FOLDER <<"/Room-"<<nRoom;
+    snapshotContext( oss.str() );
+  }
+
+  broadcast [Player<nPlayer>] snapshotPlayer( const uint32_t& nPlayer ) {
+    ADD_SELECTORS("TagAppServer");
+    maceout << "To snapshot the Player " << nPlayer << Log::endl;
+
+    std::ostringstream oss;
+    oss << SNAPSHOT_FOLDER <<"/Player-"<<nPlayer;
+    snapshotContext( oss.str() );
+  }
+  
+  // Initial a single building
+  async [Building<nBuilding>] buildingInit (int nBuilding) [ locking = ownership ] {
+    ADD_SELECTORS("TagAppServer");
+    maceout << "Initialize Building " << nBuilding << Log::endl;
+    ASSERT(nBuilding > 0 );
+    buildingId = nBuilding; 
+    nextRoomIter = 0;
+
+    mace::string buildingCtxName = generateContextName("Building", buildingId); 
+    
+    for (uint16_t rCount = 1; rCount <= N_ROOMS; rCount++) {
+      uint16_t roomId = N_ROOMS * (buildingId - 1) + rCount;
+      roomIds.push_back(roomId);
+      mace::string roomCtxName = generateContextName("Room", roomId);
+      createNewOwnership(buildingCtxName, roomCtxName);
+      async_roomInit(roomId, nBuilding);
+    }
+  }
+
+  // Initial a single room
+  async [Room<nRoom>] roomInit(uint16_t nRoom, uint16_t nBuilding) {
+    ADD_SELECTORS("TagAppServer");
+    maceout << "Initialize Building["<< nBuilding <<"]room["<< nRoom <<"]!" << Log::endl;
+    ASSERT(nBuilding > 0 && nRoom > 0);
+    
+    roomId = nRoom;
+  }
+
+  async [Building<nBuilding>] putPlayerInBuilding(const uint16_t& nBuilding, const uint32_t& clientId, const MaceKey& src, 
+      const uint32_t& newPlayerId ) [ locking=ownership ] {
+    ADD_SELECTORS("TagAppServer");
+    
+    uint16_t room_iter = nextRoomIter;
+    nextRoomIter = (nextRoomIter+1) % roomIds.size();
+    uint16_t room_id = roomIds[room_iter];
+    broadcast_putPlayerInRoom( room_id, newPlayerId );
+    downcall_route(src, PlayerInitReply(clientId, newPlayerId));
+  }
+
+  broadcast [Room<nRoom>] putPlayerInRoom( const uint16_t& nRoom, const uint32_t& playerId ) {
+    ADD_SELECTORS("TagAppServer");
+
+    playerIds.push_back( playerId );
+
+    mace::string roomCtxName = generateContextName("Room", nRoom);
+    mace::string playerCtxName = generateContextName("Player", playerId); 
+    
+    createNewOwnership(roomCtxName, playerCtxName);
+    playerInit( playerId );
+  }
+
+  upcall [World] deliver(const MaceKey& src, const MaceKey& dest, const PlayerInitRequest& msg) {
+    ADD_SELECTORS("TagAppServer");
+    uint32_t newPlayerId = nextPlayerId ++;
+
+    maceout << "Assign player("<< newPlayerId <<") to client("<< msg.clientId<<") from " << src << Log::endl;
+
+    async_putPlayerInBuilding(1, msg.clientId, src, newPlayerId);
+  }
+
+  upcall [Player<msg.playerId>] deliver(const MaceKey& src, const MaceKey& dest, const InfoRequest& msg) {
+    ADD_SELECTORS("TagAppServer");
+    count ++;
+    downcall_route( src, RequestReply(msg.clientId) );
+    snapshot(...);
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("TagAppServer");
+    std::ostringstream oss;
+    oss << src <<"["<<msg.clientId<<"]";
+
+    MaceAddr commAddr = getExternalCommContextAddr( src, oss.str() );
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(msg.clientId, commKey) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< msg.clientId <<") from " << src << Log::endl;
+  }
+}
+
+routines {
+  [Player<nPlayer>] void playerInit(uint32_t nPlayer) {
+    ADD_SELECTORS("TagAppServer");
+    maceout << "Initialize Player("<< nPlayer <<")!" << Log::endl;
+    ASSERT(nPlayer > 0);
+
+    if( CONTEXT_SIZE > 10 ) {
+      mace::string str = generateStringData(10);
+      uint64_t n = (uint64_t)( CONTEXT_SIZE/10 );
+
+      for(uint64_t i=0; i<n; i++ ){
+        data.push_back(str);
+      }
+    } else {
+      mace::string str = generateStringData(CONTEXT_SIZE);
+      data.push_back(str);
+    }
+    
+    playerId = nPlayer;
+    count = 0;
+  }
+  
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+
+  // 100 bytes
+  [__null] mace::string generateStringData(uint64_t len) {
+    mace::string str1 = "aAbBcCdDeEfFgGhHiIgGkKlLmMnNoOpPqQrRsStTuUvV7w6W5x4X3y2Y1z0Z";
+    mace::string str = "";
+    for(uint64_t i=0; i<len; i++){
+      str = str + str1 + str1;
+    }
+
+    return str;
+  }
+}

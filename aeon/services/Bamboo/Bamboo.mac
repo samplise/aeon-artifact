@@ -1,0 +1,1295 @@
+/* 
+ * Bamboo.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, James W. Anderson
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+/**
+ *  Implementation of the Pastry protocol
+ *
+ *  Sooraj Bhat, Adolfo Rodriguez, Chip Killian
+ */
+
+#include <algorithm>
+#include <limits>
+// #include "AddressCache.h"
+#include "msparse_array.h"
+#include "NodeCollection.h"
+#include "mvector.h"
+#include "GlobalCommit.h"
+#include "ThreadStructure.h"
+#include "mmultimap.h"
+using mace::string;
+using mace::sparse_array;
+using mace::NodeCollection;
+using mace::MaceKeyDiff;
+using mace::InvalidMaceKeyException;
+using Log::endl;
+#define LOCALITY_TRACE
+#define JOINING_TRACE
+
+
+//#define TRACE_ROUTING_TABLE_SIZE
+
+service Bamboo;
+
+provides OverlayRouter, Overlay;
+
+trace=med;
+
+constants 
+{
+  //Users need to set these appropriately.
+  //   int ADDRESS_FAMILY = SHA32;
+  int ADDRESS_FAMILY = SHA160;
+  //   int PASTRY_BITS = 32;  // Number of bits in the address
+  int PASTRY_BITS = 160;  // Number of bits in the address
+  int MAX_ROUTESET = 3 ; // Number of nodes for each route entry
+  int B = 4 ;  // Number of bits in each address digit; Must divide PASTRY_BITS evenly
+
+  //These are functions of the prior ones
+  int ROWS = PASTRY_BITS/B ; // Number of rows is the number of digits in the address
+  int COLS = 1 << B ; // Number of possible values of each digit: 2^B
+  int DIGIT_MASK = COLS-1 ; // Used to mask only one digit of address
+  int MAX_LEAFSET = COLS ; // Size of the leaf set
+  //int MAX_LEAFSET = 4 ; // Size of the leaf set
+  int HALF = MAX_LEAFSET/2 ; // The size of the leaf set to each side of me
+  
+  uint64_t PRINT_TIMEOUT = 2 *1000*1000; // How often to dump stat
+
+  uint64_t MAINTENANCE_TIMEOUT = 5 *1000*1000; // How often to perform routing table maintenance  
+  uint64_t GLOBAL_MAINTENANCE_TIMEOUT = 200*1000; // How often to perform routing table maintenance  
+
+  uint64_t LEAFSET_TIMEOUT = 1 *1000*1000; // How often to perform routing table maintenance  
+
+  uint64_t MIN_JOIN_TIMEOUT = 3000000; // When to timeout a join
+  uint64_t MAX_JOIN_TIMEOUT = 3000001; // When to timeout a join
+
+  uint64_t ERROR_CACHE_LIFESPAN = 5*1000*1000; // When to timeout an error event.
+}
+
+constructor_parameters {
+  uint8_t MAX_NUM_SUCCESSORS = MAX_LEAFSET;
+}
+
+services 
+{
+  Route control_ = auto(shared,[],[RouteTransportWrapper]);
+  Transport ping_ = auto(shared,[],[lowlatency]);
+//  Route control_ = DeferredRouteTransportWrapper(); // FIXME : This should be used in INCONTEXT model.
+}
+
+states 
+{
+  preJoining;
+  joining;
+  joined;
+}
+
+auto_types
+{
+  route_entry __attribute((node(score=delay;))) {
+    MaceKey hash_id;
+    uint64_t delay;
+    uint64_t lastKnownLive;
+  }
+  hash_entry __attribute((node())) {
+    MaceKey ipaddr;
+  }
+
+  // shyoo : deferred upcall support
+/*  Deferred_joinResultOverlay {
+    MaceKey source;
+    join_status_t status;
+  }
+
+  Deferred_notifySuccessors {
+    NodeSet successors;
+  }
+
+  Deferred_notifySuccessorAdded {
+    MaceKey id;
+  }
+
+  Deferred_notifySuccessorRemoved {
+    MaceKey id;
+  }
+
+  Deferred_notifyIdSpaceChanged {
+    KeyRange range;
+  }*/
+}
+
+
+
+
+typedefs {
+  typedef NodeCollection<route_entry, MAX_LEAFSET> leafset;
+  typedef NodeCollection<hash_entry, MAX_LEAFSET> hashleafset;
+  typedef NodeCollection<route_entry, HALF> halfset;
+  typedef NodeCollection<route_entry, MAX_ROUTESET> routeset;
+  typedef mace::hash_set<registration_uid_t> HandlerSet;
+  typedef mace::map<MaceKey, mace::string> JoinMap;
+  typedef sparse_array<routeset, COLS> Row;
+  typedef sparse_array<Row, ROWS> Table;
+  typedef mace::pair<uint64_t, MaceKey> ErrorEvent;
+  typedef mace::deque<ErrorEvent> ErrorEventList;
+
+  typedef mace::multimap<MaceKeyDiff, MaceKey> DistanceMap;
+  // shyoo : deferred upcall support
+/*  typedef mace::deque<Deferred_joinResultOverlay> DeferredQueue_joinResultOverlay;
+  typedef mace::deque<Deferred_notifySuccessors> DeferredQueue_notifySuccessors;
+  typedef mace::deque<Deferred_notifySuccessorAdded> DeferredQueue_notifySuccessorAdded;
+  typedef mace::deque<Deferred_notifySuccessorRemoved> DeferredQueue_notifySuccessorRemoved;
+  typedef mace::deque<Deferred_notifyIdSpaceChanged> DeferredQueue_notifyIdSpaceChanged;*/
+
+}
+
+state_variables 
+{
+  //Consts which are set only in maceInit
+  MaceKey myhash; // Hash of my IP address
+  MaceKey me; //Get from lower service
+
+  // Leafset state
+  leafset myleafset;  // The leafset referenced by IP address
+  halfset myleft; // The left half of the leafset reference by IP address
+  halfset myright; // The right half of the leafset reference by IP address
+  hashleafset myhashleafset; // The leafset reference by hash address
+  MaceKey Lmin; // Smallest hash in left side of leafset
+  MaceKey Lmax; // Largest has in right side of leafset
+  MaceKey Lmin_ipaddr; // IP address of Lmin
+  MaceKey Lmax_ipaddr; // IP address of Lmax
+  KeyRange range;
+
+  // The routing table 
+  // It has 3 dimensions since each entry has backups.
+  //   routeset mytable[ROWS][COLS]; // The routing table 
+  Table mytable; // The routing table
+
+  timer printer __attribute((recur(PRINT_TIMEOUT)));
+  timer table_maintenance __attribute((recur(MAINTENANCE_TIMEOUT)));
+  timer global_table_maintenance __attribute((recur(MAINTENANCE_TIMEOUT)));
+  timer leafset_maintenance __attribute((recur(LEAFSET_TIMEOUT)));
+  timer join_timer;
+
+  NodeSet joinPeers;
+  NodeSet joinPeersRemaining;
+  registration_uid_t authoritativeJoinHandler;
+
+  NodeSet successors;
+  MaceKey Smin; // Smallest hash in left side of leafset
+  MaceKey Smax; // Largest has in right side of leafset
+  JoinMap deferredJoins;
+  ErrorEventList cachedErrors;
+
+  // shyoo : deferred upcall support
+/*  DeferredQueue_joinResultOverlay deferred_queue_joinResultOverlay;
+  DeferredQueue_notifySuccessors deferred_queue_notifySuccessors;
+  DeferredQueue_notifySuccessorAdded deferred_queue_notifySuccessorAdded;
+  DeferredQueue_notifySuccessorRemoved deferred_queue_notifySuccessorRemoved;
+  DeferredQueue_notifyIdSpaceChanged deferred_queue_notifyIdSpaceChanged;*/
+}
+
+method_remappings {
+  uses {
+    downcall_route(const MaceKey&, const Message& -> const std::string&, registration_uid_t regId = control_);
+    downcall_route(const MaceKey&, const probe& , registration_uid_t regId = ping_);
+    downcall_route(const MaceKey&, const probe_reply& , registration_uid_t regId = ping_);
+    upcall_verifyJoinOverlay(const MaceKey&, registration_uid_t regId = authoritativeJoinHandler); 
+  }
+}
+
+local_address {
+    MaceKey tmp = downcall_localAddress();
+    // derive bytes for sha from bamboo
+    std::string buf;
+    uint16_t p = htons(tmp.getMaceAddr().local.port);
+    buf.append((const char*)&p, sizeof(p));
+    char len = 4;
+    buf.append((const char*)&len, sizeof(len));
+    int i = tmp.getMaceAddr().local.addr;
+    buf.append((const char*)&i, sizeof(i));
+    //     maceout << "hashing " << Log::toHex(buf) << Log::endl;
+    if(ADDRESS_FAMILY == SHA160) {
+      return MaceKey(sha160, buf);
+    } else if(ADDRESS_FAMILY == SHA32) {
+      return MaceKey(sha32, buf);
+    }
+    ABORT("Exception: ADDRESS_FAMILY must be either SHA32 or SHA160");
+    return MaceKey::null;
+}
+
+messages 
+{
+  join {
+    MaceKey id;
+    MaceKey who; //ipv4
+  }
+  row_info {
+    MaceKey id;
+    int which_row;
+    sparse_array<routeset, COLS> row; 
+  }
+  leafset_push {
+    MaceKey id;
+    leafset leaves;
+  }
+  leafset_pull {
+    MaceKey id;
+    leafset leaves;
+  }
+  inform_request {
+    MaceKey id;
+    bool joined;
+  }
+  inform {
+    MaceKey id;
+  }
+  row_request {
+    int which_row;
+  }	
+  probe {
+    uint64_t time_sent; // time of probe request
+  }
+  probe_reply {   // simply echo the info sent in 'probe'
+    MaceKey id; // id of node being probed
+    uint64_t time_sent; // time of probe request to correlate request and reply
+  }
+  GlobalSample {
+    MaceKey key;
+  }
+  GlobalSampleReply {
+    MaceKey key;
+    MaceKey destHash;
+  }
+}
+
+transitions 
+{
+  downcall (state == init) maceInit() {
+    me = downcall_localAddress();
+    authoritativeJoinHandler = -1;
+    myhash = localAddress();
+    ASSERT(!myhash.isNullAddress());
+    Lmin = myhash;
+    Lmax = myhash; // Only me in the system at first
+    range.first = myhash;
+    range.second = myhash;
+
+    //     for (int i=0; i<ROWS; i++) { // First clear all route entries
+    //       for (int j=0; j<COLS; j++) {
+    //         routeset entry = mytable[i][j];
+    //         entry.clear();
+    //       }
+    //     }
+
+    for (int r=0; r<ROWS; r++) { // I am the entry for each of my digits
+      routeset& entry = mytable[r][myhash.getNthDigit(r,B)];
+      route_entry* myent = &entry.add(me);
+      myent->hash_id = myhash;
+    }
+
+    state = preJoining;
+
+    // shyoo : deferred upcall support
+/*    mace::SpecificCommitWrapper<BambooService>* executor = new mace::SpecificCommitWrapper<BambooService>(this, &BambooService::commitCallBack);
+    mace::GlobalCommit::registerCommitExecutor(executor);*/
+  }
+//  downcall getLocalAddress() [locking=read] {
+//  }
+  downcall setAuthoritativeJoinHandler(registration_uid_t regId) {
+    //FIXME: Verify this somehow.
+    authoritativeJoinHandler = regId;
+  }
+  downcall getOverlayJoinStatus() [locking=read] {
+    switch(static_cast<int64_t>(state)) {
+      case init:
+      case preJoining: return NONE;
+      case joining: return JOINING;
+      default: return JOINED;
+    }
+  }
+  downcall (state == preJoining) joinOverlay(const NodeSet& peerSet, registration_uid_t regId) {
+    joinPeers = peerSet;
+    joinPeers.erase(me);
+    joinPeersRemaining = joinPeers;
+    maceLog("joinPeers.size() = %zu\n", joinPeers.size());
+    if(joinPeers.empty()) {
+      state = joined;
+      doJoinedNotify();
+    } else {
+      MaceKey currentJoin = *(joinPeersRemaining.begin());
+      joinPeersRemaining.erase(currentJoin);
+      state = joining;
+      downcall_route(currentJoin, join(myhash, me));
+      uint64_t timeout = MIN_JOIN_TIMEOUT + randint((int)(MAX_JOIN_TIMEOUT - MIN_JOIN_TIMEOUT));
+      join_timer.reschedule(timeout); // timeout the join
+    }
+    //     ANNOTATE_SET_PATH_ID_STR(NULL, 0, "pastry_timer_printer_%s", me.toString().c_str());
+    printer.reschedule(PRINT_TIMEOUT);
+    //     ANNOTATE_SET_PATH_ID_STR(NULL, 0, "pastry_timer_table_maint_%s", me.toString().c_str());
+    table_maintenance.reschedule(MAINTENANCE_TIMEOUT);
+    //     ANNOTATE_SET_PATH_ID_STR(NULL, 0, "pastry_timer_global_table_maint_%s", me.toString().c_str());
+    global_table_maintenance.reschedule(GLOBAL_MAINTENANCE_TIMEOUT);
+    //     ANNOTATE_SET_PATH_ID_STR(NULL, 0, "pastry_timer_leaf_maint_%s", me.toString().c_str());
+    leafset_maintenance.reschedule(LEAFSET_TIMEOUT);
+  }
+  downcall (state != preJoining) joinOverlay(const NodeSet& peerSet, registration_uid_t regId) {
+    joinPeers.insert(peerSet.begin(), peerSet.end());
+    joinPeers.erase(me);
+    joinPeersRemaining.insert(peerSet.begin(), peerSet.end());
+    joinPeersRemaining.erase(me);
+  }
+  downcall leaveOverlay(registration_uid_t regId) {
+    //TODO: Implement this?
+  }
+  scheduler (state == joining) join_timer() {
+    // This timer is used in the event that the initial join fails.  
+    // It waits JOIN_TIMEOUT each time it fires.
+    if(joinPeersRemaining.empty()) {
+      joinPeersRemaining = joinPeers;
+    } 
+      MaceKey currentJoin = *(joinPeersRemaining.begin());
+      joinPeersRemaining.erase(currentJoin);
+#ifdef JOINING_TRACE
+      maceLog("Pastry: Routing a new join because join failed.\n");
+#endif
+      // Route another join
+      downcall_route(currentJoin, join(myhash, me));
+    uint64_t timeout = MIN_JOIN_TIMEOUT + randint((int)(MAX_JOIN_TIMEOUT - MIN_JOIN_TIMEOUT));
+    join_timer.reschedule(timeout); //send a new join after this time if not yet joined.
+  }
+  upcall (state == joining) deliver(const MaceKey& from, const MaceKey& dest, const join& msg) {
+    mace::string s;
+    mace::serialize(s, &msg);
+    deferredJoins[from] = s;
+  }
+  upcall (state == joined) deliver(const MaceKey& from, const MaceKey& dest, const join& msg) {
+    processJoinMessage(msg);
+  }
+  upcall (state == joined) deliver(const MaceKey& from, const MaceKey& dest, const row_request& msg) {
+    sendrow(from,msg.which_row);
+  }
+  upcall (state == joining) deliver(const MaceKey& from, const MaceKey& dest, const leafset_pull& msg) {
+#ifdef JOINING_TRACE
+    maceout << "Joining rcvd leafset_info from " << from << " msg " << msg << endl;
+#endif
+    processLeafset(from, msg.id, msg.leaves);
+#ifdef JOINING_TRACE
+    maceLog("finished joining.\n");
+#endif
+    join_timer.cancel();
+    downcall_route(from, inform(myhash));
+    state_change(joined);
+    doJoinedNotify();
+    processDeferredJoins();
+  }
+  (state == joined) {
+    upcall deliver(const MaceKey& from, const MaceKey& dest, const inform_request& msg) {
+      downcall_route(from,inform(myhash));
+      if(msg.joined) {
+        update_state(from, msg.id, true);
+      }
+    }
+    upcall deliver(const MaceKey& from, const MaceKey& dest, const inform& msg) {
+      update_state(from, msg.id, true);
+    }
+    upcall deliver(const MaceKey& from, const MaceKey& dest, const row_info& msg) {
+      for (int i=0; i<COLS; i++) {
+        if(msg.row.contains(i)) {
+          routeset::const_map_iterator iter = msg.row[i].mapIterator();
+          while(iter.hasNext()) {
+            const route_entry &n = iter.next();
+            update_state(n.getId(),n.hash_id, false);
+          }
+        }
+      }
+    }
+    upcall deliver(const MaceKey& from, const MaceKey& dest, const leafset_pull& msg) {
+      processLeafset(from, msg.id, msg.leaves);
+    }
+    upcall deliver(const MaceKey& from, const MaceKey& dest, const leafset_push& msg) {
+      processLeafset(from, msg.id, msg.leaves);
+      downcall_route(from, leafset_pull(myhash, myleafset));
+    }
+  }
+
+  //definitions for state query functions
+  (state != joined) {
+    downcall idSpaceContains(const MaceKey& id) [locking=read] {
+      return true;
+    }
+    downcall getSuccessors() [locking=read] {
+      static const NodeSet nil;
+      return nil;
+    } 
+    downcall getIdSpace() [locking=read] {
+      return KeyRange(myhash, myhash);
+    }
+    downcall (state != joined) getNextHop(const MaceKey& dest) [locking=read] { return me; }
+    downcall (state != joined) getNextHop(const MaceKey& dest, MaceKey& overlayId) [locking=read] { overlayId = myhash; return me; }
+  }
+  (state == joined) {
+    downcall idSpaceContains(const MaceKey& id) [locking=read] {
+      return range.containsKey(id);
+    }
+    downcall getSuccessors() [locking=read] {
+      return myhashleafset.nodeSet();
+    }
+    downcall getIdSpace() [locking=read] {
+      return range;
+    }
+    downcall getNextHop(const MaceKey& dest) [locking=read] { 
+      return make_routing_decision(dest); 
+    }
+    downcall getNextHop(const MaceKey& dest, MaceKey& overlayId) [locking=read] { 
+      return make_routing_decision(dest, &overlayId); 
+    }
+  }
+
+  upcall (state == joined) messageError(const MaceKey& dest, TransportError::type error_code, const join& msg, registration_uid_t regId) {
+    macewarn << "dest=" << dest << " msg=" << msg << Log::endl;
+    if(error_code != TransportError::NON_ERROR && error_code != TransportError::WRITE_ERROR) {
+      error(dest, error_code, "", regId);
+    }
+    processJoinMessage(msg);
+  }
+  upcall (state != joined) messageError(const MaceKey& dest, TransportError::type error_code, const join& msg, registration_uid_t regId) {
+    if(msg.who == me) {
+      maceerr << "The node I'm trying to join seems not to be responding! dest=" << dest << Log::endl;
+    } else {
+      maceerr << "How in the heck did this happen? dest=" << dest << " " << msg << Log::endl;
+    }
+  }
+  upcall error(const MaceKey& nodeId, TransportError::type error_code, const std::string& m, registration_uid_t registrationUid) {
+    maceout << "received error " << error_code << " for " << nodeId << endl;
+
+    ASSERT(error_code != TransportError::NON_ERROR);
+
+    cachedErrors.push_back(ErrorEvent(curtime+ERROR_CACHE_LIFESPAN, nodeId));
+
+    for (int r=0; r<ROWS; r++) {
+      for( int i=0; i<COLS; i++) {
+	if (mytable[r].contains(i) && mytable[r][i].contains(nodeId)) {
+	  maceout << "Removing " << nodeId << " from routing table" << endl;
+	  ASSERT(mytable[r][i].erase(nodeId));
+	  if(mytable[r][i].size() == 0) { mytable[r].erase(i); }
+
+	  i=COLS; //Though the break should take care of it, this also prevents us from searching further columns.
+	  r=ROWS; //This prevents us from searching further rows.
+	  break;
+	}
+      }
+    }
+
+    if (myleafset.contains(nodeId)) {
+      maceout << "Removing " << nodeId << " from leafset" << endl;
+      MaceKey hash = myleafset.get(nodeId).hash_id;
+      myhashleafset.erase(hash);
+      myleafset.erase(nodeId);
+      myleft.erase(nodeId);
+      myright.erase(nodeId);
+      bool succRemoved = successors.containsKey(hash);
+      recompute_leaf_bounds();
+      if(state == joined && succRemoved) {
+	doNotifySuccessorRemoved(hash);
+	doNotifySuccessors();
+      }
+    }
+
+    //todo -- check if we need to resend a buffered join message.
+
+    return;
+  } // API error
+
+  scheduler printer() [locking=read] {
+    //dump_state();
+    maceout << "My nodeid space [ " << range.first << " , " << range.second << " )" << endl;
+    maceout << "Leafset.size(): " << myleafset.size() << " Leafset: " << myleafset << endl;
+    maceout << "Leftset: " << myleft << endl;
+    maceout << "Rightset: " << myright << endl;
+
+#ifdef TRACE_ROUTING_TABLE_SIZE
+    int routesize = 0;
+    maceout << "Routing table sizes:" << endl;
+    // rows 0 through (l-1) won't have a long enough prefix
+    for (int r=0; r<ROWS; r++) {
+      for (int c=0; c<COLS; c++) {
+        if(mytable[r].contains(c) && mytable[r][c].size() > 0) {
+          maceout << "Row[" << r << "] ";
+          maceout << "Col[" << c << "] ";
+          maceout << "size=" << mytable[r][c].size() << endl;
+          routesize += mytable[r][c].size();
+        }
+      }
+    }
+    maceout << "Total: " << routesize << endl;
+#endif
+  }
+  //maintenance timers
+  (state == joined) {
+    scheduler table_maintenance() {
+      //neighbor's neighbors
+      ASSERT(mytable.count());
+      int row = -1;
+      Row& r = mytable.random(&row);
+      ASSERT(r.count());
+      int col = -1;
+      routeset& s = r.random(&col);
+      if(!s.empty()) {
+        route_entry& n = s.random();
+        if(n.getId() != me) {
+          downcall_route(n.getId(),row_request(row));
+        }
+      } else {
+        r.erase(col);
+      }
+    }
+    scheduler global_table_maintenance() {
+      //global sampling
+      MaceKey d = myhash;
+      int prefixMatch = randint(ROWS);
+      for(int i = prefixMatch; i < ROWS; i++) {
+        d.setNthDigit(randint(COLS), B);
+      }
+      MaceKey n = make_routing_decision(d);
+      downcall_route(n, GlobalSample(d));
+    }
+    scheduler leafset_maintenance() {
+      EXPECT(!myleafset.empty()) {
+        downcall_route(myleafset.random().getId(), leafset_push(myhash, myleafset));
+      }
+    }
+  }
+
+  //Handling global sampling
+  (state == joined) {
+    upcall forward(const MaceKey& src, const MaceKey& dest, MaceKey& nextHop, const GlobalSample& msg) {
+      nextHop = make_routing_decision(msg.key);
+      return true;
+    }
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const GlobalSample& msg) {
+      downcall_route(src, GlobalSampleReply(msg.key, myhash));
+    }
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const GlobalSampleReply& msg) {
+      update_state(src, msg.destHash, true /*known live*/, true /*do probe*/);
+    }
+  }
+
+  upcall (state != init) deliver(const MaceKey& from, const MaceKey& dest, const probe& msg) {
+    downcall_route(from,probe_reply(myhash, msg.time_sent)); // echo
+  }
+  upcall (state != init) deliver(const MaceKey& from, const MaceKey& dest, const probe_reply& msg) {
+    update_table_part2(from,msg.id,curtime-msg.time_sent, true);
+  }  
+
+  downcall checkNode(const MaceKey& dest, const MaceKey& overlayId) {
+    update_state(dest, overlayId, true, true); //setting live, not sure if that's smart.
+  }
+}
+
+routines
+{
+
+  void processLeafset(const MaceKey& senderIp, const MaceKey& senderHash, const leafset& senderLeafset) {
+    leafset::const_map_iterator iter = senderLeafset.mapIterator();
+    while(iter.hasNext()) {
+      const route_entry &n = iter.next();
+      update_state(n.getId(),n.hash_id,false); 
+    }
+    update_state(senderIp, senderHash, true);
+  }
+
+  // Sees if the proposed node is a better fit
+  // in either the routing table or leafset
+  void update_state(const MaceKey& ipaddr, const MaceKey& id, bool knownLive, bool doProbe = false)
+  {
+    if (id.isNullAddress()) {
+      macewarn << "FIXME: IGNORING POTENTIAL BOGUS NODE AT " << ipaddr << " WITH ID " << id << endl;
+      return;
+    }
+    if (ipaddr == me) {
+      return;
+    }  
+    while(!cachedErrors.empty() && cachedErrors.front().first < curtime) {
+      cachedErrors.pop_front();
+    }
+    if(!knownLive) {
+      for(ErrorEventList::const_iterator i = cachedErrors.begin(); i != cachedErrors.end(); i++) {
+        if(i->second == ipaddr) { 
+          macewarn << "Ignoring peer since I've received an error from it in the past " << ERROR_CACHE_LIFESPAN << " microseconds." << Log::endl;
+          return;
+        }
+      }
+    }
+    update_table(ipaddr,id,knownLive,doProbe);
+    update_leafset(ipaddr,id,knownLive);
+  }
+
+  // Kicks off probes to the input node to determine if it should be part of our
+  // routing table
+  void update_table(const MaceKey& ipaddr, const MaceKey& id, bool knownLive, bool doProbe)
+  {				
+    //TODO: Should we do anything with knownLive?
+    ASSERT(ipaddr != me);
+    //     static int probeId = 0; //XXX: only needed for pip
+    //     ANNOTATE_PUSH_PATH_ID_STR(selector.c_str(),0,"pProbe-%s-%s-%d",me.toString().c_str(),ipaddr.toString().c_str(),probeId++);
+    macedbg(2) << "ipaddr: " << ipaddr << " me: " << me << endl;
+
+    if(doProbe) {
+      int l = id.sharedPrefixLength(myhash);
+      int Dl = id.getNthDigit(l,B);
+      if(mytable.contains(l) && mytable[l].contains(Dl) && !mytable[l][Dl].empty()) {
+        route_entry &best = mytable[l][Dl].leastScore<uint64_t>();   
+        routeset::map_iterator iter = mytable[l][Dl].mapIterator();
+        while(iter.hasNext()) {
+          route_entry& r = iter.next();
+          if(r.getId() != ipaddr) {
+            downcall_route(r.getId(), probe(curtime));
+          }
+          if(&r != &best) {
+            iter.remove();
+          }
+        }
+      }
+      downcall_route(ipaddr, probe(curtime));
+    }
+    
+    update_table_part2(ipaddr,id,(knownLive ? 
+				  std::numeric_limits<int64_t>::max(): 
+				  std::numeric_limits<uint64_t>::max()), 
+		       knownLive); //For debug only.
+    //     ANNOTATE_POP_PATH_ID(selector.c_str(),0);
+  }
+
+  // Once the probe is complete, determine if we should add node to the routing table
+  void update_table_part2(const MaceKey& ipaddr, const MaceKey& id, uint64_t delay, bool knownLive)
+  {
+    int l = id.sharedPrefixLength(myhash);
+    int Dl = id.getNthDigit(l,B);
+    
+    //    printf("DEBUG: l %d, Dl %d, id %x myhash %x\n",l, Dl, id, myhash);
+    //    fflush(stdout);
+    
+#ifdef LOCALITY_TRACE
+    maceout << "Updating Table With Node " << ipaddr << "(" << id << ") [l:" << l << ", dl:"<< Dl <<"] which has delay " << delay << endl;
+#else
+#ifdef JOINING_TRACE
+    //     maceout << "Updating Table With Node " << ipaddr << "(" << id << ") [l:" << l << ", dl:"<< Dl <<"] which has delay " << delay << endl;
+#endif
+#endif
+    
+    // if the entry is empty
+    if (mytable[l][Dl].space() && !mytable[l][Dl].contains(ipaddr)) {
+#ifdef LOCALITY_TRACE
+      maceout << "Adding to empty table space " << ipaddr << "(" << id << ") -- " << delay << endl;
+#endif
+      
+      route_entry& re = mytable[l][Dl].add(ipaddr);
+      re.hash_id = id;
+      re.delay = delay;
+      re.lastKnownLive = (knownLive ? curtime : 0);
+    }		    
+    else if (!mytable[l][Dl].contains(ipaddr)) { // set is full
+      // replace the neighbor who has worst delay
+      route_entry& worst = mytable[l][Dl].greatestScore<uint64_t>();
+
+      if (worst.delay > delay || (worst.delay == delay && knownLive))
+      {
+#ifdef LOCALITY_TRACE
+        maceout << "Replacing worst neighbor " << ipaddr << " (" << id << ") -- " << delay << " < " << worst.delay << " " << worst.getId() << "(" << worst.hash_id << ")" << endl;
+#endif
+        mytable[l][Dl].erase(worst.getId());
+        route_entry &it = mytable[l][Dl].add(ipaddr);
+        it.hash_id = id;
+        it.delay = delay;
+        it.lastKnownLive = (knownLive ? curtime : 0);
+      } 
+      else {
+#ifdef LOCALITY_TRACE
+        maceout << "Not replacing worst neighbor " << ipaddr << " (" << id << ") -- " << delay << " > " << worst.delay << " " << worst.getId() << "(" << worst.hash_id << ")" << endl;
+#endif
+      }
+    } else if (mytable[l][Dl].contains(ipaddr) && delay > 0) {
+      //Update the delay based on this recent probe
+      route_entry& re = mytable[l][Dl].get(ipaddr);
+#ifdef LOCALITY_TRACE
+      maceout << "Updating neighbor delay " << ipaddr << " (" << id << ") -- " << delay << " from " << re.delay << endl;
+#endif
+      if((re.delay > (uint64_t)std::numeric_limits<int64_t>::max() && 
+	  knownLive) || delay < (uint64_t)std::numeric_limits<int64_t>::max()) {
+        re.delay = delay;
+      }
+      if(knownLive) {
+        re.lastKnownLive = curtime;
+      }
+    }
+    else {
+#ifdef LOCALITY_TRACE
+      maceout << "No action taken " << ipaddr << " (" << id << ") -- " << delay << endl;
+#endif
+    }
+  }
+
+  void update_leafset(const MaceKey& ipaddr, const MaceKey& id, bool knownLive)
+  {
+    //     maceout << "In update_leafset " << ipaddr << " " << id << " " << knownLive << endl;
+    if (ipaddr == me) { maceout << "ipaddr == me" << endl; return; }
+    if ( !myleafset.contains(ipaddr) ) {
+      int sl = myleft.space();
+      int sr = myright.space();
+      int rl = myleft.empty() ? false : KeyRange::containsKey(id,Lmin,myhash);
+      int rr = myright.empty() ? false : KeyRange::containsKey(id,myhash,Lmax);
+
+      if (rl) {
+        if(!knownLive) {
+          downcall_route(ipaddr,inform_request(myhash, state==joined));
+        } else {
+          if (sl) {
+            add_left(ipaddr,id);
+          }
+          else {
+            insert_left(ipaddr,id);
+            update_leafset(Lmin_ipaddr, Lmin, true);
+          }
+        }
+      }
+      else if (rr) {
+        if(!knownLive) {
+          downcall_route(ipaddr,inform_request(myhash, state==joined));
+        } else {
+          if (sr) {
+            add_right(ipaddr,id);
+          }
+          else  {
+            insert_right(ipaddr,id);
+            update_leafset(Lmax_ipaddr, Lmax, true);
+          }
+        }
+      }
+      else {
+        if ((sl || sr) && !knownLive) {
+          downcall_route(ipaddr,inform_request(myhash, state==joined));
+        } else {
+          if (sl && sr) {
+            // use a heuristic to guess where it should go
+            MaceKeyDiff d = (id-myhash).toSigned();
+            maceout << id << " - " << myhash << " = " << d << endl;
+            if (d.isNegative()) {	
+              add_left(ipaddr,id);
+            } else {
+              add_right(ipaddr,id);
+            }  
+          }
+          else if (sl)    
+            add_left(ipaddr,id);
+          else if (sr)    
+            add_right(ipaddr,id);
+        }
+      }
+    }
+    //     maceout << "Leaving update_leafset " << ipaddr << " " << id << " " << knownLive << endl;
+  }
+
+  // routines should also support locking=read..
+  //locking=read!
+  //MaceKey make_routing_decision(const MaceKey& id, MaceKey* nexthopid = NULL) const [trace=off] [locking=read]
+  MaceKey make_routing_decision(const MaceKey& id, MaceKey* nexthopid = NULL) const [locking=read]
+  {
+    //Place these references carefully.
+    /*const MaceKey& me = read_me();
+    const KeyRange& range = read_range();
+    const MaceKey& myhash = read_myhash();
+    const MaceKey& Lmax = read_Lmax();
+    const MaceKey& Lmin = read_Lmin();
+    const hashleafset& myhashleafset = read_myhashleafset();
+    const halfset& myleft = read_myleft();
+    const halfset& myright = read_myright();
+    const leafset& myleafset = read_myleafset();
+    const Table& mytable = read_mytable();*/
+
+    if(id.isNullAddress() || range.containsKey(id)) { //if I manage it, done.
+      if(id.isNullAddress()) {
+        macewarn << "id " << id << " is a null address!  Routing locally." << endl;
+      }
+      maceout << "Returning 'me'" << endl;
+      if(nexthopid) { *nexthopid=myhash; }
+      return me;
+    }
+    else if (myleft.empty() && KeyRange::containsKey(id,Lmax,range.first)) {
+      //I don't manage it, but it's between Lmax and me.  Therefore, Lmax manages it.
+      MaceKey nexthop=myhashleafset.get(Lmax).ipaddr;
+      if(nexthopid) { *nexthopid=Lmax; }
+
+      maceout << "Returning Lmax " << nexthop << " id " << Lmax << endl;
+      return nexthop;  
+    }
+    else if (myright.empty() && KeyRange::containsKey(id,range.second,Lmin+1)) {
+      //I don't manage it, but it's between Lmin and me.  Therefore, Lmin manages it.
+      MaceKey nexthop;
+      nexthop=myhashleafset.get(Lmin).ipaddr;
+      if(nexthopid) { *nexthopid=Lmin; }
+
+      maceout << "Returning Lmin " << nexthop << " id " << Lmin << endl;
+      return nexthop;  
+    }
+    else if (!myleafset.empty() && KeyRange::containsKey(id,Lmin,Lmax+1)) {
+      MaceKeyDiff dist = MaceKeyDiff::INF;
+      MaceKeyDiff closest = MaceKeyDiff::INF;
+      const route_entry* closestleaf = NULL;
+
+      // id is within range of our leaf set (and I don't manage it)
+      leafset::const_map_iterator iter = myleafset.mapIterator();
+      while(iter.hasNext()) {
+        const route_entry* leaf = &(iter.next());
+        dist = (leaf->hash_id-id).toSigned().abs();
+        macedbg(2) << "leaf-id " << (leaf->hash_id-id) << " toSigned " << (leaf->hash_id-id).toSigned() << " abs " <<  (leaf->hash_id-id).toSigned().abs() << endl;
+        macedbg(2) << "Dist to leaf " << leaf->hash_id << " from " << id << " is " << dist << endl;
+        if (dist < closest) {
+          macedbg(2) << "Dist was closer" << endl;
+          closest = dist;
+          closestleaf = leaf;
+        } else {
+          macedbg(2) << "Dist not closer" << endl;
+        }
+      }
+      MaceKey nexthop;
+      nexthop= closestleaf->getId();
+      if(nexthopid) { *nexthopid=closestleaf->hash_id; }
+
+      maceout << "Returning leaf " << nexthop << " id " << closestleaf->hash_id << endl;
+      return nexthop;
+    }
+    else {
+      // use the routing table
+      int l = id.sharedPrefixLength(myhash,B);
+      int Dl = id.getNthDigit(l, B);
+
+      if (mytable[l].contains(Dl) && !mytable[l][Dl].empty()) {
+        const route_entry& ent = (mytable[l][Dl].leastScore<uint64_t>());
+        if(nexthopid) { *nexthopid = ent.hash_id; }
+        maceout << "Returning routing table entry " << ent.getId() << " id " << ent.hash_id << endl;
+        return ent.getId();
+      }
+      else {
+        // return the closest (to 'id') entry in our state
+        // tables that has a shared prefix at least as long as 'l' 
+
+        MaceKeyDiff best = (myhash-id).toSigned().abs();
+        MaceKey best_hop = me;
+        if(nexthopid) { *nexthopid = myhash; }
+
+        leafset::const_map_iterator iter = myleafset.mapIterator();
+        while(iter.hasNext()) {
+          const route_entry *entry = &(iter.next());
+          int l2 = id.sharedPrefixLength(entry->hash_id,B);
+          MaceKeyDiff d2 = (entry->hash_id-id).toSigned().abs();
+          macedbg(2) << "leaf-id " << (entry->hash_id-id) << " toSigned " << (entry->hash_id-id).toSigned() << " abs " <<  (entry->hash_id-id).toSigned().abs() << endl;
+          macedbg(2) << "Rare: diff " << d2 << " best " << best << " l2 " << l2 << " l " << l << endl;
+          if (l2 >= l && d2 < best) {
+            macedbg(2) << "Better option!" << endl;
+            best = d2;
+            best_hop = entry->getId();
+            if(nexthopid) { *nexthopid = entry->hash_id; }
+          }
+        }
+
+        // rows 0 through (l-1) won't have a long enough prefix
+        for (int r=l; r<ROWS; r++) {
+          for (int c=0; c<COLS; c++) {
+            // i.e. if there really is an entry
+            if (mytable[r].contains(c) && !mytable[r][c].empty()) {
+              const route_entry *entry = &mytable[r][c].random();
+              int l2 = id.sharedPrefixLength(entry->hash_id,B);
+              MaceKeyDiff d2 = (entry->hash_id-id).toSigned().abs();
+              if (l2 >= l && d2 < best) {
+                best = d2;
+                best_hop = entry->getId();
+                if(nexthopid) { *nexthopid = entry->hash_id; }
+              }
+            }
+          }
+        }
+
+        maceout << "Returning closest route_entry " << best_hop << endl;
+        return best_hop;
+      }
+    }
+  }
+
+  // Sends the row r to the node addr
+  void sendrow(const MaceKey& addr, int r)
+  {
+    downcall_route(addr,row_info(myhash,r,mytable[r]));
+  }
+
+  void processDeferredJoins() {
+    for(JoinMap::iterator i = deferredJoins.begin(); i != deferredJoins.end(); i++) {
+      deliver(me, i->first, i->second, control_);
+    }
+  }
+
+  void add_left(const MaceKey& addr, const MaceKey& id)
+  {
+    //maceLog("DEBUG: Adding node %.8x(%.8x) to leafset (left)\n",id,addr);
+
+    route_entry& leaf = myleafset.add(addr);
+    leaf.hash_id = id;
+    leaf.lastKnownLive = curtime;
+
+    hash_entry& hashLeaf = myhashleafset.add(id);
+    hashLeaf.ipaddr = addr;
+
+    route_entry& left = myleft.add(addr);
+    left.hash_id = id;
+    left.lastKnownLive = curtime;
+
+    recompute_leaf_bounds();
+    //TODO: Make this automagic
+    if(state == joined && successors.containsKey(id)) {
+      doNotifySuccessorAdded(id);
+      doNotifySuccessors();
+    }
+  }
+
+  void add_right(const MaceKey& addr, const MaceKey& id)
+  {
+    //maceLog("DEBUG: Adding node %.8x(%.8x) to leafset (right)\n",id,addr);
+
+    route_entry& leaf = myleafset.add(addr);
+    leaf.hash_id = id;
+    leaf.lastKnownLive = curtime;
+
+    myhashleafset.add(id).ipaddr = addr;
+
+    route_entry& right = myright.add(addr);
+    right.hash_id = id;
+    right.lastKnownLive = curtime;
+    
+    recompute_leaf_bounds();
+    if(state == joined && successors.containsKey(id)) {
+      doNotifySuccessorAdded(id);
+      doNotifySuccessors();
+    }
+  }
+
+  void insert_left(const MaceKey& addr, const MaceKey& id)
+  {
+    //maceLog("DEBUG: Adding node %.8x(%.8x) to leafset (left)\n",id,addr);
+
+    if(state == joined && successors.containsKey(myleafset.get(Lmin_ipaddr).hash_id)) {
+      doNotifySuccessorRemoved(myleafset.get(Lmin_ipaddr).hash_id);
+    }
+    myhashleafset.erase(myleafset.get(Lmin_ipaddr).hash_id);
+    myleafset.erase(Lmin_ipaddr);
+    myleft.erase(Lmin_ipaddr);
+
+    add_left(addr, id);
+  }
+
+  void insert_right(const MaceKey& addr, const MaceKey& id)
+  {
+    //maceLog("DEBUG: Adding node %.8x(%.8x) to leafset (right)\n",id,addr);
+
+    if(state == joined && successors.containsKey(myleafset.get(Lmax_ipaddr).hash_id)) {
+      doNotifySuccessorRemoved(myleafset.get(Lmax_ipaddr).hash_id);
+    }
+    myhashleafset.erase(myleafset.get(Lmax_ipaddr).hash_id);
+    myleafset.erase(Lmax_ipaddr);
+    myright.erase(Lmax_ipaddr);
+
+    add_right(addr, id);
+  }	
+
+  // Determines the farthest leaf on the each side of leafset 
+  void recompute_leaf_bounds() {
+  
+    MaceKeyDiff lowest;
+    MaceKeyDiff highest;
+    MaceKeyDiff d;
+    KeyRange oldrange = range;
+
+    Lmax = myhash;
+    Lmin = myhash;
+
+    NodeSet oldsuccessors = successors;
+
+    DistanceMap distances; 
+    successors.clear();
+
+    lowest = MaceKeyDiff::INF;
+    highest = MaceKeyDiff::NEG_INF;
+    halfset::map_iterator iter = myleft.mapIterator();
+    while(iter.hasNext()) {
+      route_entry* leaf = &(iter.next());
+      d = myhash-leaf->hash_id;
+
+      MaceKeyDiff s_d = d;
+      s_d.abs();
+      distances.insert(std::make_pair(s_d, leaf->hash_id));
+
+      macedbg(2) << "leaf " << leaf->hash_id << " d " << d << endl;
+      if (d > highest) {
+        highest = d;
+        Lmin = leaf->hash_id;
+        Lmin_ipaddr = leaf->getId();
+      }
+      if (d < lowest) {
+        lowest = d;
+        range.first = myhash - ((lowest+1) >> 1); //+1 was missing as to break ties.
+        macedbg(2) << "myhash " << myhash << " range.first " << range.first << " lowest " << lowest << " leaf " << leaf->hash_id << " d " << d << endl;
+      }
+    }
+
+    lowest = MaceKeyDiff::INF;
+    highest = MaceKeyDiff::NEG_INF;
+    halfset::map_iterator iter2 = myright.mapIterator();
+    while(iter2.hasNext()) {
+      route_entry* leaf = &(iter2.next());
+      d = leaf->hash_id-myhash;
+
+      MaceKeyDiff s_d = d;
+      s_d.abs();
+      distances.insert(std::make_pair(s_d, leaf->hash_id));
+      macedbg(2) << "leaf " << leaf->hash_id << " d " << d << endl;
+      if (d > highest) {
+        highest = d;
+        Lmax = leaf->hash_id;
+        Lmax_ipaddr = leaf->getId();
+      }
+      if (d < lowest) {
+        lowest=d;
+        range.second = myhash + (lowest >> 1);
+        macedbg(2) << "myhash " << myhash << " range.second " << range.second << " lowest " << lowest << " leaf " << leaf->hash_id << " d " << d << endl;
+      }
+    }
+
+    if(myleft.empty() && myright.empty()) {
+      range.second = myhash;
+      range.first = myhash;
+    } else 
+    if(myleft.empty()) {
+      range.first = myhash - (((myhash-Lmax)+1)>>1);
+      macedbg(2) << "myhash " << myhash << " range.first " << range.first << " Lmax " << Lmax << endl;
+    } else 
+    if(myright.empty()) {
+      range.second = myhash + ((Lmin-myhash)>>1);
+      macedbg(2) << "myhash " << myhash << " range.second " << range.second << " Lmin " << Lmin << endl;
+    }
+
+    for (DistanceMap::const_iterator i = distances.begin(); i != distances.end() && successors.size() < MAX_NUM_SUCCESSORS; i++) {
+      successors.insert((*i).second);
+    }
+
+    if(state == joined && (oldrange != range) ) {
+      doNotifyIdSpaceChanged(range);
+    }
+  }
+
+  void doJoinedNotify() {
+    //1: Notify Join Result
+    //XXX: Need to substitute a peer where the MaceKey() currently is
+    //deferred_upcall_joinResultOverlay(MaceKey(), JOIN_ACCEPTED);
+    upcallAllVoid(joinResultOverlay, MaceKey(), JOIN_ACCEPTED);
+    //2: Notify Successor Added
+    hashleafset::map_iterator iter = myhashleafset.mapIterator();
+    MaceKey peer;
+    while(iter.hasNext()) {
+      iter.next(peer);
+      // shyoo: deferrable event
+      upcallAllVoid(notifySuccessorAdded, peer);
+      //deferred_upcall_notifySuccessorAdded(peer);
+    }
+    //3: Notify Successors
+    // shyoo: deferrable event
+    upcallAllVoid(notifySuccessors,myhashleafset.nodeSet());
+    //deferred_upcall_notifySuccessors(myhashleafset.nodeSet());
+    //4: Notify IdSpaceChanged
+    // shyoo: deferrable event
+    upcallAllVoid(notifyIdSpaceChanged,range);
+    //deferred_upcall_notifyIdSpaceChanged(range);
+  }
+  void doNotifyIdSpaceChanged(const KeyRange& k) {
+    // shyoo: deferrable event
+    upcallAllVoid(notifyIdSpaceChanged,k);
+    //deferred_upcall_notifyIdSpaceChanged(k);
+  }
+  void doNotifySuccessors() {
+    const NodeSet& up = myhashleafset.nodeSet();
+    // shyoo: deferrable event
+    upcallAllVoid(notifySuccessors,up);
+    //deferred_upcall_notifySuccessors(up);
+  }
+  void doNotifySuccessorAdded(const MaceKey& id) {
+    // shyoo: deferrable event
+    upcallAllVoid(notifySuccessorAdded,id);
+    //deferred_upcall_notifySuccessorAdded(id);
+  }
+  void doNotifySuccessorRemoved(const MaceKey& id) {
+    // shyoo: deferrable event
+    upcallAllVoid(notifySuccessorRemoved,id);
+    //deferred_upcall_notifySuccessorRemoved(id);
+  }
+
+  void processJoinMessage(const join& msg) {
+    MaceKey nexthop = make_routing_decision(msg.id); // sets rare case if needed
+
+#ifdef JOINING_TRACE
+    maceout << "Join rcvd from " << msg.id << "(" << msg.who << ")  NextHop=" << nexthop << " me=" << me << " myhash=" << myhash << " join=" << msg << endl;
+#endif
+
+    // if last hop, send leafset
+    if (nexthop == me && msg.who != me) {
+#ifdef JOINING_TRACE
+      maceout << "Join sending leafset to " << msg.id << "{" << msg.who << "}." << endl;
+#endif
+      downcall_route(msg.who, leafset_pull(myhash, myleafset));
+    }
+
+    // forward the request
+    if (nexthop != me) {
+#ifdef JOINING_TRACE
+      maceout << "Join forwarding join from/to " << msg.id << "(" << msg.who << ") via nexthop" << nexthop << endl;
+#endif
+      // route the join, moving forward a row (bit) 
+      downcall_route(nexthop, msg);
+    }
+
+  }
+
+  // shyoo : deferred upcall support
+/*  void commitCallBack(uint64_t myTicket) {
+
+    {
+      macedbg(1) << "commitCallback called. Processing outstanding" << deferred_queue_joinResultOverlay.size() << "messages." << Log::endl;
+      DeferredQueue_joinResultOverlay::iterator i;
+      for (i=deferred_queue_joinResultOverlay.begin(); i!= deferred_queue_joinResultOverlay.end(); i++) {
+        Deferred_joinResultOverlay m = *i;
+        upcall_joinResultOverlay(m.source, m.status);
+      }
+    }
+
+    {
+      macedbg(1) << "commitCallback called. Processing outstanding" << deferred_queue_notifySuccessors.size() << "messages." << Log::endl;
+      DeferredQueue_notifySuccessors::iterator i;
+      for (i=deferred_queue_notifySuccessors.begin(); i!= deferred_queue_notifySuccessors.end(); i++) {
+        Deferred_notifySuccessors m = *i;
+        upcall_notifySuccessors(m.successors);
+      }
+    }
+
+    {
+      macedbg(1) << "commitCallback called. Processing outstanding" << deferred_queue_notifySuccessorAdded.size() << "messages." << Log::endl;
+      DeferredQueue_notifySuccessorAdded::iterator i;
+      for (i=deferred_queue_notifySuccessorAdded.begin(); i!= deferred_queue_notifySuccessorAdded.end(); i++) {
+        Deferred_notifySuccessorAdded m = *i;
+        upcall_notifySuccessorAdded (m.id);
+      }
+    }
+
+    {
+      macedbg(1) << "commitCallback called. Processing outstanding" << deferred_queue_notifySuccessorRemoved.size() << "messages." << Log::endl;
+      DeferredQueue_notifySuccessorRemoved::iterator i;
+      for (i=deferred_queue_notifySuccessorRemoved.begin(); i!= deferred_queue_notifySuccessorRemoved.end(); i++) {
+        Deferred_notifySuccessorRemoved m = *i;
+        upcall_notifySuccessorRemoved(m.id);
+      }
+    }
+
+    {
+      macedbg(1) << "commitCallback called. Processing outstanding" << deferred_queue_notifyIdSpaceChanged.size() << "messages." << Log::endl;
+      DeferredQueue_notifyIdSpaceChanged::iterator i;
+      for (i=deferred_queue_notifyIdSpaceChanged.begin(); i!= deferred_queue_notifyIdSpaceChanged.end(); i++) {
+        Deferred_notifyIdSpaceChanged m = *i;
+        upcall_notifyIdSpaceChanged(m.range);
+      }
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_joinResultOverlay(const MaceKey& source, join_status_t status)
+  {
+    macedbg(1) << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_joinResultOverlay(source, status);    // deliver immediately
+    } else {
+      deferred_queue_joinResultOverlay.push_front(Deferred_joinResultOverlay(source, status));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifySuccessors(NodeSet successors)
+  {
+    macedbg(1) << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifySuccessors(successors);    // deliver immediately
+    } else {
+      deferred_queue_notifySuccessors.push_front(Deferred_notifySuccessors(successors));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifySuccessorAdded(const MaceKey& id)
+  {
+    macedbg(1) << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifySuccessorAdded(id);    // deliver immediately
+    } else {
+      deferred_queue_notifySuccessorAdded.push_front(Deferred_notifySuccessorAdded(id));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifySuccessorRemoved(const MaceKey& id)
+  {
+    macedbg(1) << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifySuccessorRemoved(id);    // deliver immediately
+    } else {
+      deferred_queue_notifySuccessorRemoved.push_front(Deferred_notifySuccessorRemoved(id));    // queue else
+    }
+  }
+
+  // shyoo : deferred upcall support
+  void deferred_upcall_notifyIdSpaceChanged(const KeyRange& range)
+  {
+    macedbg(1) << "comparing my ticket("<<ThreadStructure::myTicket()<<") with current ticket("<<ThreadStructure::current_ticket()<<")" << Log::endl;
+
+    if( ThreadStructure::myTicket() == ThreadStructure::current_ticket() ) {
+      upcall_notifyIdSpaceChanged(range);    // deliver immediately
+    } else {
+      deferred_queue_notifyIdSpaceChanged.push_front(Deferred_notifyIdSpaceChanged(range));    // queue else
+    }
+  }
+*/
+}
+

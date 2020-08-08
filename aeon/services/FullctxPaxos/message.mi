@@ -1,0 +1,74 @@
+#include "mmultimap.h"
+
+
+services {
+}
+
+constants {
+		MaceKey masterKey = MaceKey("ipv4", );
+}
+
+constructor_parameters {
+}
+
+typedefs {
+
+}
+
+auto_type {
+		Value __attribute((comparable(equals=default; lessthan=default))) { 
+    		mace::string value;
+		    mace::string key;
+		}	
+}
+
+messages {
+  //proposal from a proposer
+  Prepare {
+			uint64_t proposeID; 
+    	Value value;
+
+			uint64_t proposerLogicalNodeID;
+  }
+  //confirm msg from an acceptor
+  Promise {
+    	uint64_t proposeID; 
+    	Value value;
+  }
+  
+	Accept {
+			uint64_t proposeID;
+			Value value;
+
+			uint64_t proposerLogicalNodeID;
+	}
+
+	Request {
+			Value value; 	
+			uint64_t clientID;
+	}
+
+	ClientAccept {
+			mace::string key;
+			mace::string result;
+	}
+
+	Learn {
+			Value value;	
+	}
+
+	ReportMsg {
+			
+	}
+
+	LogicalNodesInfoMsg {
+			mace::map<uint64_t, MaceKey> logicalNodesMap;
+	}
+
+	RoleAnounceMsg {
+			mace::string role;
+			uint64_t logicalNodeID;
+	}
+}
+
+

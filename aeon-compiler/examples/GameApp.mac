@@ -1,0 +1,148 @@
+service GameApp;
+
+provides Null;
+services {
+	Transport t;
+}
+constants {
+
+}
+constructor_parameters {
+
+}
+state_variables {
+
+context Root {
+}
+context Building<int ctxId> {
+	int room;
+}
+context Player<int ctxId> {
+	int count;
+	int item;
+}
+context Client<int ctxId> {
+	int count;
+	int player;
+}
+context Room<int ctxId> {
+	mace::vector<int> players;
+	int nextPlayer;
+	mace::vector<int> items;
+}
+context Item<int ctxId> {
+	int count;
+	int client;
+}
+
+}
+transitions {
+
+downcall maceInit(){
+	async_initRoot();
+}
+async [Building<_this_obj_id>] event_Building_initialize(const int& _this_obj_id) [locking=ownership] {
+	ADD_SELECTORS("GameApp");
+	maceout<<"Create a Building."<<Log::endl;
+	room=1;
+	mace::string Building_initialize_0 = generateActorName("Building", _this_obj_id);
+	mace::string Building_initialize_1 = generateActorName("Room", room);
+	createNewOwnership(Building_initialize_0, Building_initialize_1);
+	sync_Room_initialize(room, 4, 2);
+}
+async [Player<_this_obj_id>] event_Player_accessItem(const int& _this_obj_id, int c) [locking=ownership] {
+	sync_Item_access(item);
+	async_event_Client_reply(c);
+}
+broadcast [Player<_this_obj_id>] async_Player_update(const int& _this_obj_id) {
+	count=count+1;
+}
+async [Client<_this_obj_id>] event_Client_initialize(const int& _this_obj_id) [locking=ownership] {
+	ADD_SELECTORS("GameApp");
+	maceout<<"Create a Client."<<Log::endl;
+	sleep(3);
+	count=0;
+	int r=1;
+	async_event_Room_getPlayer(r, _this_obj_id);
+}
+async [Client<_this_obj_id>] event_Client_updatePlayer(const int& _this_obj_id, int p) [locking=ownership] {
+	player=p;
+	async_event_Player_accessItem(player, _this_obj_id);
+}
+async [Client<_this_obj_id>] event_Client_reply(const int& _this_obj_id) [locking=ownership] {
+	ADD_SELECTORS("GameApp");
+	count++;
+	if(count%1000==0){
+		maceout<<"Client access the Player for "<<count<<Log::endl;
+	}
+	async_event_Player_accessItem(player, _this_obj_id);
+}
+async [Room<_this_obj_id>] event_Room_getPlayer(const int& _this_obj_id, int c) [locking=ownership] {
+	async_event_Client_updatePlayer(c, players[nextPlayer]);
+	nextPlayer++;
+}
+async [Root] initRoot() [locking=ownership] {
+	int main_main_0 = createNewContext("Building");
+	int b=main_main_0;
+	mace::string main_main_1 = generateActorName("Building", main_main_0);
+	createNewOwnership("Root", main_main_1);
+	async_event_Building_initialize(b);
+	for(int i=0;i<4;i++){
+		int cID=i+1;
+		int c=cID;
+		mace::string main_main_2 = generateActorName("Client", cID);
+		createNewOwnership("Root", main_main_2);
+		async_event_Client_initialize(c);
+	}
+}
+
+}
+routines {
+[Player<_this_obj_id>] void sync_Player_initialize(const int& _this_obj_id, int i) {
+	ADD_SELECTORS("GameApp");
+	maceout<<"Create a Player."<<Log::endl;
+	item=i;
+	mace::string Player_initialize_0 = generateActorName("Player", _this_obj_id);
+	mace::string Player_initialize_1 = generateActorName("Item", item);
+	createNewOwnership(Player_initialize_0, Player_initialize_1);
+	count=0;
+}
+[Room<_this_obj_id>] void sync_Room_initialize(const int& _this_obj_id, int nPlayer, int nItem) {
+	ADD_SELECTORS("GameApp");
+	maceout<<"Create a Room."<<Log::endl;
+	for(int i=0;i<nItem;i++){
+		int Room_initialize_0 = createNewContext("Item");
+		int item=Room_initialize_0;
+		items.push_back(item);
+		mace::string Room_initialize_1 = generateActorName("Room", _this_obj_id);
+		mace::string Room_initialize_2 = generateActorName("Item", item);
+		createNewOwnership( Room_initialize_1, Room_initialize_2);
+		sync_Item_initialize(item);
+	}
+	for(int i=0;i<nPlayer;i++){
+		int Room_initialize_3 = createNewContext("Player");
+		int p=Room_initialize_3;
+		players.push_back(p);
+		mace::string Room_initialize_4 = generateActorName("Room", _this_obj_id);
+		mace::string Room_initialize_5 = generateActorName("Player", p);
+		createNewOwnership( Room_initialize_4, Room_initialize_5);
+		int j=i%items.size();
+		int item=items[j];
+		sync_Player_initialize(p, item);
+	}
+	nextPlayer=0;
+}
+[Item<_this_obj_id>] void sync_Item_initialize(const int& _this_obj_id) {
+	ADD_SELECTORS("GameApp");
+	maceout<<"Create a Item."<<Log::endl;
+	count=0;
+}
+[Item<_this_obj_id>] void sync_Item_access(const int& _this_obj_id) {
+	count++;
+}
+[__null] mace::string generateActorName( const mace::string& ctxName, const uint32_t& id) {
+	std::ostringstream oss;
+	oss << ctxName <<"["<<id<<"]";
+	return oss.str();
+}
+}

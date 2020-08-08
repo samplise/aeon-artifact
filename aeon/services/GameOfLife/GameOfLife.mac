@@ -1,0 +1,681 @@
+/* 
+ * GameOfLife.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2012, Bo Sang, Wei-Chiu Chuang
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- 
+*/
+
+#include "mlist.h"
+#include "marray.h"
+#include "mdeque.h"
+
+#include <sys/time.h>
+#include <time.h>
+
+using mace::NodeCollection;
+
+service GameOfLife;
+//provides GenericGameOfLife;
+trace = med;
+
+constants{
+    uint64_t RESEND_TIMEOUT = 0.5*1000*1000;
+    uint64_t TIMEOUT = 1*1000;
+    int TOTAL_CONTEXT_NUM = 4;
+
+    int TOTAL_ROUND=10000;
+}
+
+services {
+    Transport tcp = TcpTransport();
+}
+
+states {
+    WaitingResults;		//Master is waiting for compute results from workers
+
+    Ready;			//Workers: have finished computation
+    Computing;		//Workers: are computing
+}
+
+constructor_parameters {
+    // Master: the number of workers
+}
+
+auto_types {
+    Position __attribute((comparable(equals=default; lessthan=default))) {
+        int x;
+        int y;
+    }
+}
+
+typedefs {
+    typedef mace::map<Position, int> PositionValueMap;
+    typedef mace::vector< mace::vector<int> > Matrix;		
+}
+
+state_variables {
+    timer _clock;
+    double _start_time;
+    time_t _start_time_sec;
+
+    int _monitor_round;
+
+    Matrix _monitor_matrix_values;
+    int _elements_totalnum;
+    int _elements_curnum;
+
+    PositionValueMap _ready_map;
+    
+    context Row<uint32_t row>{
+        context Column<uint32_t column>{
+            int _totalcount;
+            int _curcount;
+
+            int _matrix;
+
+            mace::vector<Position> _myPos;
+            mace::vector<int> _myValues;
+
+            Matrix _matrix_values;
+
+            Position _min_p;
+            Position _max_p;
+            
+            int _round;
+
+            double _last_round_time;
+            time_t _last_round_time_sec;
+            time_t _start_time_sec;
+
+            mace::vector<Position> _neig_contexts;
+            mace::vector< mace::vector<Position> > _distributed_pos;
+            mace::vector< mace::vector<int> > _distributed_values;
+        }
+    }
+}
+
+messages {
+		MonitorMsg { mace::string msg; }
+		ValueMsg { mace::vector<Position> myPos; mace::vector<int> myValues; }
+		ValueMsg2 { Position p; int value; }
+
+		ReadyMsg { int x;  int y; }
+}
+
+transitions {
+  	downcall (state == init) maceInit() {
+        if( params::containsKey("monitor") && MaceKey(ipv4,  params::get<std::string>("monitor"))==localAddress() ){
+            std::cout<<"[monitor] monitor start!"<<std::endl;
+            if(params::containsKey("elements_num")){
+                    _elements_totalnum=params::get<int>("elements_num");	
+            }
+            _monitor_round = 0;
+            _elements_curnum = 0;
+
+            timeval cur_time;
+            gettimeofday(&cur_time,  NULL);
+            _start_time = cur_time.tv_usec;
+            _start_time_sec = time(NULL);
+
+            //_clock.reschedule(TIMEOUT);
+        }else{	
+            PositionValueMap posValueMap;
+            async_initialize(0,  0,  posValueMap,  0 );	
+            //resender_timer.reschedule(RESEND_TIMEOUT);
+        }
+  	}
+
+  	downcall (state != init) maceExit() {
+					      			
+  	}
+
+    scheduler _clock(){
+        //std::cout<<"[monitor]Current Clock: "<<_clock_num<<std::endl;
+        //_clock_num++;
+        _clock.reschedule(TIMEOUT);
+    }
+
+    upcall  deliver(const MaceKey& from,  const MaceKey& dest,  const MonitorMsg& msg){
+        std::cout<<"[monitor]"<<msg.msg<<std::endl;				
+    }
+
+    upcall  deliver(const MaceKey& from,  const MaceKey& dest,  const ReadyMsg& msg){
+        Position p;
+        p.x=msg.x;
+        p.y=msg.y;
+
+        _ready_map[p] = 1;
+
+        if( (int)_ready_map.size() == TOTAL_CONTEXT_NUM){
+            std::cout<<"[monitor]This round is: "<<_monitor_round<<std::endl;
+            _monitor_round++;
+            show_results(_monitor_matrix_values,  _elements_totalnum, _start_time,  _start_time_sec);
+
+            _ready_map.clear();
+        }
+    }
+
+    upcall deliver(const MaceKey& from,  const MaceKey& dest,  const ValueMsg& msg){
+        mace::vector<Position> myPos = msg.myPos;
+        mace::vector<int> myValue = msg.myValues;
+        for(int i=0; i<(int)myPos.size(); i++){
+            Position p = myPos[i];
+            if(_monitor_matrix_values[p.x][p.y] < 0){
+                _monitor_matrix_values[p.x][p.y] = myValue[i];
+                _elements_curnum++;
+            }
+        }
+        if( _elements_curnum == _elements_totalnum * _elements_totalnum){
+            std::cout<<"[monitor]This round is: "<<_monitor_round<<std::endl;
+            _monitor_round++;
+            show_results(_monitor_matrix_values,  _elements_totalnum, _start_time,  _start_time_sec);
+            for(int i=0; i < (int)_monitor_matrix_values.size(); i++){
+                for(int j=0; j<(int)_monitor_matrix_values[i].size(); j++){
+                    _monitor_matrix_values[i][j] = -1;	
+                }	
+            }
+            _elements_curnum=0;
+            
+        }
+        
+    }
+
+    upcall  deliver(const MaceKey& from,  const MaceKey& dest,  const ValueMsg2& msg){
+        Position p=msg.p;
+        if(p.x==0 && p.y==0){
+            if(_elements_totalnum<=0){
+                _elements_totalnum=msg.value;
+                std::cout<<"[monitor]Input Matrix: "<<_elements_totalnum<<std::endl;
+
+                _monitor_matrix_values.resize(_elements_totalnum+1);
+                for(int i=0; i<(int)_monitor_matrix_values.size(); i++){
+                    _monitor_matrix_values[i].resize(_elements_totalnum+1);	
+                }
+
+                for(int i=0; i<(int)_monitor_matrix_values.size(); i++){
+                    for(int j=0; j<(int)_monitor_matrix_values[i].size(); j++){
+                        _monitor_matrix_values[i][j] = -1;
+                    }	
+                }
+            }
+        }
+    }
+
+
+  async [Row<row>::Column<column>] initialize( int row,  int column, const PositionValueMap& posValueMap ,  int matrix) {
+        if(params::containsKey("monitor")){
+            std::ostringstream oss;
+            oss<<"Row["<<row<<"]Column["<<column<<"] start to initialize!";
+            downcall_route(MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss.str() ));	
+        }
+
+        _matrix=0;
+        _totalcount=0;
+        _curcount = 0;
+        _round=1;
+        if(row==0 && column==0){
+            std::ifstream in("initstate.txt");
+            int x=1;
+            int y=1;
+            int len=0;
+
+            PositionValueMap myPosValueMap;
+     
+            char buf[3000];
+            // load the entire initial state map
+            while( !in.eof() ){
+                y=1; 
+                in.getline(buf, 3000);
+                len=std::strlen(buf);
+                for(int i=0; i<len; i++,  y++){
+                    Position p;
+                    p.x=x;
+                    p.y=y;
+                    if(buf[i]=='0'){
+                            myPosValueMap[p]=0;
+                    }else if(buf[i]=='1'){
+                            myPosValueMap[p]=1;
+                    }
+                }
+                if(_matrix==0){
+                    _matrix=len;
+                    if(params::containsKey("monitor")){
+                        Position mp;
+                        mp.x=0;
+                        mp.y=0;
+                        downcall_route(MaceKey(ipv4,  params::get<std::string>("monitor")),  ValueMsg2(mp,  len));
+                    }
+                }
+                x++;
+            }
+            in.close();
+
+            PositionValueMap posValueMaps[TOTAL_CONTEXT_NUM];
+            int context_matrix = getSquare(TOTAL_CONTEXT_NUM);
+            len = _matrix;
+            int sub_matrix = getSquare((len*len)/TOTAL_CONTEXT_NUM);
+            
+            if(params::containsKey("monitor")){
+                std::ostringstream oss;
+                oss<<"context_matrix="<<context_matrix<<" sub_matrix="<<sub_matrix;
+                downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss.str()));	
+            }
+            Position curP;
+            curP.x=1;
+            curP.y=1;
+
+            for(int i=0; i<TOTAL_CONTEXT_NUM; i++){
+                int X, Y;
+
+                if( curP.x+sub_matrix-1 <= len){
+                    X = curP.x+sub_matrix-1;	
+                }else{
+                    X = len;	
+                }
+
+                if(curP.y+sub_matrix-1 <= len){
+                    Y = curP.y+sub_matrix-1;	
+                }else{
+                    Y = len;	
+                }
+
+                for(int m=curP.x; m<=X; m++){
+                    for(int n=curP.y; n<=Y; n++){
+                        Position p;
+                        p.x = m;
+                        p.y = n;
+                        (posValueMaps[i])[p] = myPosValueMap[p];
+                        if(params::containsKey("monitor")){
+                            std::ostringstream oss;
+                            oss<<"Add ("<<m<<", "<<n<<") to context "<<i;
+                            //downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss.str()));	
+                        }
+                    }	
+                }
+
+                if(Y == len){
+                    curP.x+=sub_matrix;
+                    curP.y=1;
+                }else{
+                    curP.y+=sub_matrix;	
+                }
+            }
+
+            for(int i=0; i<TOTAL_CONTEXT_NUM; i++){
+                int worker_row = i/context_matrix;
+                int worker_column = i%context_matrix;
+
+                worker_row++;
+                worker_column++;
+
+                async_initialize(worker_row,  worker_column,  posValueMaps[i],  _matrix);
+            }
+
+            
+        }else{
+            _matrix = matrix;
+            _matrix_values.resize(matrix+1);
+            for(int i=0; i< (int)_matrix_values.size(); i++){
+                _matrix_values[i].resize(matrix+1);	
+            }
+
+            for(int i=0; i<(int)_matrix_values.size(); i++){
+                for(int j=0; j<(int)_matrix_values[i].size(); j++){
+                    _matrix_values[i][j] = -1;
+                }	
+            }
+
+            Position min_p,  max_p;
+            min_p.x=10000;
+            min_p.y=10000;
+            max_p.x=0;
+            max_p.y=0;
+
+            int pos_n=0;
+            int size = posValueMap.size();
+            _myPos.resize(size);
+            _myValues.resize(size);
+            
+            for(PositionValueMap::const_iterator iter=posValueMap.begin(); iter!=posValueMap.end(); iter++,  pos_n++){
+                Position p = iter->first;
+                _myPos[pos_n]=p;
+                _myValues[pos_n]=iter->second;
+
+                if(p.x <= min_p.x && p.y <= min_p.y){
+                    min_p=p;
+                }
+
+                if(max_p.x <= p.x && max_p.y <= p.y){
+                    max_p = p;	
+                }
+            }
+            _min_p = min_p;
+            _max_p = max_p;
+            
+            int totalcount = 0;
+            if(min_p.x >1) totalcount+=max_p.y-min_p.y+1;
+            if(min_p.y >1) totalcount+=max_p.x-min_p.x+1;
+
+            if(max_p.x < matrix) totalcount += max_p.y-min_p.y+1;
+            if(max_p.y < matrix) totalcount += max_p.x-min_p.x+1;
+
+            if(min_p.x >1 && min_p.y >1) totalcount++;
+            if(min_p.x >1 && max_p.y < matrix) totalcount++;
+            if(max_p.x < matrix && min_p.y >1 ) totalcount++;
+            if(max_p.x < matrix && max_p.y < matrix) totalcount++;
+            _totalcount = totalcount;
+
+
+            if(params::containsKey("monitor")){
+                std::ostringstream oss1;
+                std::ostringstream oss2;
+                oss1<<"Context Row["<<row<<"]Column["<<column<<"] has "<<_totalcount<<" neighbors!";
+                oss2<<"min:("<<min_p.x<<", "<<min_p.y<<") max:("<<max_p.x<<", "<<max_p.y<<")";
+                downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss1.str()));
+                downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss2.str()));
+            }
+            
+            mace::map<Position,  PositionValueMap> distributed_values;
+            PositionValueMap myPosValueMap = posValueMap;
+            for(PositionValueMap::iterator iter=myPosValueMap.begin(); iter!=myPosValueMap.end(); iter++){
+                Position p = iter->first;
+
+                for(int i=-1; i<=1; i++){
+                    for(int j=-1; j<=1; j++){
+                        if(i==0 && j==0) continue;
+                        int x=p.x+i;
+                        int y=p.y+j;
+
+                        if(x<1 || y<1 || x>matrix || y>matrix) continue;
+            
+                        int x_scope=0;
+                        int y_scope=0;
+
+                        if(x<=max_p.x && x>= min_p.x){
+                                x_scope=0;	
+                        }else if( x<min_p.x){
+                                x_scope=-1;	
+                        }else{
+                                x_scope=1;	
+                        } 
+
+                        if(y<=max_p.y && y>=min_p.y){
+                                y_scope=0;	
+                        }else if( y<min_p.y){
+                                y_scope=-1;	
+                        }else{
+                                y_scope=1;	
+                        }
+
+                        int context_row=row+x_scope;
+                        int context_column=column+y_scope;
+
+                        if(context_row==row && context_column==column){
+                            
+                        }else{
+                            
+                            Position context_p,  matrix_p;
+                            context_p.x = context_row;
+                            context_p.y = context_column;
+                            matrix_p.x = p.x;
+                            matrix_p.y = p.y;
+                            mace::map<Position,  PositionValueMap>::iterator diter = distributed_values.find(context_p);
+                            if(diter == distributed_values.end()){
+                                    PositionValueMap tPosValueMap;
+                                    tPosValueMap[matrix_p]=iter->second;
+                                    distributed_values[context_p]=tPosValueMap;
+                            }else{
+                                    (diter->second)[matrix_p]=iter->second;	
+                            }
+                        }
+                    }	
+                }
+
+            }
+
+
+            size = distributed_values.size();
+            _neig_contexts.resize(size);
+            _distributed_pos.resize(size);
+            _distributed_values.resize(size);
+            mace::map<Position,  PositionValueMap>::iterator diter;
+
+            int context_n=0;
+            for(diter=distributed_values.begin(); diter!=distributed_values.end(); diter++,  context_n++){
+                PositionValueMap tPosValueMap = diter->second;
+                _neig_contexts[context_n] = diter->first;
+                size = tPosValueMap.size();
+                _distributed_pos[context_n].resize(size);
+                _distributed_values[context_n].resize(size);
+
+                int pos_n = 0;
+                for(PositionValueMap::iterator iter=tPosValueMap.begin(); iter!=tPosValueMap.end(); iter++,  pos_n++){
+                    _distributed_pos[context_n][pos_n]=iter->first;
+                    _distributed_values[context_n][pos_n]=iter->second;
+                }
+            }
+
+            for(int i=0; i<(int)_myPos.size(); i++){
+                Position p = _myPos[i];
+                _matrix_values[p.x][p.y]=_myValues[i];	
+            }
+
+            timeval cur_time;
+            gettimeofday(&cur_time,  NULL);
+            _last_round_time = cur_time.tv_usec;
+            _start_time_sec = _last_round_time_sec = time(NULL);
+            distributeValue(row,column);
+        }
+  }
+
+	async [Row<row>::Column<column>] storeValues(int row,  int column,  const mace::vector<int>& x_pos, const mace::vector<int>& y_pos, int value_row){
+        for(int i=0; i< (int)x_pos.size(); i++){
+            int x=x_pos[i];
+            int y=y_pos[i];
+            
+            if(_matrix_values[x][y]<0){
+                    _matrix_values[x][y]=_distributed_values[value_row][i];
+                    _curcount++;
+                /*
+                    timeval cur_time;
+                    gettimeofday(&cur_time,  NULL);
+                    
+                    if(params::containsKey("monitor")){
+                            mace::string str=	"Row["+boost::lexical_cast<std::string>(row)+"]Column["+boost::lexical_cast<std::string>(column)+"]  receive ("
+                                    +boost::lexical_cast<std::string>(p.x)+", "+boost::lexical_cast<std::string>(p.y)+") at time:"
+                                    +boost::lexical_cast<std::string>(cur_time.tv_usec-Row[row].Column[column]._last_round_time)+" round:"
+                                    +boost::lexical_cast<std::string>(Row[row].Column[column]._round);
+                            downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(str) );
+                    }
+                */	
+            }
+        }
+        if(row==0 && column==0){
+
+        }else{
+            if( _curcount == _totalcount){
+                /*
+                    if(params::containsKey("monitor")){
+                            mace::string str=	"Row["+boost::lexical_cast<std::string>(row)+"]Column["+boost::lexical_cast<std::string>(column)+"] start round "+boost::lexical_cast<std::string>(Row[row].Column[column]._round);
+                            downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(str) );
+                    }
+                */
+                for(int i=0; i<(int)_myPos.size(); i++){
+                    Position p=_myPos[i];
+                    _matrix_values[p.x][p.y]=_myValues[i];	
+                }
+                
+                timeval before,  after;
+                time_t before_sec, after_sec;
+                gettimeofday(&before,  NULL);
+                before_sec = time(NULL);
+                
+                compute(row,  column);
+                
+                after_sec = time(NULL);
+                gettimeofday(&after,  NULL);
+
+                double computation_time = after.tv_usec - before.tv_usec;
+                time_t computation_time_sec = after_sec - before_sec;
+                
+                gettimeofday(&before,  NULL);
+                before_sec = time(NULL);
+                distributeValue(row,column );
+
+                after_sec = time(NULL);
+                gettimeofday(&after,  NULL);
+
+                double distributed_time = after.tv_usec - before.tv_usec;
+                time_t distributed_time_sec = after_sec - before_sec;
+
+                if(params::containsKey("monitor")){
+                    std::ostringstream oss;
+                    oss<<"Row["<<row<<"]Column["<<column<<"] round:"<<_round<<" computation time:"<<computation_time<<" "<<computation_time_sec<<" distributed time:"<<distributed_time<<" "<<distributed_time_sec<<" round time:"<<(after.tv_usec-_last_round_time)<<" "<<(after_sec-_last_round_time_sec)<<" "<<(after_sec - _start_time_sec);
+
+                    downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss.str()) );
+                    downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  ReadyMsg(row,  column) );
+                }
+                _last_round_time = after.tv_usec;
+                _last_round_time_sec = after_sec;
+                
+                _curcount = 0;
+                _round++;
+
+                
+                for(int i=0; i< (int)_matrix_values.size(); i++){
+                        for(int j=0; j< (int)_matrix_values[i].size(); j++){
+                                _matrix_values[i][j]=-1;
+                        }	
+                }
+            }
+        }
+	}
+
+}
+
+routines {
+
+    [__null] int getSquare(int total){
+        if(total <= 0) return -1;
+        int i=1;
+
+        while(1){
+                if( i*i > total) break;
+                i++;
+        }
+
+        return (i-1);
+    }
+
+    [Row<row>::Column<column>] void compute(int row,  int column){
+        int size = _myPos.size();
+        _myValues.resize(size);
+        for(int m=0; m < size; m++){
+            int myState = _myValues[m];
+            Position p = _myPos[m];
+            int total=0;
+            for(int i=-1; i<=1; i++){
+                for(int j=-1; j<=1; j++){
+                    if(i==0 && j==0) continue;
+                    int x=p.x+i;
+                    int y=p.y+j;
+                    if(x<1 || y<1 || x>_matrix || y>_matrix) continue;
+                    int value = _matrix_values[x][y];
+                    if(value <0){
+                        if(params::containsKey("monitor")){
+                            std::ostringstream oss;
+                            oss<<"Row["<<row<<"]Column["<<column<<"] fail to receive round:"<<_round<<" value:("<<x<<", "<<y<<")";
+                            downcall_route( MaceKey(ipv4,  params::get<std::string>("monitor")),  MonitorMsg(oss.str() ) );
+                        }
+                    }else{
+                        total+=value;
+                    }
+                }
+            }
+            if(myState==1){
+                if(total<2 || total>3) myState=0;
+            }else{
+                if(total==3) myState=1;
+            }
+            _myValues[m]=myState; 
+        }
+    }
+
+	[Row<row>::Column<column>] void distributeValue(int row, int column ){
+/*							
+				if(params::containsKey("monitor")){
+						downcall_route(MaceKey(ipv4,  params::get<std::string>("monitor")),  ValueMsg(myPos,  myValues));	
+				}
+	*/		
+        for(int i=0; i<(int)_neig_contexts.size();  i++){
+            mace::vector<int> x_pos;
+            mace::vector<int> y_pos;
+
+            int size = _distributed_pos[i].size();
+            x_pos.resize(size);
+            y_pos.resize(size);
+            for(int j=0; j<size;  j++){
+                Position p = _distributed_pos[i][j];
+                _distributed_values[i][j]=_matrix_values[p.x][p.y];
+                x_pos[j] = p.x;
+                y_pos[j] = p.y;
+            }
+
+            async_storeValues( _neig_contexts[i].x,  _neig_contexts[i].y, x_pos, y_pos,  i );
+        }				
+            
+    }
+
+    [__null] void show_results(Matrix& _monitor_matrix_values,  int matrix, double start_time,  time_t start_time_sec){
+        timeval cur_time;
+        gettimeofday(&cur_time,  NULL);
+        std::cout<<"[monitor]Current Clock: "<< cur_time.tv_usec-start_time <<" "<< time(NULL)-start_time_sec <<std::endl;
+/*
+				std::cout<<"[monitor]---------------------------------------------"<<std::endl;
+				for(int i=1; i<=matrix; i++){
+						std::cout<<"[monitor]";
+						for(int j=1; j<=matrix; j++){
+								Position p;
+								p.x=i;
+								p.y=j;
+								PositionValueMap::iterator iter=positionValueMap.find(p);
+								if(iter==positionValueMap.end()){
+										std::cout<<"fail to find value "<<i<<","<<j<<std::endl;
+										return;
+								}
+								int value=iter->second;
+								std::cout<<value<<" ";
+						}
+						std::cout<<std::endl;
+				}
+				std::cout<<"[monitor]---------------------------------------------"<<std::endl;
+*/
+    }
+}
+
+

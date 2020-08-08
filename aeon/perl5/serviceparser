@@ -1,0 +1,25 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use File::Basename;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+use Mace::Compiler::ClassParser;
+
+unless (scalar(@ARGV)) {
+    die "usage: $0 file [classname]\n";
+}
+
+my $file = shift(@ARGV);
+my $classname = shift(@ARGV) || undef;
+
+open(IN, $file) or die "cannot open $file: $!\n";
+my @in = <IN>;
+close(IN);
+my $in = join("", @in);
+
+my $parser = Mace::Compiler::ClassParser->new();
+my $sc = $parser->parse($in, $classname);
+
+print $sc->toString() . "\n";
+

@@ -1,0 +1,184 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Carp;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+
+use Mace::Util qw{:all};
+use Mace::Compiler::MaceHeaderParser;
+use Mace::Compiler::Globals;
+use Mace::Compiler::MInclude;
+
+my @includes;
+Getopt::Long::Configure("bundling");
+GetOptions("I=s" => \@includes);
+
+my $inf = shift(@ARGV) || "";
+
+unless (-e $inf) {
+    die "usage: $0 input-file [output-file]\n";
+}
+
+$SIG{__DIE__} = sub{ confess $_[0]; };
+$SIG{__WARN__} = sub{ confess $_[0]; die; };
+
+push(@Mace::Compiler::Globals::INCLUDE_PATH, @includes, cwd(), dirname($0)."/../services/interfaces");
+
+open(IN, $inf) or die "cannot open $inf: $!\n";
+my @in = <IN>;
+close(IN);
+
+my @linemap;
+my @filemap;
+my @offsetmap;
+
+Mace::Compiler::MInclude::getLines($inf, \@in, \@linemap, \@filemap, \@offsetmap);
+
+my $text = join("", @in);
+
+my $parser = Mace::Compiler::MaceHeaderParser->new();
+my $sc = $parser->parse($text, \@linemap, \@filemap, \@offsetmap);
+# my $r = "";
+
+my @handlers = ();
+for my $el (@{$sc->handlers()}) {
+    my $f = $el . "Handler.mh";
+    my $path = findPath($f, @Mace::Compiler::Globals::INCLUDE_PATH);
+    my @text = readFile("$path/$f");
+
+    my @linemap = ();
+    my @filemap = ();
+    my @offsetmap = ();
+
+    Mace::Compiler::MInclude::getLines("$path/$f", \@text, \@linemap, \@filemap, \@offsetmap);
+
+    my $text = join("", @text);
+
+    my $h = $parser->parse($text, \@linemap, \@filemap, \@offsetmap);
+    push(@handlers, $h);
+}
+
+generateMessages();
+generateClientTransitions();
+generateServerTransitions();
+
+# $r = indentStr($r);
+
+# if ($outf) {
+#     insertLine(\$r, $outf);
+#     open(OUT, ">$outf") or die "cannot open $outf: $!\n";
+#     print OUT $r;
+#     close(OUT);
+# }
+# else {
+#     print $r;
+# }
+
+sub generateServerTransitions {
+    my $r = "";
+    $r .= "transitions {\n";
+    for my $m ($sc->methods()) {
+	my $msg = ucfirst($m->name());
+	$r .= "upcall deliverRequest(const std::string& req, const $msg& m, registration_uid_t rid) {\n";
+	$r .= "} // upcall deliverRequest $msg\n\n";
+	$r .= "upcall proposalChosen(const std::string& key, log_index_t index, const $msg& m, const MaceKey& proposer) {\n";
+	$r .= "} // upcall proposalChosen $msg\n\n";
+    }
+    $r .= "} // transitions\n";
+    print indentStr($r);
+}
+
+sub generateClientTransitions {
+    my $r = "transitions {\n";
+    for my $m ($sc->methods()) {
+	my $msg = ucfirst($m->name());
+	$r .= "downcall " . $m->name() . "(";
+	$r .= join(", ", map { $_->toString() } $m->params());
+	$r .= ", registration_uid_t rid";
+	$r .= ") {\n";
+	$r .= "route($msg(" . joinParamsWithRid($m->params()) . "));\n";
+	$r .= "}\n";
+    }
+    for my $h (@handlers) {
+	for my $m ($h->methods()) {
+	    my $n = $m->name();
+	    my $msg = ucfirst($n);
+	    $r .= "upcall deliverResponse(const MaceKey& src, const $msg& m, const std::string& req) {\n";
+	    $r .= "upcall_${n}(";
+	    $r .= join(", ", map { "m." . $_->name() } $m->params());
+	    $r .= ", m.rid);\n";
+	    $r .= "}\n";
+	}
+    }
+    
+    $r .= "} // transitions\n";
+
+    print indentStr($r);
+} # generateClientTransitions
+
+sub generateMessages {
+    my $r = "messages {\n";
+    my $attr = "__attribute((number(1)))";
+    for my $m ($sc->methods()) {
+	my $n = ucfirst($m->name());
+	$r .= "$n $attr {\n";
+	$attr = "";
+
+	for my $p ($m->params()) {
+	    $r .= $p->type()->type() . " " . $p->name() . ";\n";
+	}
+	$r .= "registration_uid_t rid;\n";
+	
+	$r .= "};\n\n";
+    }
+    for my $h (@handlers) {
+	for my $m ($h->methods()) {
+	    my $n = ucfirst($m->name());
+	    $r .= "$n  {\n";
+	    for my $p ($m->params()) {
+		$r .= $p->type()->type() . " " . $p->name() . ";\n";
+	    }
+	    $r .= "registration_uid_t rid;\n";
+	    $r .= "};\n\n";
+	}
+    }
+    
+    $r .= "} // messages\n";
+    print indentStr($r);
+} # generateMessages
+
+sub joinParamsWithRid {
+    my @p = @_;
+
+    my $params = "";
+    if (scalar(@p)) {
+	$params = join(", ", map { $_->name() } @p);
+    }
+    if ($params) {
+	$params .= ", ";
+    }
+    $params .= "rid";
+    return $params;
+}
+
+# sub insertLine {
+#   my $file = shift;
+#   my $filename = shift;
+
+#   my @lines = split /\n/, $$file;
+#   my $nextlineno = 2;
+#   for my $l (@lines) {
+#     if($l =~ m|^\s*// __INSERT_LINE_HERE__\s*$|) {
+#       $l = qq{#line $nextlineno "$filename"};
+#     }
+#     $nextlineno++;
+#   }
+#   $$file = join("\n", @lines)."\n";
+# }
+
+
+

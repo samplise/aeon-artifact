@@ -1,0 +1,21 @@
+#!/usr/bin/env perl
+
+use strict;
+use Frontier::Client;
+
+my $priority = shift(@ARGV) || 2;
+
+unless ($priority =~ m/^1|2$/) {
+    $priority = 2;
+}
+
+my %pri = (1 => { type => "str", addr => "pri1" },
+	   2 => { type => "str", addr => "pri2" });
+
+my $client = Frontier::Client->new(url => "http://localhost:2000/xmlrpc");
+
+my $r = $client->call("MulticastServiceClass.multicast", $pri{$priority}, "", -1);
+unless ($r->value) {
+    print "client returned " . $r->value() . "\n";
+}
+

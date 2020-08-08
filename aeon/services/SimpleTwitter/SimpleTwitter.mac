@@ -1,0 +1,292 @@
+//#include <random>
+
+service SimpleTwitter;
+provides Null;
+
+typedefs {
+}
+services {
+
+}
+
+constants {
+  
+}
+
+
+constructor_parameters {
+    uint32_t N_DEPARTMENTS = 5;
+    uint32_t N_COURSES_PER_DEPARTMENT = 3;
+    uint32_t N_STUDENTS_PER_DEPARTMENT = 20;
+    uint32_t N_STUDENTS_PER_COURSE = 10;
+
+    uint64_t N_OUTPUT = 1000;
+    uint64_t N_POST_MESSAGE = 2;
+
+    uint64_t WAITING_TIME_PERIOD = 120;
+    uint64_t N_POST_MESSAGE_ONCE = 3;
+
+    uint32_t STUDENT_OUTPUT_ID = 5;
+    uint64_t MIGRATION_WAITING_TIME_PERIOD = 60;
+
+    uint32_t MIGRATION_COUNT = 1;
+    uint32_t CONTEXT_SIZE = 100;
+}
+ 
+state_variables {
+  context University {
+    mace::string schoolName;
+    mace::vector<uint32_t> departmentIds;
+
+    uint64_t message_count = 0;
+  }
+  
+  context Department<uint32_t x>{
+    uint32_t dId;
+    mace::string departmentName;
+
+    uint64_t message_count;
+    mace::vector<uint32_t> courseIds;
+  }
+
+  context Course<uint32_t x> {
+    uint32_t cId;
+    mace::string courseName;
+
+    uint64_t message_count;
+    mace::vector<uint32_t> studentIds;
+
+    mace::vector<uint32_t> courseIds;
+
+    mace::vector<mace::string> contents;
+  }
+
+  context Student<uint32_t x> {
+    uint32_t sId;
+    mace::vector<uint32_t> takenCourseIds;
+    uint64_t message_count;
+  }
+
+  context Controller {
+
+  }
+}
+
+messages {
+}
+ 
+transitions {
+  downcall maceInit()  {
+    srand( mace::getmtime() );
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;
+
+    mace::pair<mace::string, mace::string> controllerOwnership("globalContext", "Controller");
+    ownerships.insert(controllerOwnership);
+    async_initController();
+
+    mace::vector<uint32_t> departmentIds;
+    mace::vector<mace::string> departmentNames;
+    mace::pair<mace::string, mace::string> schoolOwnership("globalContext", "School");
+    ownerships.insert(schoolOwnership);
+    for(uint32_t i=0; i<N_DEPARTMENTS; i++) {
+      departmentIds.push_back(i);
+      std::ostringstream oss;
+      oss<< "Department[" << i << "]";
+      mace::pair< mace::string, mace::string > ownership("School", oss.str() );
+      ownerships.insert(ownership);
+
+      departmentNames.push_back( oss.str() );
+    }
+    async_initSchool("Purdue University", departmentIds);
+
+    mace::vector<mace::string> courseNames;
+    for(uint32_t i=0; i<N_DEPARTMENTS; i++) {
+      uint32_t startCourseId = i * N_COURSES_PER_DEPARTMENT;
+      uint32_t endCourseId = (i+1) * N_COURSES_PER_DEPARTMENT - 1;
+
+      uint32_t startStudentId = i * N_STUDENTS_PER_DEPARTMENT;
+      uint32_t endStudentId = (i+1) * N_STUDENTS_PER_DEPARTMENT - 1;
+
+      mace::vector<uint32_t> courseIds;
+      for(uint32_t j=startCourseId; j<=endCourseId; j++) {
+        courseIds.push_back(j);
+        std::ostringstream oss;
+        oss<< "Course[" << j << "]";
+        mace::pair< mace::string, mace::string > ownership(departmentNames[i], oss.str() );
+        ownerships.insert(ownership);
+
+        courseNames.push_back( oss.str() );
+      }
+      async_initDepartment( i, departmentNames[i], courseIds );
+
+      mace::set<uint32_t> studentIdSet;
+      for(uint32_t j=startStudentId; j<=endStudentId; j++) {
+        studentIdSet.insert(j);
+      }
+
+      for( uint32_t j=startCourseId; j<=endCourseId; j++ ) {
+        mace::set<uint32_t> chosenStudentIds;
+
+        for(uint32_t k=0; k<N_STUDENTS_PER_COURSE; k++) {
+          uint32_t studentId = (uint32_t) rand() % N_STUDENTS_PER_DEPARTMENT + startStudentId;
+          ASSERT( studentId <= endStudentId );
+          if( chosenStudentIds.count(studentId) == 0) {
+            chosenStudentIds.insert(studentId);
+            studentIdSet.erase(studentId);
+
+            std::ostringstream oss;
+            oss<< "Student[" << studentId << "]";
+            mace::pair< mace::string, mace::string > ownership(courseNames[j], oss.str() );
+            ownerships.insert(ownership);
+          }
+        }
+
+        if( j == endCourseId && !studentIdSet.empty() ) {
+          mace::set<uint32_t>::iterator iter = studentIdSet.begin();
+          for(; iter != studentIdSet.end(); iter++ ) {
+            uint32_t studentId = *iter;
+            chosenStudentIds.insert(studentId);
+            
+            std::ostringstream oss;
+            oss<< "Student[" << studentId << "]";
+            mace::pair< mace::string, mace::string > ownership(courseNames[j], oss.str() );
+            ownerships.insert(ownership);
+          }
+        }
+
+        mace::vector<uint32_t> studentIds;
+        mace::set<uint32_t>::iterator iter = chosenStudentIds.begin();
+        for(; iter!=chosenStudentIds.end(); iter++) {
+          studentIds.push_back(*iter);
+        }
+
+        async_initCourse(j, courseNames[j], studentIds, courseIds);
+      }
+
+      for(uint32_t j=startStudentId; j<=endStudentId; j++) {
+        async_initStudent(j, courseIds);
+      }
+    }
+
+    addNewOwnerships(ownerships);
+  }
+
+  async [Controller] initController() {
+    ADD_SELECTORS("SimpleTwitter");
+    maceout<< "Initialize bsang Controller!" << Log::endl;
+    async_startController();
+    
+  }
+
+  async [Controller] startController() {
+    ADD_SELECTORS("SimpleTwitter");
+    sleep(WAITING_TIME_PERIOD);
+    maceout << "Start to post messages!" << Log::endl;
+    uint32_t courseId = 0;
+    for(uint32_t i=0; i<N_DEPARTMENTS; i++) {
+      for(uint32_t j=0; j<N_COURSES_PER_DEPARTMENT; j++) {
+        async_postMessageInCourse(courseId ++);
+      }
+    }
+
+    async_startMigration();
+  }
+
+  async [Controller] startMigration() {
+    ADD_SELECTORS("SimpleTwitter");
+    sleep(MIGRATION_WAITING_TIME_PERIOD);
+    for(uint32_t i=1; i<=MIGRATION_COUNT; i++) {
+      std::ostringstream oss;
+      oss<< "migrate" << i;
+      mace::string migrateStr = oss.str();
+      maceout<< "Start migration: " << migrateStr << Log::endl;
+      migrateContext(migrateStr);
+    }
+  }
+
+  async [School] initSchool(mace::string const& name, mace::vector<uint32_t> const& departments) {
+    ADD_SELECTORS("SimpleTwitter");
+    message_count = 0;
+    departmentIds = departments;
+    schoolName = name;
+
+    maceout<< "Initializing school("<< schoolName <<") with departments: " << departmentIds << Log::endl;
+
+  }
+
+  async [Department<x>] initDepartment(const uint32_t x, mace::string const& name, mace::vector<uint32_t> const& courses ) {
+    ADD_SELECTORS("SimpleTwitter");
+    departmentName = name;
+    message_count = 0;
+    courseIds = courses;
+    maceout<< "Initialize Department("<< x <<") with courses: " << courseIds << Log::endl;
+  }
+
+  async [Course<x>] initCourse(const uint32_t x, mace::string const& name, mace::vector<uint32_t> const& students, mace::vector<uint32_t> const& courses){
+    ADD_SELECTORS("SimpleTwitter");
+    message_count = 0;
+    courseName = name;
+    studentIds = students;
+    courseIds = courses;
+
+    //if( x==1 ) {
+      mace::string val = get10KValue();
+      for(uint32_t i=0; i<CONTEXT_SIZE; i++) {
+        contents.push_back(val);
+      }
+    //}
+    maceout << "Initialize Course("<< x <<") with students: " << studentIds << Log::endl;
+  }
+
+  async [Student<x>] initStudent(const uint32_t x, mace::vector<uint32_t> const& courses) {
+    ADD_SELECTORS("SimpleTwitter");
+    message_count = 0;
+    takenCourseIds = courses;
+    maceout<< "Initialize Student("<< x <<") with taken courses: "<< takenCourseIds << Log::endl;
+  } 
+
+  async [Course<x>] postMessageInCourse(const uint32_t x) {
+    ADD_SELECTORS("SimpleTwitter");
+            
+    newBroadcastEventID();
+    for(uint32_t i=0; i < studentIds.size(); i++) {
+      broadcast_postMessageInStudent(studentIds[i]);
+    }
+    message_count ++;
+
+    if( message_count % N_OUTPUT == 0 ) {
+      maceout<< "Course("<< x <<") receive message=" << message_count << Log::endl; 
+    }
+
+    if( message_count % N_POST_MESSAGE == 0 ) {
+      for(uint32_t i=0; i<N_POST_MESSAGE_ONCE; i++) {
+        uint32_t cIter = (uint32_t) rand() % courseIds.size();
+        async_postMessageInCourse(courseIds[cIter]);
+      }
+    }
+  }
+
+  broadcast [Student<x>] postMessageInStudent(const uint32_t x) {
+    ADD_SELECTORS("SimpleTwitter");
+    message_count ++;
+    
+    if( message_count % N_OUTPUT == 0 && x % STUDENT_OUTPUT_ID == 0 ) {
+      maceout<< "Student("<< x <<") receive message=" << message_count << Log::endl;
+    }
+  }
+}
+
+routines {
+
+  [__null] mace::string get10KValue() {
+    mace::string str_value = "";
+    mace::string seed_str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for(uint32_t i=0; i<200; i++) {
+      str_value += seed_str;
+    }
+    return str_value;
+  }
+ 
+
+}
+

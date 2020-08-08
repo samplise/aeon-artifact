@@ -1,0 +1,59 @@
+/* 
+ * HeartBeatServiceClass.mh : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Wei-Chiu Chuang, Charles Killian, James W. Anderson, Ryan Braud
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "mset.h"
+enum JoinStatus { JOINED, JOINING, NONE }; 
+
+#include "mlist.h"
+#include "MaceKey.h"
+serviceclass HeartBeat {
+  // NOTE: There shall be only one Authoritative OverlayJoinHandler "registered"
+  // per service instance.
+
+  handlers JobManagerData;
+  
+  virtual void notifySignal(int signum);
+  virtual void vacate();
+  virtual void startService(const std::string& specFileName,const std::string& inputFileName);
+  //virtual void reportMigration(mace::string& snapshot);
+  virtual void showJobStatus();
+  virtual void showNodeStatus();
+  virtual void terminateRemoteAll();
+  virtual void terminateRemote(const mace::list< MaceAddr >& nodes, bool migrate);
+  virtual void terminateRemote(uint32_t nodes, bool migrate);
+  // scheduler master gets this downcall. migrate a single context to a new node.
+  virtual void migrateContext(const uint32_t jobID, const std::string& contextID, const MaceAddr& destNode, const bool isTrue);
+  virtual void splitNodeContext(const uint32_t jobID, const MaceAddr& nodeKey);
+  virtual bool getNodeInfo(const uint32_t jobid,const uint32_t nodeid, mace::string& nodeHostName, uint32_t& node_unixpid, uint32_t& uniapp_unixpid);
+
+  virtual void updateNodePerformance();
+
+  //virtual void registerLogicalNode();
+};

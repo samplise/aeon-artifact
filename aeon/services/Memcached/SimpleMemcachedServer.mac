@@ -1,0 +1,325 @@
+#include <functional>
+#define get16bits(d) ((((uint32_t)(((const uint8_t *)(d))[1])) << 8)\
+                       +(uint32_t)(((const uint8_t *)(d))[0]) )
+
+service SimpleMemcachedServer;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  uint32_t TABLE_NUMBER = 10;
+  uint64_t ITEM_NUMBER_PER_TABLE = 10000;
+  uint64_t PAIRS_NUMBER = 1000000;
+  uint64_t OUTPUT_COUNT = 100;
+  uint8_t SEND_REPLY_FLAG = 1;
+
+  NodeSet DHT_NODES = NodeSet();
+  uint32_t CLIENT_NUMBER = 32;
+  uint64_t SLEEP_TIME = 10000;
+}
+
+typedefs {
+  typedef mace::map< mace::string, Item > TableType;
+  typedef mace::deque< RemoveItem > RemoveListType;
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  ConnectionRequest {
+
+  }
+
+  ConnectionSetup {
+    MaceKey proxyAddr;
+  }
+
+  ReadRequest {
+    uint32_t clientId;
+    mace::string key;
+  }
+
+  ReadReply {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+    bool isCacheMiss;
+  }
+
+  WriteRequest {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+  }
+
+  WriteReply {
+    uint32_t clientId;
+    mace::string key;
+    bool isCacheMiss;
+  }
+  
+}
+
+auto_types {
+  Item __attribute((comparable(equals=default; lessthan=default))) {
+    mace::string value;
+    uint64_t timestamp;
+  }
+
+  RemoveItem __attribute((comparable(equals=default; lessthan=default))) {
+    mace::string key;
+    uint64_t timestamp;
+  }
+}
+
+state_variables {
+  context ItemTable<uint32_t taleId> {
+    TableType table;
+    RemoveListType removeList;
+    uint64_t item_number;
+    uint64_t miss_number;
+    uint64_t get_number;  
+
+    uint64_t request_count;  
+
+    uint32_t next_clientId;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    srand( mace::getmtime() );
+    mace::set< mace::pair<mace::string, mace::string> > ownerships;
+    for(uint32_t i=0; i<TABLE_NUMBER; i++){
+      std::ostringstream oss;
+      oss<< "ItemTable[" << i << "]";
+
+      mace::pair<mace::string, mace::string> ownership("globalContext", oss.str() );
+      ownerships.insert(ownership);
+      async_initItemTable(i);  
+    }
+    addNewOwnerships(ownerships);
+  }
+
+  async [ ItemTable<tableId> ] initItemTable(uint32_t tableId){
+    ADD_SELECTORS("SimpleMemcachedServer");
+    
+    
+    item_number = 0;
+    miss_number = 0;
+    get_number = 0;  
+    request_count = 0;
+
+    next_clientId = 0;
+    maceout<< "To initialize table " << tableId << Log::endl;
+    
+    async_sendReply(tableId);
+  }
+
+  async [ ItemTable<tableId> ] sendReply(const uint32_t& tableId) {
+    ADD_SELECTORS("SimpleMemcachedServer");
+    request_count ++;
+    if( request_count % OUTPUT_COUNT == 0) {
+      maceout<< "Table("<< tableId <<"): requestCount="<<request_count<< Log::endl; 
+    }
+
+    downcall_route( *(DHT_NODES.begin()), ReadReply( next_clientId, "key", "a", true) );
+    next_clientId ++;
+    next_clientId = next_clientId % CLIENT_NUMBER;
+    usleep(SLEEP_TIME);
+    async_sendReply(tableId);
+  }
+
+  async [ ItemTable<tableId> ] handleReadRequest(const uint32_t& tableId, const MaceKey& src, const uint32_t& clientId, const mace::string& key) {
+    ADD_SELECTORS("MemcachedServer");
+    uint64_t current_time = mace::getmtime();
+    bool isCacheMiss = false;
+    TableType::iterator iter = table.find(key);
+    if( iter != table.end() ) {
+      iter->second.timestamp = current_time;
+      get_number ++;
+    } else {
+      isCacheMiss = true;
+      if( item_number >= ITEM_NUMBER_PER_TABLE ) {
+        bool findMinItemFlag = false;
+        while( !findMinItemFlag && !removeList.empty() ) {
+          const RemoveItem& rItem = removeList.front();
+          TableType::iterator mIter = table.find(rItem.key);
+          if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+            findMinItemFlag = true;
+            table.erase(mIter);
+            item_number --;
+          }
+
+          removeList.pop_front();
+        }
+
+        if( !findMinItemFlag ) {
+          uint64_t min_time = current_time;
+          TableType::iterator min_iter;
+          for( TableType::iterator miter = table.begin(); miter != table.end(); miter++ ) {
+            if( min_time > miter->second.timestamp ) {
+              min_time = miter->second.timestamp;
+              min_iter = miter;
+            }
+          }
+
+          table.erase(min_iter);
+          item_number --;
+        }
+      }
+
+      Item item("abcde", current_time);
+      table[key] = item;
+      RemoveItem rItem(key, current_time);
+      removeList.push_back(rItem);
+      item_number ++;
+
+      miss_number ++;
+    }
+
+    request_count ++;
+    if( request_count % OUTPUT_COUNT == 0) {
+      maceout<< "Table("<< tableId <<"): requestCount="<<request_count<<" missCount="<<miss_number << Log::endl; 
+    }
+    //usleep(10000);
+    downcall_route( src, ReadReply(clientId, key, "a", isCacheMiss) );
+    
+  }
+
+  async [ ItemTable<tableId> ] handleWriteRequest(const uint32_t& tableId, const MaceKey& src, const uint32_t& clientId, const mace::string& key, const mace::string& value) {
+    ADD_SELECTORS("MemcachedServer");
+    bool isCacheMiss = false;
+    uint64_t current_time = mace::getmtime();
+    TableType::iterator iter = table.find(key);
+    if( iter != table.end() ) {
+      iter->second.timestamp = current_time;
+      iter->second.value = value;
+      get_number ++;
+    } else {
+      isCacheMiss = true;
+      if( item_number >= ITEM_NUMBER_PER_TABLE ) {
+        uint64_t min_time = current_time;
+        TableType::iterator min_iter;
+        for( TableType::iterator miter = table.begin(); miter != table.end(); miter++ ) {
+          if( min_time > miter->second.timestamp ) {
+            min_time = miter->second.timestamp;
+            min_iter = miter;
+          }
+        }
+
+        table.erase(min_iter);
+        item_number --;
+      }
+
+      Item item;
+      item.value = value;
+      item.timestamp = current_time;
+      table[key] = item;
+      item_number ++;
+
+      miss_number ++;
+    }
+    request_count ++;
+    if( request_count % OUTPUT_COUNT == 0) {
+      maceout<< "Table("<< tableId <<"): requestCount="<<request_count<<" missCount="<<miss_number << Log::endl; 
+    }
+
+    downcall_route( src, WriteReply(clientId, key, isCacheMiss) );
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    const MaceAddr& commAddr = getExternalCommContextAddr(src);
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( dest, ConnectionSetup(commKey) );
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ReadRequest& msg) {
+    ADD_SELECTORS("MemcachedServer");
+    const uint32_t tableId = get_bucket(msg.key);
+    //maceout<< "Received read request with key("<< msg.key <<") from Client "<< msg.clientId << Log::endl;
+    async_handleReadRequest(tableId, src, msg.clientId, msg.key);
+  }
+  
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const WriteRequest& msg) {
+    const uint32_t tableId = get_bucket(msg.key);
+    async_handleWriteRequest(tableId, src, msg.clientId, msg.key, msg.value);
+  }
+}
+
+
+routines {
+  /*
+   * Refer to http://www.azillionmonkeys.com/qed/hash.html */
+  [__null] uint32_t get_bucket(const mace::string& key) {
+    uint32_t len = key.length();
+    char * cstr = new char [key.length()+1];
+    char * data = cstr;
+    uint32_t hash = len, tmp;
+    int rem;
+
+    if (len == 0) {
+      delete[] cstr;
+      return 0;
+    }
+
+    rem = len & 3;
+    len >>= 2;
+
+    /* Main loop */
+    for (; len > 0; len--) {
+      hash  += get16bits (data);
+      tmp    = (get16bits (data+2) << 11) ^ hash;
+      hash   = (hash << 16) ^ tmp;
+      data  += 2*sizeof (uint16_t);
+      hash  += hash >> 11;
+    }
+
+    /* Handle end cases */
+    switch (rem) {
+      case 3: hash += get16bits (data);
+              hash ^= hash << 16;
+              hash ^= ((signed char)data[sizeof (uint16_t)]) << 18;
+              hash += hash >> 11;
+              break;
+      case 2: hash += get16bits (data);
+              hash ^= hash << 11;
+              hash += hash >> 17;
+              break;
+      case 1: hash += (signed char)*data;
+              hash ^= hash << 10;
+              hash += hash >> 1;
+    }
+
+    /* Force "avalanching" of final 127 bits */
+    hash ^= hash << 3;
+    hash += hash >> 5;
+    hash ^= hash << 4;
+    hash += hash >> 17;
+    hash ^= hash << 25;
+    hash += hash >> 6;
+
+    delete[] cstr;
+    return hash % (TABLE_NUMBER);
+  }
+
+  [__null] mace::string generateRandomKey( const uint64_t size ) {
+    const uint64_t uint_key = (uint64_t) rand() % size;
+    std::ostringstream oss;
+    oss<< uint_key;
+    return oss.str();
+  }
+
+}
+
+

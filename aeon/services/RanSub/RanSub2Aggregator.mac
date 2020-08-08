@@ -1,0 +1,682 @@
+/* 
+ * RanSub2Aggregator.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, Adolfo Rodriguez, Dejan Kostic, James W. Anderson, John Fisher-Ogden, Ryan Braud
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "lib/m_map.h"
+#include "lib/Util.h"
+#include "lib/Iterator.h"
+
+#ifdef PIP_MESSAGING
+#include "annotate.h"
+#endif
+
+/** Notes for RanSub2Aggregator
+ * - Store old collect data for everyone
+ * - Only propagate if data is within SEQUENCE_RANGE
+ * - NOTE: In the worst case, this could cause things to have contributions up to HEIGHT * SEQUENCE_RANGE old in them (SEQUENCE_RANGE at each level)
+ * - Strategy for sending collects: time out collect when distribute is received -- force sending then.
+ * - With SEQUENCE_RANGE of 0, should behave nearly exactly like RanSubAggregator.
+ */
+
+//using std::vector;
+using std::string;
+using mace::map;
+using mace::MapIterator;
+using Log::endl;
+
+// #include "AggregateServiceClass.h"
+
+//FIXME: Handle the ability for empty channels in handlers to be omitted from messages to make sure minimal state doesn't persist forever.
+
+service RanSub2Aggregator;
+
+provides Aggregate;
+attributes ransubaggregator;
+
+trace=high;
+
+constructor_parameters {
+  uint64_t AGGREGATION_INTERVAL = 5*1000*1000;
+}
+
+constants {
+  // Uncomment these as needed!
+  //   int RANSUB_MAX_CHILDREN = 12;
+  //   int RANSUB_MAX_CANDIDATES = 10;
+  uint64_t PRINTER_INTERVAL = 1*1000*1000;
+  int SEQUENCE_RANGE = std::numeric_limits<int>::max(); //How many intervals are we willing to store old data?  INT_MAX implies forever.
+}
+
+services {
+  Tree tree_ = auto(shared, [], []); //RandTree(); //Handles join protocol, tree liveness, failure recovery, etc.
+  Transport route_ = auto(shared, [reliable,inorder], []); //TcpTransport(); //For use during collect/distribute
+}
+
+auto_types {
+
+  channel_data {
+    int id;
+    int count;
+    std::string aggregate_data __attribute((dump(no)));
+  }
+
+  handler_data {
+    registration_uid_t id;
+    ChannelChannelDataMap channels;
+  }
+
+  node {
+    MaceKey id; //node identifier (IP address)
+    int sequence;
+    int descendants;
+    /*     int represents; */ //Probably replaced by channel_data::count
+    HandlerHandlerDataMap handlers; 
+  }
+}
+
+typedefs {
+  typedef mace::map<MaceKey, node> CollectMap;
+  typedef mace::set<channel_id_t> ChannelSet;
+  typedef mace::map<registration_uid_t, ChannelSet> SubscriptionMap;  //Map from the registratioin id to the set of channels subscribed to for that handler.
+  typedef mace::map<channel_id_t, AggregateNodeBlobMap> ChannelNodeBlobMap;
+  typedef mace::map<channel_id_t, AggregateNodeCountMap> ChannelNodeCountMap;
+  typedef mace::map<registration_uid_t, handler_data> HandlerHandlerDataMap;
+  typedef mace::map<MaceKey, HandlerHandlerDataMap> ChildHandlerHandlerDataMap;
+  typedef mace::map<channel_id_t, channel_data> ChannelChannelDataMap;
+}
+
+messages {
+  collectMsg { //Note: This message is keyed for the Aggregation Service, not the Gossip Service
+    int sequence;
+    int descendants; //To be used only for total count.
+    HandlerHandlerDataMap handlerCollects;
+  }
+  distributeMsg { //Note: This message is keyed for the Aggregation Service, not the Gossip Service
+    int sequence;
+    int population; //To be used only for total count.
+    HandlerHandlerDataMap handlerDistributes;
+  }
+}
+
+state_variables {	 
+  node lastDistribute; //recvd from parent.  Note -- at root this is empty, but tracks the sequence number and such
+  CollectMap lastCollect;
+  SubscriptionMap subscriptions;  //Map from the registration id to the set of channels subscribed to for that handler.
+  timer printer __attribute((recur(PRINTER_INTERVAL))); 
+  int total_received;
+  //   int total_expected;
+  int population;
+  int descendants;
+  bool collect_missing;
+  //   candidate_set<monitor_data> curset;
+  //   monitor_data current_state;
+  timer collect;
+  MaceKey RANSUB_MESSAGE_GROUP;
+}	  
+
+transitions {
+
+  downcall maceInit() {
+    lastDistribute.sequence = 0;
+    total_received = 0;
+    collect_missing = false;
+
+    // assume RandTree is already joined
+    //     join(RANSUB_MESSAGE_GROUP, 0, "", tree_);
+
+    //XXX: needed because notifyIsMemberChanged may have occurred before maceInit()
+    if (downcall_isMember(RANSUB_MESSAGE_GROUP)) {
+      printer.reschedule(PRINTER_INTERVAL);
+      notifyIsRootChanged(RANSUB_MESSAGE_GROUP, downcall_isRoot(RANSUB_MESSAGE_GROUP, tree_), tree_);
+    }
+
+  } // init API init
+  
+  upcall (groupId == RANSUB_MESSAGE_GROUP || groupId == MaceKey::null) notifyIsMemberChanged(const MaceKey& groupId, bool isMember) {
+    if(isMember) {
+      printer.reschedule(PRINTER_INTERVAL);
+      notifyIsRootChanged(RANSUB_MESSAGE_GROUP, downcall_isRoot(RANSUB_MESSAGE_GROUP, tree_), tree_);
+    }
+    else {
+      ASSERT(!collect.isScheduled()); //In theory, this should be cancelled by a notifyIsRootChanged()
+      //       collect.cancel(); 
+      printer.cancel();
+    }
+  }
+  
+  upcall (groupId == RANSUB_MESSAGE_GROUP || groupId == MaceKey::null) notifyIsRootChanged(const MaceKey& groupId, 
+				     bool isRoot) {
+    if(isRoot) {
+      maceout << "Hey!  I'm root!" << Log::endl;
+      collect.reschedule(100000);
+    } else {
+      maceout << "I'm not root" << Log::endl;
+      collect.cancel();
+    }
+  }
+
+  scheduler (downcall_isMember(RANSUB_MESSAGE_GROUP)) printer() {
+    //     Log::logf("ransub_aggregator", "Have state for:\n");
+    //     for(int i = 0; i < curset.number_candidates; i++) {
+    //       Log::logf("ransub_aggregator", "Node %.8x -- %s -- %s\n", curset.candidates[i].id, curset.candidates[i].key, curset.candidates[i].value);
+    //     }
+  } // joined timer printer
+
+  //   scheduler (downcall_isMember(RANSUB_MESSAGE_GROUP)) collect() {} // Could ASSERT downcall_isMember()...
+  scheduler collect() {
+    // This code times out collect, for failure detection
+    if (collect_missing) {
+      send_collect_if_needed(true);
+    }
+
+    //TODO: replace with check with randtree for if (I am root)
+    if (downcall_isRoot(RANSUB_MESSAGE_GROUP, tree_)) {
+      if (collect_missing) {
+        for(CollectMap::iterator i=lastCollect.begin(); i!=lastCollect.end(); i++) {
+          //         foreach_neighbor(neighbor_ransub_children *, kid, mychildren) {}
+          if (i->second.sequence != lastDistribute.sequence) {
+            maceout << "coll still out at root for " << i->second.id 
+		    << "." << Log::endl;
+          }
+        }
+      }
+
+      population = descendants + 1; //plus 1 for me!
+      maceout << "pop: " << population << " descendants: " << descendants << " lastDistribute.descendants: " << lastDistribute.descendants << endl;
+      lastDistribute.sequence++;
+      lastDistribute.id = localAddress();
+      //Note: Not clearing this, because in collect we set the counts and such -- also preloaded with the collect value, which was kinda strange.
+      //       lastDistribute.handlers.clear();
+      lastDistribute.descendants = population;
+#ifdef PIP_MESSAGING
+      char pathid[30];
+      sprintf(pathid, "ransub seq %d", lastDistribute.sequence);
+      ANNOTATE_SET_PATH_ID("joined timer ransub", 0, pathid, strlen(pathid));
+      ANNOTATE_NOTICE("joined timer ransub", 0, "RanSub: root dist seq %d, population %d", lastDistribute.sequence, population);
+#endif
+      maceout << "root dist seq " << lastDistribute.sequence << " population " << population << Log::end;
+
+      send_distribute();
+
+      //       collect.reschedule(AGGREGATION_INTERVAL);
+    }
+
+    //TODO: Which timer setting do we want? Root only, or all nodes?  Should nodes adjust timer period based on height?
+    collect.reschedule(AGGREGATION_INTERVAL);
+  } // joined timer ransub
+  
+  upcall (downcall_isMember(RANSUB_MESSAGE_GROUP)) deliver(const MaceKey& source, 
+				     const MaceKey& destination, 
+				     const distributeMsg& msg) {
+#ifdef PIP_MESSAGING
+    ANNOTATE_START_TASK(selector.c_str(), 0, "recv distribute");
+    ANNOTATE_NOTICE(selector.c_str(), 0, "RanSub: dist from %.8x seq %d, expect %d.", source.getMaceAddr().local.addr, msg.sequence, lastDistribute.sequence+1);
+#endif
+    maceout << "dist from " << source << " seq " << msg.sequence
+	    << ", expect " << lastDistribute.sequence+1 << Log::endl;
+
+    if (lastDistribute.sequence == 0) { //skip ahead to whatever sequence is the current one.
+      lastDistribute.sequence = msg.sequence - 1;
+    }
+
+    if (msg.sequence > lastDistribute.sequence) {
+      //TODO: Perhaps this can be merged with the code in timer ransub/collect, and a function call made instead
+      //FIXME: HUH?  population copy?
+
+      //RanSub2Aggregator: 3. Force collect on new distribute.
+      if(collect_missing) {
+        send_collect_if_needed(true);
+      }
+
+      maceout << "setting population ( " << population << " ) to lastDistribute.descandants ( " << lastDistribute.descendants << " )" << endl;
+      population = lastDistribute.descendants;
+      lastDistribute.id = source;
+      lastDistribute.descendants = population; //note: descendants here is misleading -- is actually population
+      lastDistribute.sequence = msg.sequence;
+      lastDistribute.handlers = msg.handlerDistributes;
+
+      send_distribute();
+    }
+    else {
+      //TODO: Send empty collect when sequence number is behind the times.
+      //       candidate_set<monitor_data> empty(RANSUB_MAX_CANDIDATES);
+      //       collect_collect(RANSUB_MESSAGE_GROUP, field(sequence), 0, empty, 0, 0, -1);
+      static const HandlerHandlerDataMap emptyMap;
+      int i = 0;
+      downcall_route(source, 
+		     collectMsg(lastDistribute.sequence, i, emptyMap), -1);
+    maceout << "send empty coll seq " << msg.sequence << Log::endl;
+    }
+#ifdef PIP_MESSAGING
+    ANNOTATE_END_TASK(selector.c_str(), 0, "recv distribute");
+#endif
+  } // joined recv distribute
+  
+  
+  upcall (downcall_isMember(RANSUB_MESSAGE_GROUP)) deliver(const MaceKey& source, 
+				     const MaceKey& destination, 
+				     const collectMsg& msg) {
+#ifdef PIP_MESSAGING
+    ANNOTATE_NOTICE(selector.c_str(), 1, "RanSub: got coll seq %d(%d desc.) from %x", msg.sequence, msg.descendants, source.getMaceAddr().local.addr);
+#endif
+    maceout << "got coll seq " << msg.sequence << " (" << msg.descendants 
+	    << " desc.) from " << source << Log::endl;
+
+    if (lastDistribute.sequence < msg.sequence) {
+      // we got a collect with a sequence greater than ours.  This
+      // means we are out of date, so clear our data structures and
+      // update the sequence number
+      for (CollectMap::iterator i = lastCollect.begin(); i != lastCollect.end(); i++) {
+	i->second.handlers.clear();
+      }
+
+      lastDistribute.sequence = msg.sequence;
+      lastDistribute.handlers.clear();
+      collect.reschedule(100000);
+      maceout << "lastDistribute.descendants: " << lastDistribute.descendants << endl;
+      lastDistribute.descendants = 0;
+    }
+    
+    //RanSub2Aggregator: 1. Store all collected data, regardless of how old.
+    CollectMap::iterator i = lastCollect.find(source);
+    if (i != lastCollect.end() && msg.sequence > i->second.sequence) {
+      //       if (neighbor_query(mychildren, from)) {}
+      i->second.sequence = msg.sequence;
+      maceout << "lastDistribute.descendants: " << lastDistribute.descendants << endl;
+      i->second.descendants = msg.descendants;
+      i->second.handlers = msg.handlerCollects;
+
+      send_collect_if_needed(false);
+    }
+
+  } // joined forward collect
+  
+
+  downcall (true) aggregateSubscribe(channel_id_t channelId,
+				     registration_uid_t rid) {
+    maceout << "subscribing registration id " << rid << " for channel " << channelId << Log::endl;
+    subscriptions[rid].insert(channelId); 
+    return 0; //XXX???
+  }
+  
+
+  downcall (true) aggregateUnsubscribe(channel_id_t channelId, 
+				       registration_uid_t rid) {
+    maceout << "unsubscribing registration id " << rid << " for channel " << channelId << Log::endl;
+    subscriptions[rid].erase(channelId);
+    if(subscriptions[rid].empty()) {
+      maceout << "removing registration id from subscription set as subscription count is 0" << Log::endl;
+      subscriptions.erase(rid);
+    }
+  }
+				       
+  downcall (true) getDistributeCount(channel_id_t channelId, 
+				     registration_uid_t rid) {
+    return lastDistribute.handlers[rid].channels[channelId].count;
+  }
+
+  downcall (true) getCollectCounts(channel_id_t channelId, 
+				   registration_uid_t rid) {
+    AggregateNodeCountMap cmap;
+    for(CollectMap::iterator i = lastCollect.begin(); i != lastCollect.end(); i++) {
+      if(i->second.handlers.find(rid) != i->second.handlers.end() &&
+          i->second.handlers[rid].channels.find(channelId) != i->second.handlers[rid].channels.end()) {
+        cmap[i->first] = i->second.handlers[rid].channels[channelId].count;
+      }
+    }
+    //FIXME: This won't work with a reference return because the variable goes out of scope.
+    return cmap;
+  }
+
+  downcall (true) getDistributeBlob(channel_id_t channelId, 
+				    registration_uid_t rid) {
+    return lastDistribute.handlers[rid].channels[channelId].aggregate_data;
+  }
+
+  downcall (true) getCollectBlobs(channel_id_t channelId, 
+				  registration_uid_t rid) {
+    AggregateNodeBlobMap bmap;
+    for(CollectMap::iterator i = lastCollect.begin(); i != lastCollect.end(); i++) {
+      if(i->second.handlers.find(rid) != i->second.handlers.end() &&
+          i->second.handlers[rid].channels.find(channelId) != i->second.handlers[rid].channels.end()) {
+        bmap[i->first] = i->second.handlers[rid].channels[channelId].aggregate_data;
+      }
+    }
+    //FIXME: This won't work with a reference return because the variable goes out of scope.
+    return bmap;
+  }
+
+  upcall (groupId == RANSUB_MESSAGE_GROUP || groupId == MaceKey::null) notifyParent(const MaceKey& groupId, 
+			       const MaceKey& parent) {
+    maceout << "parent changed from " << lastDistribute.id << " to "
+	    << parent << Log::endl;
+    lastDistribute.id = parent;
+  }
+
+  upcall (groupId == RANSUB_MESSAGE_GROUP || groupId == MaceKey::null) notifyChildren(const MaceKey& groupId, 
+			      NodeSet children) {
+    // I am being notified of changes in the tree below
+
+    // TODO: Do we still need this?
+    //       if (size > BULLET_MAX_CHILDREN) {
+    //         printf("Exception: notified of too many children %d!\n", size);
+    //         exit(54);
+    //       }
+    for (NodeSet::iterator i=children.begin(); i!=children.end(); i++) {
+      //       if (!neighbor_query(mychildren, neighbors[i])) { }
+      if(lastCollect.find(*i) == lastCollect.end()) {
+        maceout << "child " << *i << " added" << Log::endl;
+        //         neighbor_add (mychildren, neighbors[i]);
+        lastCollect[*i].id = *i;
+        lastCollect[*i].sequence = -1;
+        lastCollect[*i].descendants = 1;
+      }
+    }
+    MapIterator<CollectMap> j = MapIterator<CollectMap>(lastCollect);
+    //     foreach_neighbor (neighbor_ransub_children *, kid, mychildren) {}
+    while(j.hasNext()) {
+      MaceKey id;
+      node& n = j.next(id);
+      if(!children.contains(id)) {
+        macedbg(0) << "child " << id << " removed" << Log::endl;
+        descendants -= n.descendants;
+        population -= n.descendants;
+        j.remove();
+      }
+    }
+    macedbg(0) << "lastcollect: " << lastCollect << endl;
+    send_collect_if_needed(false);
+    //     upcall_notify(mychildren, NBR_TYPE_CHILDREN); // Notify upper layer of change
+  } // API notify
+
+} //transitions
+
+routines {
+
+  void send_collect_if_needed(bool collect_expired) {
+    int propagate=1;
+#ifdef PIP_MESSAGING
+    ANNOTATE_START_TASK(selector.c_str(), 1, "joined_xmit_collect_if_need");
+#endif
+    //     foreach_neighbor(neighbor_ransub_children *, kid, mychildren) {}
+    maceout << "Checking " << lastCollect.size() << " kids" << Log::endl;
+    for(CollectMap::iterator i = lastCollect.begin(); i != lastCollect.end(); i++) {
+      maceout << "Kid " << i->first << " seq " << i->second.sequence 
+	      << " lastDist " << lastDistribute.sequence << Log::endl;
+      if (i->second.sequence != lastDistribute.sequence && i->second.sequence !=-1) {
+        propagate = 0;
+      }
+    }
+    if (propagate) {      
+#ifdef PIP_MESSAGING
+      if(downcall_isRoot(RANSUB_MESSAGE_GROUP, tree_)) {
+        ANNOTATE_NOTICE(selector.c_str(), 1, "joined_xmit_collect_if_need: kids are okay");
+        ANNOTATE_NOTICE(selector.c_str(), 0, "SEQ %d DONE", lastDistribute.sequence);
+      } else {
+        ANNOTATE_NOTICE(selector.c_str(), 1, "joined_xmit_collect_if_need: kids are okay");
+      }
+#endif
+      maceLog("send_collect_if_needed: kids are okay\n");
+    }
+    if (collect_expired) {
+      propagate = 1;
+    }
+    if (propagate && collect_missing) {
+      collect_missing = false;      
+
+      SubscriptionMap handlers_and_channels;
+      getExistingChannels(handlers_and_channels);
+      descendants = 0;
+      macedbg(0) << "Descendants: " << descendants << " lastCollect: " << lastCollect << endl;
+
+      //iterate over lastCollect
+      for(CollectMap::iterator childIterator = lastCollect.begin(); childIterator != lastCollect.end(); childIterator++) {
+        if (collect_expired && childIterator->second.sequence < lastDistribute.sequence - SEQUENCE_RANGE && childIterator->second.sequence !=-1)
+        {
+          // this kid isn't ready, we timed out the collect
+          //RanSub2Aggregator: 2. only time out kid's data if it is older than SEQUENCE_RANGE
+          maceout << "kid->address: " << childIterator->second.id 
+		  << " timed out seq " << childIterator->second.sequence
+		  << " sequence " << lastDistribute.sequence << Log::endl;
+          childIterator->second.descendants=0;  
+          childIterator->second.handlers.clear();
+        } else {
+          descendants += childIterator->second.descendants;
+          macedbg(0) << "descendants: " << descendants << " after adding child: " << childIterator->second.descendants << endl;
+        }
+      }
+
+      bool isroot = false;
+      if(downcall_isRoot(RANSUB_MESSAGE_GROUP, tree_)) {
+        isroot = true;
+        lastDistribute.id = localAddress();
+      }
+      
+      //TODO: Optimization -- perhaps we could cache the cmap and nmap for responding to queries.
+      //TODO: Alternate -- perhaps we should reorganize data structures to make responding to queries easier.
+      HandlerHandlerDataMap collectData;
+      //       HandlerHandlerDataMap collectData = HandlerHandlerDataMap();
+      //iterate over handler ids
+      maceout << "collectData.size() " << collectData.size() << Log::endl;
+      for(SubscriptionMap::iterator handlerIter = handlers_and_channels.begin();
+          handlerIter != handlers_and_channels.end(); handlerIter++) {
+        collectData[handlerIter->first].id = handlerIter->first;
+        //iterate over channel ids
+        for(ChannelSet::iterator channelIter = handlerIter->second.begin(); channelIter != handlerIter->second.end(); channelIter++) {
+          collectData[handlerIter->first].channels[*channelIter].id = *channelIter;
+          AggregateNodeBlobMap nmap;
+          AggregateNodeCountMap cmap;
+          //iterate over lastCollect
+          int count = 0;
+          for(CollectMap::iterator childIter = lastCollect.begin(); childIter != lastCollect.end(); childIter++) {
+            nmap[childIter->first] = lastCollect[childIter->first].handlers[handlerIter->first].channels[*channelIter].aggregate_data;
+            cmap[childIter->first] = lastCollect[childIter->first].handlers[handlerIter->first].channels[*channelIter].count;
+            maceout << "child " << childIter->first << " sent count " 
+		    << cmap[childIter->first] << Log::endl;
+            count += lastCollect[childIter->first].handlers[handlerIter->first].channels[*channelIter].count;
+            //end iterate over lastCollect
+          }
+          bool isSubscribed = (subscriptions.find(handlerIter->first) != subscriptions.end() &&
+              subscriptions[handlerIter->first].find(*channelIter) != subscriptions[handlerIter->first].end());
+          if (isSubscribed) {
+            collectData[handlerIter->first].channels[*channelIter].count = count + 1;
+          }
+
+          maceout << "about to call collectedAggregateData with count=" << collectData[handlerIter->first].channels[*channelIter].count << Log::endl;
+          upcall_collectAggregateData(*channelIter, nmap, collectData[handlerIter->first].channels[*channelIter].aggregate_data,
+              cmap, collectData[handlerIter->first].channels[*channelIter].count,
+              isSubscribed, handlerIter->first);
+          maceout << "got collectedAggregateData, count=" << collectData[handlerIter->first].channels[*channelIter].count << Log::endl;
+          //end iterate over channel ids
+        }
+        //end iterate over handlerids
+      }
+
+
+      if(!isroot) {
+        maceout << "sending collect sequence " << lastDistribute.sequence
+		<< " (" << descendants+1 << " desc.)to " << lastDistribute.id
+		<< "." << Log::endl;
+        downcall_route(lastDistribute.id, 
+		       collectMsg(lastDistribute.sequence, descendants+1,
+				  collectData), -1);
+      } else {
+        lastDistribute.handlers = collectData;
+      }
+    }
+#ifdef PIP_MESSAGING
+    ANNOTATE_END_TASK(selector.c_str(), 1, "joined_xmit_collect_if_need");
+#endif
+  } // send_collect_if_need
+
+  void send_distribute() {
+    collect_missing=true;
+    AggregateNodeBlobMap child_map;
+    AggregateNodeCountMap cmap;
+    ChildHandlerHandlerDataMap child_distribute_map = ChildHandlerHandlerDataMap();
+
+    SubscriptionMap handlers_and_channels;
+    getExistingChannels(handlers_and_channels);
+
+    maceout << "In send_distribute num_handlers " << handlers_and_channels.size() << Log::endl;
+
+    //iterate over handlerIds
+    for(SubscriptionMap::iterator handlerIter = handlers_and_channels.begin();
+        handlerIter != handlers_and_channels.end(); handlerIter++) {
+      //iterate over children
+      maceout << "num_children " << lastCollect.size() << Log::endl;
+      for(CollectMap::iterator childIter = lastCollect.begin(); 
+	  childIter != lastCollect.end(); childIter++) {
+        //create the handler id for each child -- and set the handler id = to the id.
+        maceout << "adding child " << childIter->first 
+		<< " to child_distribute_map for registration id " 
+		<< handlerIter->first << Log::endl;
+        child_distribute_map[childIter->first][handlerIter->first].id = handlerIter->first;
+        //end iterate over children
+      }
+      //iterate over channelIds (on lastDistribute.channels)
+      //TODO: Double check -- should this be an iterator over the handler_and_channels?
+      maceout << "num_channels " << handlerIter->second.size() << " for handler " << handlerIter->first << Log::endl;
+      for(ChannelSet::iterator channelIter = handlerIter->second.begin(); 
+	  channelIter != handlerIter->second.end(); channelIter++) {
+        //Clearing them out for the next upcall
+        if (lastDistribute.handlers.find(handlerIter->first) == 
+	    lastDistribute.handlers.end()) {
+          lastDistribute.handlers[handlerIter->first].channels[*channelIter].count = 0;	  
+        }
+        std::string& distribute_data = lastDistribute.handlers[handlerIter->first].channels[*channelIter].aggregate_data;
+        child_map.clear();
+        cmap.clear();
+        //iterate over children
+        for(CollectMap::iterator childIter = lastCollect.begin(); 
+	    childIter != lastCollect.end(); childIter++) {
+          maceout << "adding channel " << *channelIter
+		  << " to child_distribute_map for handler " 
+		  << handlerIter->first << " and child " 
+		  << childIter->first << Log::endl;
+          //create the channel id for each child -- and set the channel id = to the id
+          child_distribute_map[childIter->first][handlerIter->first].channels[*channelIter].id = *channelIter;
+          maceout << "              for channel " << *channelIter
+		  << " setting child_map for handler "
+		  << handlerIter->first << " and child "
+		  << childIter->first << " to count " 
+		  <<  lastDistribute.handlers[handlerIter->first].channels[*channelIter].count
+		  << " and data size" 
+		  << lastDistribute.handlers[handlerIter->first].channels[*channelIter].aggregate_data.size() 
+		  << Log::endl;
+          //Add the count for each child.
+          child_map[childIter->first] = lastDistribute.handlers[handlerIter->first].channels[*channelIter].aggregate_data;
+          cmap[childIter->first] = lastDistribute.handlers[handlerIter->first].channels[*channelIter].count;
+          //end iterate over children
+        }
+        //NOTE: On the root, the data it returned in "collect" is what it'll use as input for distribute.
+        maceout << "Calling upcall_distribute channel " << (*channelIter) << "registration id " << handlerIter->first << " data size " << distribute_data.size() << Log::endl;
+        //         dump_hex(distribute_data.data(), distribute_data.size());
+        upcall_distributeAggregateData(*channelIter, distribute_data, 
+				       child_map,
+				       lastDistribute.handlers[handlerIter->first].channels[*channelIter].count,
+				       cmap, lastDistribute.id, 
+				       handlerIter->first);
+        //iterate over kids
+        for(CollectMap::iterator childIter = lastCollect.begin(); 
+	    childIter != lastCollect.end(); childIter++) {
+          maceout << "              updating child_distribute_map with count "
+		  << cmap[childIter->second.id] << " and aggregate data size "
+		  << child_map[childIter->second.id].size() 
+		  << " for child " << childIter->first << Log::endl;
+          child_distribute_map[childIter->second.id][handlerIter->first].channels[*channelIter].count = cmap[childIter->second.id];
+          child_distribute_map[childIter->second.id][handlerIter->first].channels[*channelIter].aggregate_data = child_map[childIter->second.id];
+          //end iterate over kids
+        }
+        //end iterate over channelIds
+      }
+      //end iterate over handlerIds
+    }
+    //iterate over kids
+    for(CollectMap::iterator childIter = lastCollect.begin();
+	childIter != lastCollect.end(); childIter++) {
+      maceout << "routing distribute to child "
+	      << childIter->first << Log::endl;
+      childIter->second.sequence = lastDistribute.sequence-1;
+      downcall_route(childIter->first, 
+		     distributeMsg(lastDistribute.sequence, population, 
+				   child_distribute_map[childIter->first]), -1);
+      //end iterate over kids
+    }
+    if(lastCollect.size() == 0) {
+      maceLog("Am leaf -- sending collect\n");
+      collect_missing = false;
+      HandlerHandlerDataMap collectData;
+      lastCollect.clear();
+      //iterate over handlerIds
+      for(SubscriptionMap::iterator i = handlers_and_channels.begin(); i != handlers_and_channels.end(); i++) {
+        collectData[i->first].id = i->first;
+        //iterate over channelIds
+        for(ChannelSet::iterator j = i->second.begin(); j != i->second.end(); j++) {
+          collectData[i->first].channels[*j].id = *j;
+          collectData[i->first].channels[*j].count = 1;
+          bool isSubscribed = (subscriptions.find(i->first) != subscriptions.end() &&
+              subscriptions[i->first].find(*j) != subscriptions[i->first].end());
+          upcall_collectAggregateData(*j, AggregateNodeBlobMap(), collectData[i->first].channels[*j].aggregate_data,
+              AggregateNodeCountMap(), collectData[i->first].channels[*j].count, isSubscribed, i->first);
+          maceout << "got collectedAggregateData, count=" << collectData[i->first].channels[*j].count << Log::endl;
+          //end iterate over channelIds
+        }
+        //end iterate over handlerIds
+      }
+      if(!downcall_isRoot(RANSUB_MESSAGE_GROUP, tree_)) {
+        downcall_route(lastDistribute.id, 
+		       collectMsg(lastDistribute.sequence, 1, collectData),
+		       -1);
+      }
+      //end if no kids
+    }
+
+  } // send_distribute
+
+  void getExistingChannels(SubscriptionMap& handlers_and_channels) {
+    handlers_and_channels = subscriptions;
+    for(CollectMap::iterator i = lastCollect.begin(); i != lastCollect.end(); i++)  {
+      for(HandlerHandlerDataMap::iterator j = i->second.handlers.begin(); j != i->second.handlers.end(); j++) {
+        //           handlerIds.insert(j->first);
+        for(ChannelChannelDataMap::iterator k = j->second.channels.begin(); k != j->second.channels.end(); k++) {
+          handlers_and_channels[j->first].insert(k->first);
+        }
+      }
+    }
+    for(HandlerHandlerDataMap::iterator j = lastDistribute.handlers.begin(); j != lastDistribute.handlers.end(); j++) {
+      //           handlerIds.insert(j->first);
+      for(ChannelChannelDataMap::iterator k = j->second.channels.begin(); k != j->second.channels.end(); k++) {
+        handlers_and_channels[j->first].insert(k->first);
+      }
+    }
+
+  } // getExistingChannels
+
+} // routines

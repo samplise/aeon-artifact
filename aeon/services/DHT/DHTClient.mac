@@ -1,0 +1,190 @@
+using std::string;
+
+service DHTClient;
+
+provides Null;
+
+trace=med;
+
+constructor_parameters {
+  NodeSet DHT_NODES = NodeSet();
+  int NUM_GET_REQUESTS = 5;
+  int NUM_ALLGET_REQUESTS = 5;
+  uint64_t PUT_PERIOD     =  25000000; //25 sec
+  uint64_t REQUEST_PERIOD =   2000000; // 2 sec
+  uint64_t ALL_PERIOD     = 120000000; // 2 min
+  //   uint64_t WAIT_TIME      =  60000000; // 1 minute
+  uint64_t WAIT_TIME      = 300000000; // 300 sec (client waits for 300s and then start)
+  uint64_t STOP_TIME      = 1200000000; // 1200 sec (clients stops sending requests at this point.)
+  uint64_t PUT_STOP_AT    = 0;  // if this is set, 
+}
+
+services {
+  Transport t;
+}
+
+#minclude "DHTNetMessages.mi"
+
+state_variables {
+  int sequence = 0;
+  int numToPutRequests = 0;
+  int currPutRequest = 0;
+  int getRequests = 0;
+
+  NodeSet keyset;
+  MaceKey key;
+  string value;
+
+  NodeSet::const_iterator putIndex __attribute((serialize(no)));
+  NodeSet::const_iterator getIndex __attribute((serialize(no)));
+  timer putTimer __attribute((recur(PUT_PERIOD)));
+  timer getTimer;
+  timer allGetTimer __attribute((recur(ALL_PERIOD)));
+  timer stopTimer;// __attribute((recur(STOP_TIME)));
+}
+
+transitions {
+  downcall maceInit() {
+    putTimer.schedule(PUT_PERIOD + WAIT_TIME);
+    
+    if( PUT_STOP_AT == 0 ) {
+      allGetTimer.schedule(ALL_PERIOD + WAIT_TIME);
+      stopTimer.schedule(STOP_TIME);
+    } else {
+      allGetTimer.cancel();
+      stopTimer.cancel();
+      numToPutRequests = 1;
+      currPutRequest = 0;
+    }
+
+    putIndex = DHT_NODES.random();
+    getIndex = DHT_NODES.random();
+    if (getIndex == putIndex) {
+      advanceGetIndex();
+    }
+    log("maceInit", localAddress(), putIndex->toString(), *getIndex);
+  }
+
+  scheduler putTimer() {
+    std::ostringstream ostr;
+    ostr << "key-" << localAddress() << "-" << sequence;
+    key = MaceKey(sha160, ostr.str());
+    keyset.insert(key);
+    ostr << "-value-" << curtime;
+    value = ostr.str();
+
+    sequence++;
+    log("put", key, value, *putIndex);
+    downcall_route(*putIndex, DHTPut(key, value));
+    advancePutIndex();
+
+    if( PUT_STOP_AT == 0 ) {
+      getRequests=1;
+      log("getrequest", key, value, *getIndex);
+      downcall_route(*getIndex, DHTGet(key));
+      advanceGetIndex();
+      getTimer.schedule(REQUEST_PERIOD);
+    } else {
+      getRequests=0;
+      currPutRequest++;
+      if( currPutRequest >= numToPutRequests ) {
+        numToPutRequests++;
+        currPutRequest = 0;
+      }
+      if( numToPutRequests > (int) PUT_STOP_AT ) {
+        stopTimer.schedule(1);
+      } else {
+          putTimer.reschedule(PUT_PERIOD / numToPutRequests);
+          getTimer.schedule(PUT_PERIOD / numToPutRequests / 2);
+      }
+      //if( PUT_PERIOD > sequence*PUT_PERIOD_DECREASE ) {
+      //  putTimer.reschedule(PUT_PERIOD - sequence*PUT_PERIOD_DECREASE);
+      //  getTimer.schedule((PUT_PERIOD - sequence*PUT_PERIOD_DECREASE)/2);
+      //} else {
+      //  putTimer.reschedule(PUT_PERIOD_DECREASE);
+      //  getTimer.schedule(PUT_PERIOD_DECREASE/2);
+      //}
+    }
+  }
+
+  scheduler getTimer() {
+    log("getrequest", key, value, *getIndex);
+    downcall_route(*getIndex, DHTGet(key));
+    advanceGetIndex();
+    getRequests++;
+    if( PUT_STOP_AT == 0 ) {
+      if (getRequests < NUM_GET_REQUESTS) {
+        getTimer.schedule(REQUEST_PERIOD);
+      }
+    }
+    // otherwise, gettimer will not be re-called at all.
+  }
+
+  scheduler allGetTimer() {
+
+    // Unique and rand subset of keyset
+
+    NodeSet randkeyset = keyset;
+    while( (int) randkeyset.size() > NUM_ALLGET_REQUESTS ) {
+      NodeSet::const_iterator t = randkeyset.random();
+      randkeyset.erase(t);
+    }
+
+    for (NodeSet::const_iterator i = randkeyset.begin(); i != randkeyset.end(); i++) {
+      if (*i != key) {
+        log("priorgetrequest", *i, "TBD", *getIndex);
+        downcall_route(*getIndex, DHTGet(*i));
+      }
+    }
+
+    advanceGetIndex();
+  }
+
+  scheduler stopTimer() {
+    std::cout << curtime << " stopTimer() called" << std::endl;
+    getTimer.cancel();
+    putTimer.cancel();
+    allGetTimer.cancel();
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const DHTReply& msg) {
+    if (msg.key == key) {
+      log("getresult", msg.key, (msg.found ? msg.payload : "undef"), src);
+    } else {
+      log("priorgetresult", msg.key, (msg.found ? msg.payload : "undef"), src);
+    }
+  }
+
+  upcall messageError(const MaceKey& dest, TransportError::type error_code, const DHTPut& put, registration_uid_t regId) {
+    downcall_route(dest, put);
+  }
+  
+  upcall messageError(const MaceKey& dest, TransportError::type error_code, const DHTGet& get, registration_uid_t regId) {
+    downcall_route(dest, get);
+  }
+
+}
+
+routines {
+  void log(const string& action, const MaceKey& key, const string& value, const MaceKey& proxy) {
+    std::cout << curtime << " " << localAddress() << " " << action << " " << key << " => " << value << " proxy " << proxy << std::endl;
+  }
+
+  void advancePutIndex() {
+    putIndex++;
+    if (putIndex == DHT_NODES.end()) {
+      putIndex = DHT_NODES.begin();
+    }
+  }
+  
+  void advanceGetIndex() {
+    if (DHT_NODES.size() == 1) { return; }
+    getIndex++;
+    if (getIndex == DHT_NODES.end()) {
+      getIndex = DHT_NODES.begin();
+    }
+    if (getIndex == putIndex) {
+      advanceGetIndex();
+    }
+  }
+}

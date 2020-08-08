@@ -1,0 +1,30 @@
+MACE_AUTO_BOOTSTRAP_PEERS = cloud01.cs.purdue.edu:5000
+
+# enable all trace message
+TRACE_ALL = 1
+TRACE_SUBST = LUFactorization DEBUG::ContextLock DEBUG::AgentLock SpawnProcess parseJobSpec parseJobInput Report startService
+
+# number of async dispatch threads
+NUM_ASYNC_THREADS   = 8
+# number of transport threads
+NUM_TRANSPORT_THREADS = 16
+
+ServiceConfig.LUFactorization.ROWS = 10
+ServiceConfig.LUFactorization.COLUMNS = 10
+
+ServiceConfig.CondorHeartBeat.MIN_NODES = 5
+ServiceConfig.CondorHeartBeat.MAX_NODES = 12
+
+ServiceConfig.NewGOL.GRID_WIDTH = 800
+ServiceConfig.NewGOL.GRID_HEIGHT = 800
+ServiceConfig.NewGOL.NODE_WIDTH = 2
+ServiceConfig.NewGOL.NODE_HEIGHT = 2
+ServiceConfig.NewGOL.GRID_WIDTH_PERNODE = 400
+ServiceConfig.NewGOL.GRID_HEIGHT_PERNODE = 400
+
+# level = 0 for normal log. level = 1 for more verbose debug logs. 2 for even verbose
+MACE_LOG_LEVEL = 1
+
+#monitor = cloud01.cs.purdue.edu:6000
+
+logdir = /scratch/chuangw/condor

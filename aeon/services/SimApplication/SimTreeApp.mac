@@ -1,0 +1,103 @@
+/* 
+ * SimTreeApp.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, James W. Anderson
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+
+service SimTreeApp;
+
+provides SimApplication;
+trace=high;
+
+constants {
+  int INIT = 0;
+  int JOINED = 1;
+  int ROOT_ONLY = 0;
+  int NEXT_NODE = 1;
+}
+
+constructor_parameters {
+  int PEERSET_STYLE = ROOT_ONLY;
+}
+
+states {
+  needJoin;
+  done;
+}
+
+services {
+  Tree tree_;
+  Overlay treeo_ = tree_;
+}
+
+state_variables {
+  // Timers are used to schedule/cancel future events for simulation.
+  // simWeight attribute for SimApplication events
+  timer initiateJoin __attribute((simWeight(40)));
+}
+
+transitions {
+
+  downcall (state == init) maceInit() {
+    state = needJoin;
+    // Scheduling the event.
+    // Modelchecker: uses the weight attribute
+    // Simulator: uses the scheduling time
+    initiateJoin.schedule(1);
+  }
+
+  scheduler (state == needJoin) initiateJoin() {
+    state = done;
+    NodeSet peers;
+    if(PEERSET_STYLE == NEXT_NODE) {
+      peers.insert(upcall_getMaceKey((upcall_getNodeNumber()+1) % upcall_getNodeCount()));
+    } else {
+      peers.insert(upcall_getMaceKey(0)); //BrokenTree and Overcast expect the root to be passed in.
+    }
+    downcall_joinOverlay(peers);
+//    return "joinOverlay(" + peers.toString() + ")";
+  }
+
+}
+
+properties {
+  safety {
+    //     joinedImpNotNullParent : \forall n \in \nodes : { n.downcall_isJoinedOverlay() \iff ( n.downcall_getParent(MaceKey::null) \neq \null ) };
+    //     isRootEqSelfParent : \forall n \in \nodes : { n.downcall_isRoot(MaceKey::null) \iff ( n.downcall_getParent(MaceKey::null) = n ) };
+    noLoops : \forall n \in \nodes : { \exists m \in n.(downcall_getParent(MaceKey::null))* : { m.downcall_isRoot(MaceKey::null) \or \not m.downcall_isJoinedOverlay() } };
+  }
+  liveness {
+    allJoined : \forall n \in \nodes : n.downcall_isJoinedOverlay();
+    oneRoot : \for{=}{1} n \in \nodes : n.downcall_isRoot(MaceKey::null);
+    kidsMatch : \forall n \in \nodes :
+            {
+              (n.downcall_isRoot(MaceKey::null) \or n \in n.downcall_getParent(MaceKey::null).downcall_getChildren(MaceKey::null))
+                \and (\forall m \in n.downcall_getChildren(MaceKey::null) : n = m.downcall_getParent(MaceKey::null))
+            };
+  }
+}

@@ -1,0 +1,1429 @@
+// Parent class for all context classes
+#ifndef CONTEXTBASECLASS_H
+#define CONTEXTBASECLASS_H
+
+#include "Serializable.h"
+#include "mace-macros.h"
+#include "mstring.h"
+#include "mset.h"
+#include "pthread.h"
+#include <queue>
+#include "m_map.h"
+
+#include "ThreadStructure.h"
+#include "Printable.h"
+#include "Event.h"
+#include "pthread.h"
+#include "mace.h"
+#include "HeadEventDispatch.h"
+#include "SpecialMessage.h"
+#include "SockUtil.h"
+
+
+#define  MARK_RESERVED NULL
+/**
+ * \file ContextBaseClass.h
+ * \brief declares the base class for context classes
+ */
+namespace mace {
+class ContextEventTP;
+
+typedef std::map< std::pair< mace::OrderID, mace::string >, std::map< mace::string, mace::string > > snapshotStorageType;
+class ContextThreadSpecific;
+class ContextBaseClass;
+class EventCommitQueue;
+class __EventStorageStruct__;
+class ContextBaseClassParams;
+
+template<class T>
+class EventQueue{
+private:
+  typedef mace::deque<T> QueueType;
+public:
+  EventQueue() {
+
+  }
+
+  bool empty() {
+    return queue.empty();
+  }
+  T top() const {
+    return queue.front();
+  }
+  T back() const {
+    return queue.back();
+  }
+  void pop() {
+    queue.pop_front();
+  }
+  void push( T event ){
+     queue.push_back(event);
+  }
+
+  int size() {
+    return queue.size();
+  }
+
+private:
+  uint64_t offset;
+  QueueType queue;
+};
+
+class ContextEvent: public PrintPrintable, public Serializable {
+  public:
+    static const uint8_t TYPE_NULL = 0;
+    static const uint8_t TYPE_ASYNC_EVENT = 1;
+    static const uint8_t TYPE_ROUTINE_EVENT = 2;
+    static const uint8_t TYPE_BROADCAST_EVENT = 3;
+    static const uint8_t TYPE_GRAP_EVENT = 4;
+    static const uint8_t TYPE_START_EVENT = 5;
+    static const uint8_t TYPE_COMMIT_CONTEXT = 6;    
+    static const uint8_t TYPE_FIRST_EVENT = 7;
+    static const uint8_t TYPE_LAST_EVENT = 8;
+    static const uint8_t TYPE_BROADCAST_COMMIT = 9;
+    static const uint8_t TYPE_BROADCAST_COMMIT_CONTEXT = 10;
+    
+    OrderID eventId;
+    uint64_t executeTicket;
+    
+    BaseMaceService* sv;
+    uint8_t type;
+    InternalMessageHelperPtr param;
+    mace::MaceAddr source;
+    uint8_t sid;
+
+    ContextBaseClass* contextObject;
+    
+  public:
+    ContextEvent() : eventId( ), executeTicket(0), sv(NULL), type( TYPE_NULL ) , param(), source( SockUtil::NULL_MACEADDR ), sid(0), contextObject(NULL)  {}
+    ContextEvent(const OrderID& eventId, BaseMaceService* sv, uint8_t const type, InternalMessageHelperPtr param, mace::MaceAddr const& source, const uint8_t sid, ContextBaseClass* ctxObj ) : 
+        eventId( eventId ), sv(sv), type( type ), param(param), source(source), sid(sid), contextObject(ctxObj) { }
+    
+    ContextEvent(const OrderID& eventId, BaseMaceService* sv, uint8_t const type, InternalMessageHelperPtr param, const uint8_t sid, ContextBaseClass* ctxObj) : eventId(eventId),  
+        sv(sv), type( type ), param(param), sid(sid), contextObject(ctxObj) {}
+    
+    ~ContextEvent() { }
+    void fire();
+
+    void setContextObject( ContextBaseClass* ctxObj ) { contextObject = ctxObj; }
+
+    ContextEvent& operator=(const ContextEvent& orig){
+        if( this == &orig ) {
+          return *this;
+        }
+        this->eventId = orig.eventId;
+        this->executeTicket = orig.executeTicket;
+        this->sv = orig.sv;
+        this->type = orig.type;
+        this->param = orig.param;
+        this->source = orig.source;
+        this->sid = orig.sid;
+        return *this;
+    }
+
+  virtual void serialize(std::string& str) const;
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException);
+  int deserializeEvent( std::istream& in );
+
+  void print(std::ostream& out) const;
+  void printNode(PrintNode& pr, const std::string& name) const;
+};
+
+class ContextCommitEvent: public PrintPrintable, public Serializable {
+public:
+  BaseMaceService* sv;
+  mace::OrderID eventId;
+  mace::ContextBaseClass* contextObject;
+
+  ContextCommitEvent(): sv(NULL), event(NULL), contextObject(NULL) {}
+  ContextCommitEvent(BaseMaceService* sv, mace::OrderID const& eventId, mace::ContextBaseClass* contextObject): sv(sv), eventId(eventId), 
+  contextObject(contextObject) { }
+
+  ~ContextCommitEvent() {
+    sv = NULL;
+    contextObject = NULL;
+  }
+
+  void setBaseMaceService(BaseMaceService* sv) {
+    this->sv = sv;
+  }
+
+  ContextCommitEvent& operator=(const ContextCommitEvent& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->sv = orig.sv;
+    this->eventId = orig.eventId;
+    this->contextObject = orig.contextObject;
+    return *this;
+  }
+
+  virtual void serialize(std::string& str) const;
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException);
+
+  void print(std::ostream& out) const;
+  void printNode(PrintNode& pr, const std::string& name) const;
+};
+
+
+class ContextThreadSpecific{
+public:
+    ContextThreadSpecific():
+        threadCond(),
+        currentMode(-1),
+        myTicketNum(std::numeric_limits<uint64_t>::max()),
+        snapshotVersion(0)
+    {
+        pthread_cond_init(  &threadCond, NULL );
+    }
+
+    ~ContextThreadSpecific(){
+        pthread_cond_destroy( &threadCond );
+    }
+
+    int getCurrentMode() { return currentMode; }
+    void setCurrentMode(int newMode) { currentMode = newMode; }
+    const uint64_t& getSnapshotVersion() { return snapshotVersion; }
+    void setSnapshotVersion(const uint64_t& ver) { snapshotVersion = ver; }
+public:
+    pthread_cond_t threadCond;
+    int currentMode; 
+    uint64_t myTicketNum;
+    uint64_t snapshotVersion;
+};
+/**
+ * ContextBaseClass defines the base for context classes
+ *
+ * */
+template<typename T>
+struct QueueComp {
+  bool operator() (const T& p1, const T& p2) {
+    return p1.eventId > p2.eventId;
+  }
+};
+
+class __BroadcastEventStorageStruct__: public Serializable, public PrintPrintable {
+public:
+  uint8_t type;
+  uint8_t sid;
+  OrderID eventId;
+  OrderID bEventId;
+  mace::InternalMessageHelperPtr msg;
+
+  __BroadcastEventStorageStruct__(): type(ContextEvent::TYPE_NULL), sid(0), eventId(), bEventId(), msg(NULL) { }
+  __BroadcastEventStorageStruct__( const uint8_t type, const uint8_t sid, OrderID const& eventId, OrderID const& bEventId, const mace::InternalMessageHelperPtr msg ): type(type), 
+    sid(sid), eventId(eventId), bEventId(bEventId), msg(msg) { }
+  ~ __BroadcastEventStorageStruct__() {
+    msg = NULL;
+  }
+
+  __BroadcastEventStorageStruct__& operator=(const __BroadcastEventStorageStruct__& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->type = orig.type;
+    this->sid = orig.sid;
+    this->eventId = orig.eventId;
+    this->bEventId = orig.bEventId;
+    this->msg = orig.msg;
+    return *this;
+  }
+
+  virtual void serialize(std::string& str) const{
+    mace::serialize( str, &type );
+    mace::serialize( str, &sid );
+    mace::serialize( str, &eventId );
+    mace::serialize( str, &bEventId );
+    mace::serialize( str, msg );
+  }
+
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException){
+    int serializedByteSize = 0;
+    serializedByteSize += mace::deserialize( is, &type );
+    serializedByteSize += mace::deserialize( is, &sid );
+    serializedByteSize += mace::deserialize( is, &eventId );
+    serializedByteSize += mace::deserialize( is, &bEventId );
+
+    switch(type) {
+    case mace::ContextEvent::TYPE_BROADCAST_EVENT: {
+      serializedByteSize += deserializeEvent(is);
+      break;
+    }
+    case mace::ContextEvent::TYPE_BROADCAST_COMMIT: {
+      msg = InternalMessageHelperPtr( new BroadcastControl_Message() );
+      serializedByteSize += msg->deserialize(is);
+      break;
+    }
+    case mace::ContextEvent::TYPE_BROADCAST_COMMIT_CONTEXT: {
+      msg = InternalMessageHelperPtr( new commit_single_context_Message() );
+      serializedByteSize += msg->deserialize(is);
+      break;
+    }
+    default:{
+      ASSERTMSG(false, "Unkown __BroadcastEventStorageStruct__ Type!");
+    }
+  }
+
+    serializedByteSize += mace::deserialize( is, msg );
+    return serializedByteSize;
+  }
+
+  int deserializeEvent( std::istream& in ){
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( sid );
+    mace::Message* ptr;
+    int count = serviceInstance->deserializeMethod( in, ptr );
+    msg = InternalMessageHelperPtr( static_cast< InternalMessageHelperPtr >( ptr ) );
+    return count;
+  }
+
+  void print(std::ostream& out) const {
+    out<< "__BroadcastEventStorageStruct__(";
+    out<< "type = "; mace::printItem(out, &(type)); out<<", ";
+    out<< "sid = "; mace::printItem(out, &(sid)); out<<", ";
+    out<< "eventId = "; mace::printItem(out, &(eventId)); out<<", ";
+    out<< "bEventId = "; mace::printItem(out, &(bEventId)); out<<", ";
+    out<< "msg = "; mace::printItem(out, msg); 
+    out<< ")";
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+    mace::PrintNode printer(name, "__BroadcastEventStorageStruct__" );
+  
+    mace::printItem( printer, "type", &type );
+    mace::printItem( printer, "sid", &sid );
+    mace::printItem( printer, "eventId", &eventId );
+    mace::printItem( printer, "bEventId", &bEventId );
+    mace::printItem( printer, "msg", msg );
+    pr.addChild( printer );
+  }
+
+};
+
+class ContextBroadcastEventInfo: public Serializable, public PrintPrintable {
+public:
+  void enqueueBroadcastEvent(BaseMaceService* sv, mace::ContextBaseClass* ctxObj, const uint8_t type, const mace::InternalMessageHelper* msg);
+  void executedBroadcastEvent(const BaseMaceService* sv, mace::ContextBaseClass* ctxObj, mace::OrderID const& bEventId);
+  void markBroadcastEventCommit( const BaseMaceService* sv, mace::ContextBaseClass* ctxObj, const BroadcastControl_Message* msg);
+
+  bool checkBroadcastEventCommitted( mace::OrderID const& bEventId);
+  bool checkBroadcastEventExecuted( mace::OrderID const& bEventId );
+
+  void addBroadcastTargetContextName( mace::OrderID const& bEventId, mace::string const& targetContextName );
+  mace::set<mace::string> getBroadcastTargetContextNames( mace::OrderID const& bEventId );
+
+  
+  void enqueueWaitingCommittedQueue( mace::OrderID const& bEventId, __BroadcastEventStorageStruct__ const& s ) {
+    mace::map< mace::OrderID, mace::vector<__BroadcastEventStorageStruct__> >::iterator iter = waitingCommittedbroadcastEventStorages.find(bEventId);
+    if( iter == waitingCommittedbroadcastEventStorages.end() ) {
+      mace::vector<__BroadcastEventStorageStruct__> v;
+      v.push_back(s);
+      waitingCommittedbroadcastEventStorages[bEventId] = v;
+    } else {
+      iter->second.push_back(s);
+    }
+  }
+  void enqueueWaitingExecutedQueue( mace::OrderID const& bEventId, __BroadcastEventStorageStruct__ const& s ) {
+    mace::map< mace::OrderID, mace::vector<__BroadcastEventStorageStruct__> >::iterator iter = waitingExecutedBroadcastEventStorages.find(bEventId);
+    if( iter == waitingExecutedBroadcastEventStorages.end() ) {
+      mace::vector<__BroadcastEventStorageStruct__> v;
+      v.push_back(s);
+      waitingExecutedBroadcastEventStorages[bEventId] = v;
+    } else {
+      iter->second.push_back(s);
+    }
+  }
+  bool checkAndAddBroadcastEventReplicate(mace::OrderID const& bEventId) {
+    if( arrivedBroadcastEventIds.count(bEventId) == 0 ) {
+      arrivedBroadcastEventIds.insert(bEventId);
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  void addCPRelations(mace::OrderID const& bEventId, mace::set<mace::string> const& parentContextNames) {
+    ADD_SELECTORS("ContextBroadcastEventInfo::addCPRelations");
+    if( commitBroadcastEventParentContextNames.find(bEventId) == commitBroadcastEventParentContextNames.end() ) {
+      commitBroadcastEventParentContextNames[bEventId] = parentContextNames;
+    }
+  }
+
+  ContextBroadcastEventInfo() { }
+  ~ContextBroadcastEventInfo() {
+    commitBroadcastEventParentContextNames.clear();
+    arrivedBroadcastEventIds.clear();
+    executedBroadcastEventIds.clear();
+    committedBroadcastEventIds.clear();
+
+    waitingCommittedbroadcastEventStorages.clear();
+    waitingExecutedBroadcastEventStorages.clear();
+    broadcastTargetContextNames.clear();
+    arrivedBroadcastCommitEventIds.clear();
+  }
+
+  ContextBroadcastEventInfo& operator=(const ContextBroadcastEventInfo& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->commitBroadcastEventParentContextNames = orig.commitBroadcastEventParentContextNames;
+    this->arrivedBroadcastEventIds = orig.arrivedBroadcastEventIds;
+    this->executedBroadcastEventIds = orig.executedBroadcastEventIds;
+    this->committedBroadcastEventIds = orig.committedBroadcastEventIds;
+
+    this->waitingCommittedbroadcastEventStorages = orig.waitingCommittedbroadcastEventStorages;
+    this->waitingExecutedBroadcastEventStorages = orig.waitingExecutedBroadcastEventStorages;
+    this->broadcastTargetContextNames = orig.broadcastTargetContextNames;
+    this->arrivedBroadcastCommitEventIds = orig.arrivedBroadcastCommitEventIds;
+    return *this;
+  }
+
+  virtual void serialize(std::string& str) const{
+    mace::serialize( str, &commitBroadcastEventParentContextNames );
+    mace::serialize( str, &arrivedBroadcastEventIds );
+    mace::serialize( str, &executedBroadcastEventIds );
+    mace::serialize( str, &committedBroadcastEventIds );
+    mace::serialize( str, &waitingCommittedbroadcastEventStorages );
+    mace::serialize( str, &waitingExecutedBroadcastEventStorages );
+    mace::serialize( str, &broadcastTargetContextNames );
+    mace::serialize( str, &arrivedBroadcastCommitEventIds );
+  }
+
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException){
+    int serializedByteSize = 0;
+    serializedByteSize += mace::deserialize( is, &commitBroadcastEventParentContextNames );
+    serializedByteSize += mace::deserialize( is, &arrivedBroadcastEventIds );
+    serializedByteSize += mace::deserialize( is, &executedBroadcastEventIds );
+    serializedByteSize += mace::deserialize( is, &committedBroadcastEventIds );
+    serializedByteSize += mace::deserialize( is, &waitingCommittedbroadcastEventStorages );
+    serializedByteSize += mace::deserialize( is, &waitingExecutedBroadcastEventStorages );
+    serializedByteSize += mace::deserialize( is, &broadcastTargetContextNames );
+    serializedByteSize += mace::deserialize( is, &arrivedBroadcastCommitEventIds );
+    return serializedByteSize;
+  }
+
+  void print(std::ostream& out) const {
+    out<< "ContextBroadcastEventInfo(";
+    out<< "commitBroadcastEventParentContextNames = "; mace::printItem(out, &(commitBroadcastEventParentContextNames)); out<<", ";
+    out<< "arrivedBroadcastEventIds = "; mace::printItem(out, &(arrivedBroadcastEventIds)); out<<", ";
+    out<< "executedBroadcastEventIds = "; mace::printItem(out, &(executedBroadcastEventIds)); out<<", ";
+    out<< "committedBroadcastEventIds = "; mace::printItem(out, &(committedBroadcastEventIds)); out<<", ";
+    out<< "waitingCommittedbroadcastEventStorages = "; mace::printItem(out, &(waitingCommittedbroadcastEventStorages)); out<<", ";
+    out<< "waitingExecutedBroadcastEventStorages = "; mace::printItem(out, &(waitingExecutedBroadcastEventStorages)); out<<", ";
+    out<< "broadcastTargetContextNames = "; mace::printItem(out, &(broadcastTargetContextNames)); out<<", ";
+    out<< "arrivedBroadcastCommitEventIds = "; mace::printItem(out, &(arrivedBroadcastCommitEventIds)); 
+    out<< ")";
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+    mace::PrintNode printer(name, "ContextBroadcastEventInfo" );
+  
+    mace::printItem( printer, "commitBroadcastEventParentContextNames", &commitBroadcastEventParentContextNames );
+    mace::printItem( printer, "arrivedBroadcastEventIds", &arrivedBroadcastEventIds );
+    mace::printItem( printer, "executedBroadcastEventIds", &executedBroadcastEventIds );
+    mace::printItem( printer, "committedBroadcastEventIds", &committedBroadcastEventIds );
+    mace::printItem( printer, "waitingCommittedbroadcastEventStorages", &waitingCommittedbroadcastEventStorages );
+    mace::printItem( printer, "waitingExecutedBroadcastEventStorages", &waitingExecutedBroadcastEventStorages );
+    mace::printItem( printer, "broadcastTargetContextNames", &broadcastTargetContextNames );
+    mace::printItem( printer, "arrivedBroadcastCommitEventIds", &arrivedBroadcastCommitEventIds );
+    pr.addChild( printer );
+  }
+
+private:
+  mace::map< mace::OrderID, mace::set<mace::string> > commitBroadcastEventParentContextNames;
+  mace::set< mace::OrderID > arrivedBroadcastEventIds;
+  mace::set< mace::OrderID > executedBroadcastEventIds; 
+  mace::set< mace::OrderID > committedBroadcastEventIds;
+
+  mace::map< mace::OrderID, mace::vector<__BroadcastEventStorageStruct__> > waitingCommittedbroadcastEventStorages;
+  mace::map< mace::OrderID, mace::vector<__BroadcastEventStorageStruct__> > waitingExecutedBroadcastEventStorages;
+
+  mace::map< mace::OrderID, mace::set< mace::string > > broadcastTargetContextNames;
+
+  mace::set< mace::OrderID > arrivedBroadcastCommitEventIds; 
+};
+
+class ContextBroadcastEventsInfo: public Serializable, public PrintPrintable {
+public:
+  bool checkAndAddBroadcastEventReplicate( mace::OrderID const& eventId, mace::OrderID const& bEventId) {
+    ScopedLock sl(contextBroadcastEventsInfoMutex);
+    mace::map<mace::OrderID, ContextBroadcastEventInfo>::iterator iter = broadcastEventInfos.find(eventId);
+    if( iter == broadcastEventInfos.end() ) {
+      ContextBroadcastEventInfo info;
+      info.checkAndAddBroadcastEventReplicate(bEventId);
+      broadcastEventInfos[eventId] = info;
+      return false;
+    } else {
+      return iter->second.checkAndAddBroadcastEventReplicate(bEventId);
+    }
+  }
+
+  mace::set<mace::string> getBroadcastTargetContextNames( mace::OrderID const& eventId, mace::OrderID const& bEventId) {
+    ScopedLock sl(contextBroadcastEventsInfoMutex);
+    mace::map<mace::OrderID, ContextBroadcastEventInfo>::iterator iter = broadcastEventInfos.find(eventId);
+    if( iter == broadcastEventInfos.end() ) {
+      mace::set<mace::string> rv;
+      return rv;
+    } else {
+      return iter->second.getBroadcastTargetContextNames(bEventId);
+    }
+  }
+
+  void enqueueBroadcastEvent(BaseMaceService* sv, mace::ContextBaseClass* ctxObj, const uint8_t type, mace::OrderID const& eventId, const mace::InternalMessageHelper* msg) {
+    ScopedLock sl(contextBroadcastEventsInfoMutex);
+    mace::map<mace::OrderID, ContextBroadcastEventInfo>::iterator iter = broadcastEventInfos.find(eventId);
+    if( iter == broadcastEventInfos.end() ) {
+      ContextBroadcastEventInfo info;
+      info.enqueueBroadcastEvent(sv, ctxObj, type, msg);
+      broadcastEventInfos[eventId] = info;
+    } else {
+      iter->second.enqueueBroadcastEvent(sv, ctxObj, type, msg);
+    }
+  }
+
+  void executedBroadcastEvent(const BaseMaceService* sv, mace::ContextBaseClass* ctxObj, mace::OrderID const& eventId, mace::OrderID const& bEventId) {
+    ScopedLock sl(contextBroadcastEventsInfoMutex);
+    mace::map<mace::OrderID, ContextBroadcastEventInfo>::iterator iter = broadcastEventInfos.find(eventId);
+    if( iter == broadcastEventInfos.end() ) {
+      ContextBroadcastEventInfo info;
+      info.executedBroadcastEvent(sv, ctxObj, bEventId);
+      broadcastEventInfos[eventId] = info;
+    } else {
+      iter->second.executedBroadcastEvent(sv, ctxObj, bEventId);
+    }
+  }
+
+  void addBroadcastTargetContextName( mace::OrderID const& eventId, mace::OrderID const& bEventId, mace::string const& targetContextName) {
+    ScopedLock sl(contextBroadcastEventsInfoMutex);
+    mace::map<mace::OrderID, ContextBroadcastEventInfo>::iterator iter = broadcastEventInfos.find(eventId);
+    if( iter == broadcastEventInfos.end() ) {
+      ContextBroadcastEventInfo info;
+      info.addBroadcastTargetContextName( bEventId, targetContextName);
+      broadcastEventInfos[eventId] = info;
+    } else {
+      iter->second.addBroadcastTargetContextName( bEventId, targetContextName);
+    }
+  }
+
+  void removeBroadcastEventInfo( mace::OrderID const& eventId ) {
+    ScopedLock sl(contextBroadcastEventsInfoMutex);
+    broadcastEventInfos.erase(eventId);
+  }
+
+  ContextBroadcastEventsInfo() {
+    pthread_mutex_init(&contextBroadcastEventsInfoMutex, NULL);
+  }
+  ~ContextBroadcastEventsInfo() {
+    pthread_mutex_destroy(&contextBroadcastEventsInfoMutex);
+  }
+
+  ContextBroadcastEventsInfo& operator=(const ContextBroadcastEventsInfo& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->broadcastEventInfos = orig.broadcastEventInfos;
+    return *this;
+  }
+
+  virtual void serialize(std::string& str) const{
+    mace::serialize( str, &broadcastEventInfos );
+  }
+
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException){
+    int serializedByteSize = 0;
+    serializedByteSize += mace::deserialize( is, &broadcastEventInfos );
+    return serializedByteSize;
+  }
+
+  void print(std::ostream& out) const {
+    out<< "ContextBroadcastEventsInfo(";
+    out<< "broadcastEventInfos = "; mace::printItem(out, &(broadcastEventInfos)); 
+    out<< ")";
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+    mace::PrintNode printer(name, "ContextBroadcastEventsInfo" );
+  
+    mace::printItem( printer, "broadcastEventInfos", &broadcastEventInfos );
+    pr.addChild( printer );
+  }
+
+private:
+  mace::map<mace::OrderID, ContextBroadcastEventInfo> broadcastEventInfos;
+  pthread_mutex_t contextBroadcastEventsInfoMutex;
+
+};
+
+class ContextEventOrder: public Serializable, public PrintPrintable {
+public:
+  typedef mace::map<OrderID, mace::vector<OrderID> > WaitEventIdType;
+  typedef mace::map<mace::string, PreEventInfo> PreEventInfoType;
+private:
+  //Record the latest committed events that have accessed this context. They are grouped via their created contexts
+  mace::map<uint32_t, OrderID> committedOrderingEvents;
+  mace::map<uint32_t, OrderID> executedEvents;
+  
+  mace::set<OrderID> waitingReplyEventIds;
+
+  mace::vector<PreEventInfo> preOrderingEventInfos;
+
+  pthread_mutex_t eventOrderMutex;
+  mace::string contextName;
+  
+  //Record previous execute events' access context
+  mace::map<mace::string, PreEventInfo> orderingEventAccessContextMap;
+  mace::map<mace::string, mace::set<PreEventInfo> > preReadEventInfos;
+  mace::map<mace::string, PreEventInfo> orderingWriteEventAccessContextMap;
+  //Record previous create events' access context
+  mace::map<mace::string, PreEventInfo> createEventAccessContextMap;
+
+  mace::map<OrderID, PreEventInfo> orderingEventInfos;
+
+  //Record <execute ticket, execute event> map
+  mace::map<uint64_t, OrderID> executeTicketEventMap;
+  //Record <execute event. execute ticket> map
+  mace::map<OrderID, uint64_t> executeEventTicketMap;
+  uint64_t executeTicketNumber;
+
+  mace::map<uint64_t, OrderID> orderingTicketEventMap;
+  mace::map<OrderID, uint64_t> orderingEventTicketMap;
+  uint64_t orderingTicketNumber;
+
+  //Record events that wait on particular event
+  WaitEventIdType waitingEventIds;
+  //Record how many events that each waiting event waits
+  mace::map<OrderID, uint32_t> waitingEventCounts;
+
+public:
+  ContextEventOrder(): executeTicketNumber(1), orderingTicketNumber(1) {
+    ASSERT( pthread_mutex_init( &eventOrderMutex, NULL) == 0 );
+  }
+
+  ~ContextEventOrder() {
+    pthread_mutex_destroy( &eventOrderMutex );
+  }
+
+  void initialize() {
+    ASSERT( pthread_mutex_init( &eventOrderMutex, NULL) == 0 );
+  }
+
+  ContextEventOrder& operator=(const mace::ContextEventOrder& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->committedOrderingEvents       = orig.committedOrderingEvents;
+    this->waitingReplyEventIds          = orig.waitingReplyEventIds;
+    this->preOrderingEventInfos         = orig.preOrderingEventInfos;
+    this->contextName                   = orig.contextName;
+    this->orderingEventAccessContextMap = orig.orderingEventAccessContextMap;
+    this->createEventAccessContextMap   = orig.createEventAccessContextMap;
+    this->orderingEventInfos            = orig.orderingEventInfos;
+    this->executeTicketEventMap         = orig.executeTicketEventMap;
+    this->executeEventTicketMap         = orig.executeEventTicketMap;
+    this->executeTicketNumber           = orig.executeTicketNumber;
+    this->orderingTicketEventMap        = orig.orderingTicketEventMap;
+    this->orderingEventTicketMap        = orig.orderingEventTicketMap;
+    this->orderingTicketNumber          = orig.orderingTicketNumber;
+    this->waitingEventIds               = orig.waitingEventIds;
+    this->waitingEventCounts            = orig.waitingEventCounts;
+    return *this;
+  }
+
+  void setContextName(const mace::string& ctxName) { contextName = ctxName; }
+  
+  void clear();
+
+  PreEventInfoType addOrderingAccessContext(OrderID const& eventId, const bool isReadOnly, mace::string const& targetContextName, 
+    mace::set<mace::string> const& accessCtxs, const bool toExecute);
+  uint64_t addExecuteEvent(mace::OrderID const& eventId);
+  PreEventInfoType addCreateAccessContext(OrderID const& eventId, mace::string const& targetContextName, mace::set<mace::string> const& accessCtxs);
+   
+  bool checkEventExecuteOrder(BaseMaceService* sv, OrderID const& eventId, mace::vector<PreEventInfo> const& preEventInfos);
+  mace::map<mace::string, PreEventInfo> getPreCreateEventInfos(const mace::vector<mace::string>& access_contexts);
+  mace::vector<OrderID> commitEvent(OrderID const& eventId);
+  mace::vector<OrderID> executedEvent(OrderID const& eventId);
+
+  void addWaitingEventId( OrderID const& eventId ); 
+  
+  OrderID getOrderingEventID( const uint64_t ticket );
+  uint64_t getOrderingEventTicket( OrderID const& eventId );
+
+  OrderID getExecuteEventOrderID( const uint64_t ticket );
+  uint64_t getExecuteEventTicket( OrderID const& eventId );
+
+  bool checkEventCommitted( OrderID const& eventId );
+  bool checkEventExecuted( OrderID const& eventId );
+  
+  const mace::vector<PreEventInfo>& getPreEventInfos() const { return preOrderingEventInfos; }
+
+  virtual void serialize(std::string& str) const;
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException);
+
+  void print(std::ostream& out) const {
+    out<< "ContextEventOrder(";
+    out<< "committedOrderingEvents = "; mace::printItem(out, &(committedOrderingEvents)); out<<", ";
+    out<< "waitingReplyEventIds = "; mace::printItem(out, &(waitingReplyEventIds)); out<<", ";
+    out<< "contextName = "; mace::printItem(out, &(contextName)); out<< ", ";
+    out<< "orderingEventAccessContextMap = "; mace::printItem(out, &(orderingEventAccessContextMap)); out<< ", ";
+    out<< "createEventAccessContextMap = "; mace::printItem(out, &(createEventAccessContextMap)); out<< ", ";
+    out<< "executeTicketEventMap = "; mace::printItem(out, &(executeTicketEventMap)); out<< ", ";
+    out<< "executeEventTicketMap = "; mace::printItem(out, &(executeEventTicketMap)); out<<", ";
+    out<< "executeTicketNumber = "; mace::printItem(out, &(executeTicketNumber)); out<< ", ";
+    out<< "orderingTicketEventMap = "; mace::printItem(out, &(orderingTicketEventMap)); out<< ", ";
+    out<< "orderingEventTicketMap = "; mace::printItem(out, &(orderingEventTicketMap)); out<< ", ";
+    out<< "orderingTicketNumber = "; mace::printItem(out, &(orderingTicketNumber)); out<< ", ";
+    out<< "waitingEventIds = "; mace::printItem(out, &(waitingEventIds)); out<< ", ";
+    out<< "waitingEventCounts = "; mace::printItem(out, &(waitingEventCounts));
+    out<< ")";
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+       
+  }
+};
+
+class ContextBaseClass: public Serializable, public PrintPrintable{
+public:
+    typedef mace::hash_map<ContextBaseClass*, ContextThreadSpecific*, SoftState> ThreadSpecificMapType;
+    typedef HeadEventDispatch::HeadEvent RQType;
+    //typedef std::priority_queue<RQType, std::vector<RQType>, QueueComp<HeadEventDispatch::HeadEvent> > EventRequestQueueType;
+    typedef std::queue<RQType> EventRequestQueueType;
+
+    struct QueueComp {
+      bool operator()( const ContextEvent& e1, const ContextEvent& e2) {
+        return e1.executeTicket > e2.executeTicket;
+      }
+    };
+    typedef std::priority_queue< ContextEvent, std::vector<ContextEvent>, QueueComp > ContextEventQueueType;
+    
+
+private:
+friend class ContextThreadSpecific;
+friend class ContextLock;
+friend class ContextEventTP;
+public:
+    typedef std::pair<uint64_t, pthread_cond_t*> QueueItemType;
+    static const uint8_t HEAD = 0;
+    static const uint8_t CONTEXT = 1;
+
+    static pthread_once_t global_keyOnce;
+    static pthread_mutex_t eventCommitMutex;
+    static pthread_mutex_t eventSnapshotMutex;
+    static std::map< mace::OrderID, pthread_cond_t* > eventCommitConds;
+    static std::map< mace::OrderID, pthread_cond_t* > eventSnapshotConds;
+    static snapshotStorageType eventSnapshotStorage;
+
+    mace::string contextName; ///< The canonical name of the context
+    mace::string contextTypeName;
+    const int contextType;
+    uint8_t serviceId; ///< The service in which the context belongs to
+    uint32_t contextId; ///< The numerical ID of the context
+   
+		//bsang
+    pthread_mutex_t createEventTicketMutex;
+    pthread_mutex_t executeEventTicketMutex;
+    pthread_mutex_t executeEventMutex;
+    pthread_mutex_t createEventQueueMutex;
+    pthread_mutex_t executeEventQueueMutex;
+    pthread_mutex_t commitEventQueueMutex;
+    pthread_mutex_t _context_commitbooth;
+    pthread_mutex_t _context_subeventBooth;
+
+    pthread_mutex_t contextMigratingMutex;
+    pthread_cond_t contextMigratingCond;
+
+    pthread_mutex_t timeMutex;
+    pthread_mutex_t executeTimeMutex;
+
+    pthread_mutex_t eventExecutingSyncMutex;
+    std::map< mace::EventOperationInfo, pthread_cond_t* > eventExecutingSyncConds;
+    
+		EventRequestQueueType createEventQueue;
+				
+		//typedef mace::deque< OrderID > EventIDQueueType;
+		//EventIDQueueType commitEventQueue;
+		
+    typedef mace::map<OrderID, mace::vector<__EventStorageStruct__> > EventStorageType;
+    EventStorageType arrivedExecuteEvents;
+
+    typedef std::map<uint64_t, mace::ContextCommitEvent*> CommitEventQueueType;
+    CommitEventQueueType executeCommitEventQueue;
+    CommitEventQueueType createCommitEventQueue;
+
+    //typedef mace::deque< mace::ContextEvent > ContextEventQueueType;
+    mace::deque< mace::ContextEvent > executeEventQueue;
+
+    uint64_t create_now_committing_ticket;
+    OrderID execute_now_committing_eventId;
+    uint64_t execute_now_committing_ticket;
+
+    OrderID now_serving_eventId;
+    uint64_t now_serving_execute_ticket;
+    bool execute_serving_flag;
+
+    uint64_t lastWrite;
+
+    ContextEventOrder contextEventOrder;
+
+    uint64_t createTicketNumber;
+    uint64_t executeTicketNumber;
+
+    uint64_t nextWaitingSubEventsTicket;
+
+    mace::map< uint64_t, mace::Event::EventRequestType > waitingSubEvents;
+    mace::map< uint64_t, mace::Event::DeferredMessageType > waitingDeferredMessages;
+    mace::map< uint64_t, bool > waitingSubEventsFlags;
+
+    uint64_t now_serving_create_ticket;
+    bool createWaitingFlag;
+
+    std::map<uint64_t, pthread_cond_t*> createWaitingThread;
+    uint64_t handlingMessageNumber;
+    bool isWaitingHandlingMessage;
+
+    uint64_t now_max_execute_ticket;
+
+    mace::map< mace::OrderID, EventExecutionInfo > eventExecutionInfos;
+
+		mace::map< mace::EventOperationInfo, mace::set< OrderID > > eventExecutingSyncWaitingIds;
+		mace::map< mace::OrderID, mace::EventOperationInfo > eventExecutingSyncOpInfos;
+
+    bool nextCommitCreateEvent;
+    
+    //Debug information
+    mace::map<mace::OrderID, uint64_t> eventCreateStartTime;
+    uint64_t committedEventCount;
+    uint64_t totalEventTime;
+
+    mace::map<mace::OrderID, uint64_t> eventExecuteStartTime;
+    uint64_t finishedEventCount;
+    uint64_t totalEventExecuteTime;
+public:
+    /**
+     * constructor
+     *
+     * */
+    ContextBaseClass(const mace::string& contextName="(unnamed)", const uint64_t createTicketNumber = 0, const uint64_t executeTicketNumber = 0, const uint64_t create_now_committting_ticket = 0, 
+      const mace::OrderID& execute_now_committing_eventId = mace::OrderID(), const uint64_t execute_now_committing_ticket = 0, const mace::OrderID& now_serving_eventId = mace::OrderID(),
+      const uint64_t now_serving_execute_ticket = 0, const bool execute_serving_flag = false, const uint64_t lastWrite = 0, const uint8_t serviceId = 0, const uint32_t contextId = 0, const uint8_t contextType = CONTEXT);
+    /**
+     * destructor
+     * */
+    virtual ~ContextBaseClass();
+    virtual void print(std::ostream& out) const;
+    virtual void printNode(PrintNode& pr, const std::string& name) const;
+    virtual void serialize(std::string& str) const{ }
+    virtual int deserialize(std::istream & is) throw (mace::SerializationException){
+        return 0;
+    }
+
+		void commitEvent(BaseMaceService* sv, const mace::OrderID& eventId);
+    void commitEvent(const mace::OrderID& eventId, const bool isExecuted);
+    void executedEvent(const BaseMaceService* sv, const mace::OrderID& eventId);
+		
+		//bsang
+		mace::map<mace::string, PreEventInfo> getPreCreateEventInfos(const mace::vector<mace::string>& access_contexts);
+    void enqueueContextEvent(BaseMaceService* sv, const OrderID& eventId);
+    void enqueueContextEvent(const BaseMaceService* sv, mace::Event& event);
+    void syncWait();
+    void syncRelease(const OrderID& eventId);
+    void createEvent(BaseMaceService* sv, mace::OrderID& myEventId, mace::Event& event, const mace::string& targetContextName, const int8_t eventType);
+    bool waitingForExecution(const BaseMaceService* sv, mace::Event& event);
+    void putBackEventObject(mace::Event* event);
+    uint64_t requireExecuteTicket( mace::OrderID const& eventId);
+
+    void prepareHalt();
+
+    void enqueueSubEvents(mace::OrderID const& eventId);
+    //void enqueueDeferredMessages(mace::Event* event);
+
+    void commitEventDone(const mace::OrderID& eventId);
+
+    void sendCommitDoneMsg(const mace::Event& event);
+
+    void signalCreateThread();
+
+    uint64_t getContextMappingVersion() const;
+    uint64_t getContextStructureVersion() const;
+
+    void applyOwnershipOperations( const BaseMaceService* sv, mace::OrderID const& eventId, mace::vector<mace::EventOperationInfo> const& ownershipOpInfos );
+    void handleOwnershipOperationsReply( mace::OrderID const& eventId );
+
+    void insertEventCreateStartTime( const mace::OrderID& eventId) {
+      ScopedLock sl(timeMutex);
+      eventCreateStartTime[eventId] = TimeUtil::timeu();
+    }
+
+    void insertEventCreateEndTime( const mace::OrderID& eventId ) {
+      ADD_SELECTORS("ContextBaseClass::insertEventCreateEndTime");
+      ScopedLock sl(timeMutex);
+      mace::map< mace::OrderID, uint64_t>::const_iterator cIter = eventCreateStartTime.find(eventId);
+      if( cIter != eventCreateStartTime.end() ) {
+        committedEventCount ++;
+        uint64_t end_time = TimeUtil::timeu();
+        totalEventTime += end_time - cIter->second;
+        
+        if( committedEventCount % 1000 == 0 ) {
+          uint64_t avg = (uint64_t)( totalEventTime / 1000 );
+          totalEventTime = 0;
+          macedbg(1) << "Context("<< contextName <<") avg_event_time=" << avg << " committed_event_count=" << committedEventCount << Log::endl;
+        }
+
+        eventCreateStartTime.erase(cIter);
+      }
+    }
+
+    void insertEventExecuteStartTime( const mace::OrderID& eventId) {
+      ScopedLock sl(executeTimeMutex);
+      eventExecuteStartTime[eventId] = TimeUtil::timeu();
+    }
+
+    void insertEventExecuteEndTime( const mace::OrderID& eventId ) {
+      ADD_SELECTORS("ContextBaseClass::insertEventExecuteEndTime");
+      ScopedLock sl(executeTimeMutex);
+      mace::map< mace::OrderID, uint64_t>::const_iterator cIter = eventExecuteStartTime.find(eventId);
+      if( cIter != eventExecuteStartTime.end() ) {
+        finishedEventCount ++;
+        uint64_t end_time = TimeUtil::timeu();
+        totalEventExecuteTime += end_time - cIter->second;
+        if( finishedEventCount % 1000 == 0 ) {
+          uint64_t avg = (uint64_t)( totalEventExecuteTime / 1000 );
+          totalEventExecuteTime = 0;
+          macedbg(1) << "Context("<< contextName <<") avg_event_execute_time=" << avg << " finished_event_count=" << finishedEventCount << Log::endl;
+        }
+
+        eventExecuteStartTime.erase(cIter);
+      }
+    }
+
+    uint64_t getExecuteEventTicket( const OrderID& eventId ) {
+      return contextEventOrder.getExecuteEventTicket(eventId);
+    }
+
+		bool setFinishedCtxEventId(const uint32_t ctxId, const uint64_t eventId) {
+			return true;
+		}
+
+    void setWiatingSubEventsFlag(uint64_t ticket, bool flag) {
+      waitingSubEventsFlags[ticket] = flag;
+    }
+
+    mace::Event* getEventObject() {
+      mace::Event* eventPtr = new Event();
+      return eventPtr;
+    }
+
+    void tryCreateWakeup();
+
+    /**
+     * returns the canonical name of the context
+     * */
+    mace::string const& getName() const{
+      return contextName;
+    }
+
+    void setContextName(const mace::string& ctxName) {
+      contextName = ctxName;
+    }
+
+    mace::string const& getTypeName() const {
+      return contextTypeName;
+    }
+    /**
+     * returns the numerical ID of the context
+     * */
+    uint32_t getID() const{
+      return contextId;
+    }
+
+    /** 
+     * create a read only snapshot of the context
+     * public interface of snapshot() 
+     *
+     * @param ver snapshot version
+     * */
+    void snapshot(const uint64_t& ver) const{
+        ContextBaseClass* _ctx = new ContextBaseClass(*this);
+        snapshot( ver, _ctx );
+    }
+
+    void resumeParams(BaseMaceService* sv, const ContextBaseClassParams * params);
+    /**
+     * Each context is responsible for releasing its own snapshot
+     * 
+     * \param ver Ticket number of the snapshot 
+     * */
+    virtual void snapshotRelease(const uint64_t& ver) const{
+      ADD_SELECTORS("ContextBaseClass::snapshotRelease");
+      while( !versionMap.empty() && versionMap.front().first < ver ){
+        macedbg(1) << "Deleting snapshot version " << versionMap.front().first << " for service " << this << " value " << versionMap.front().second << Log::endl;
+        delete versionMap.front().second;
+        versionMap.pop_front();
+      }
+    }
+    /**
+     * Each context takes its own snapshot
+     * 
+     * \param ver Ticket number of the snapshot 
+     * */
+    void snapshot(const uint64_t& ver, ContextBaseClass* _ctx) const{
+      ADD_SELECTORS("ContextBaseClass::snapshot");
+      macedbg(1) << "Snapshotting version " << ver << " for this " << this << " value " << _ctx << Log::endl;
+      ASSERT( versionMap.empty() || versionMap.back().first < ver );
+      versionMap.push_back( std::make_pair(ver, _ctx) );
+    }
+    /**
+     * return a snapshot of the current event version
+     * */
+    virtual const ContextBaseClass& getSnapshot() const{
+      VersionContextMap::const_iterator i = versionMap.begin();
+      uint64_t sver = ThreadStructure::myEvent().eventContextMappingVersion;
+      while (i != versionMap.end()) {
+        if (i->first == sver) {
+          break;
+        }
+        i++;
+      }
+      if (i == versionMap.end()) {
+        Log::err() << "Error reading from snapshot " << sver << " eventId " << ThreadStructure::myEventID() << Log::endl;
+        ABORT("Tried to read from snapshot, but snapshot not available!");
+      }
+      return *(i->second);
+    }
+    /**
+     * insert a read-only snapshot into the context
+     *
+     * @param ver version number
+     * @param snapshot snapshot object
+     * */
+    virtual void setSnapshot(const uint64_t ver, const mace::string& snapshot){
+        std::istringstream in(snapshot);
+        mace::ContextBaseClass *obj = new mace::ContextBaseClass(this->contextName, 1 );
+        mace::deserialize(in, obj );
+        versionMap.push_back( std::make_pair( ver, obj  ) );
+    }
+    /**
+     * returns the now_serving number
+     * now_serving number is the ticket of the next to run event
+     * */
+    OrderID const& getNowServing() const{
+      return now_serving_eventId;
+    }
+
+    // chuangw: XXX: need to move init() to ContextBaseClass,
+    // since every variables used are references to ContextBaseClass
+    ContextThreadSpecific* init();
+    int getCurrentMode() { 
+      const OrderID& myEventId = ThreadStructure::myEventID();
+      const uint64_t executeTicket = getExecuteEventTicket(myEventId);
+      ASSERT( executeTicket > 0 );
+      if( uncommittedEvents.first != executeTicket ){
+        return -1;
+      }
+      return uncommittedEvents.second;
+    }
+    const uint64_t& getSnapshotVersion() { return init()->getSnapshotVersion(); }
+    void setCurrentMode(int newMode) { init()->currentMode = newMode; }
+    void setSnapshotVersion(const uint64_t& ver) { init()->snapshotVersion = ver; }
+    /**
+     * push an event into the context execution queue
+     *
+     * */
+    void enqueueEvent(BaseMaceService* sv, AsyncEvent_Message* const p);
+    bool enqueueEvent(const BaseMaceService* sv, mace::Event& event);
+
+    void enqueueRoutine(BaseMaceService* sv, Routine_Message* const p, mace::MaceAddr const& source);
+
+    void commitContext(BaseMaceService* sv, mace::OrderID const& eventId);
+
+    //void enqueueExternalMessage(BaseMaceService* sv, mace::Event& event, HeadEventDispatch::eventfunc func, mace::Message* p, mace::MaceAddr const& src);
+    /**
+     * signal the context thread
+     *
+     * */
+    void signalContextThreadPool();
+
+    void initialize(const mace::string& contextName, const OrderID& now_serving_eventId, const uint8_t serviceId, 
+      const uint32_t contextId, const ContextEventOrder& contextEventOrder, const uint64_t create_now_committing_ticket, const OrderID& execute_now_committing_eventId,
+      const uint64_t execute_now_committing_ticket );
+
+    void lock(  );
+    void downgrade( int8_t requestedMode );
+    void unlock(  );
+    void nullTicket();
+    /**
+     * when context is removed, eliminate thread specfici memory associated with this context
+     * */
+    static void releaseThreadSpecificMemory(){
+      // delete thread specific memories
+      pthread_once( & mace::ContextBaseClass::global_keyOnce, mace::ContextBaseClass::createKeyOncePerThread );
+      ThreadSpecificMapType* t = (ThreadSpecificMapType *)pthread_getspecific(global_pkey);
+      if( t == 0 ){
+        //chuangw: this can happen if init() is never called by this thread;
+      }else{
+        ThreadSpecificMapType::iterator ctIterator;
+        for( ctIterator = t->begin(); ctIterator != t->end(); ctIterator++){
+          delete ctIterator->second;
+        }
+      }
+      delete t;
+    }
+    static void createKeyOncePerThread();
+    static mace::string getTypeName( mace::string const& fullName ){
+      mace::string s;
+
+      size_t pos = fullName.find_last_of("." );
+
+      if( pos == mace::string::npos ){
+        s = fullName;
+      }else{
+        s = fullName.substr( pos+1 );
+      }
+
+      size_t bracket_pos = s.find_first_of("[" );
+      if( bracket_pos == mace::string::npos ){
+        return s;
+      }
+
+      s = s.substr( 0, bracket_pos );
+
+      return s;
+    }
+
+    void enqueueCreateEvent(AsyncEventReceiver* sv, HeadEventDispatch::eventfunc func, mace::Message* p, bool useTicket);
+    OrderID newCreateTicket();
+
+    void increaseHandlingMessageNumber();
+    void decreaseHandlingMessageNumber();
+    void waitingForMessagesDone();
+
+    void enqueueExecuteContextEvent( BaseMaceService* sv, ContextEvent const& ce);
+    void enqueueExecuteContextEventToHead( BaseMaceService* sv, ContextEvent const& ce);
+
+    void enqueueEventStateQuery( BaseMaceService* sv, OrderID const& eventId, mace::string const& src_contextName );
+    void enqueueLockedContextName( OrderID const& eventId, mace::string const& lockedContextName );
+    void enqueueSubEvent( OrderID const& eventId, mace::EventRequestWrapper const& eventRequest);
+    mace::vector< mace::EventRequestWrapper > getSubEvents(mace::OrderID const& eventId);
+    uint64_t getNextOperationTicket(OrderID const& eventId);
+    void enqueueEventOperation( OrderID const& eventId, EventOperationInfo const& opInfo );
+
+    void waitForAllEventOpsDone(OrderID const& eventId);
+    void waitForAllPreEventsDone( BaseMaceService* sv, mace::vector<PreEventInfo> const& preEventInfos );
+    mace::vector<EventOperationInfo> extractOwnershipOpInfos( OrderID const& eventId );
+
+    //void removeEventOpInfo( OrderID const& eventId, EventOperationInfo const& opInfo );
+    const mace::set<mace::string> getLockedContextNames( OrderID const& eventId );
+
+    void deleteEventExecutionInfo( OrderID const& eventId ) { eventExecutionInfos.erase(eventId); }
+
+    bool enqueueReadyExecuteEventQueue();
+    bool enqueueReadyCreateEventQueue();
+    bool enqueueReadyCommitEventQueue();
+
+    void enqueueReadyExecuteEventQueue2();
+
+    uint32_t createNewContext(BaseMaceService* sv, mace::string const& contextTypeName);
+    void handleCreateNewContextReply(mace::OrderID const& eventId, const uint32_t& newContextId);
+    void releaseLockedContext(BaseMaceService* sv, mace::OrderID const& eventId, mace::string const& ctxName);
+
+    void commitEventOnTargetContext(mace::OrderID const& eventId);
+
+
+private:
+    /*
+    typedef ContextEvent* CRQType;
+
+    struct ContextQueueComp{
+      bool operator()( const CRQType p1, const CRQType p2 ){
+        // first is eventID, second is skipID
+        return p1->eventId > p2->eventId;
+			}
+    };
+    */
+    struct CondQueueComp{
+      bool operator()( const std::pair<uint64_t, pthread_cond_t*>& p1, const std::pair<uint64_t, pthread_cond_t*>& p2 ){
+        return p1.first > p2.first;
+      }
+    };
+    struct BypassSorter{
+      // The bypass range shouldn't intersect
+      bool operator()(const std::pair<uint64_t,uint64_t>& p1, const std::pair<uint64_t,uint64_t>& p2){
+        return (p1.first<p2.first);
+      }
+    };
+
+    //typedef std::priority_queue< CRQType, std::vector< CRQType >, ContextQueueComp > ContextEventRequestQueueType;
+    typedef std::priority_queue< std::pair<uint64_t, pthread_cond_t*>, std::vector<std::pair<uint64_t, pthread_cond_t*> >, CondQueueComp > CondQueue;
+    typedef std::set< std::pair< uint64_t, uint64_t >, BypassSorter > BypassQueueType ;
+
+    pthread_key_t pkey;
+    pthread_once_t keyOnce;
+public:
+    int numReaders;
+    int numWriters;
+private:
+    CondQueue conditionVariables;
+    CondQueue commitConditionVariables;
+    pthread_mutex_t _context_ticketbooth; 
+    BypassQueueType bypassQueue;
+    BypassQueueType commitBypassQueue;
+    mace::pair<uint64_t, int8_t> uncommittedEvents;
+    //ContextEventTP *contextEventDispatcher;
+
+    static pthread_key_t global_pkey;
+    
+protected:
+    typedef std::deque<std::pair<uint64_t, const ContextBaseClass* > > VersionContextMap;
+    mutable VersionContextMap versionMap;
+};
+
+class __EventStorageStruct__: public Serializable, public PrintPrintable {
+public:
+  InternalMessageHelperPtr msg;
+  uint8_t contextEventType;
+  uint8_t messageType;
+  uint8_t sid;
+  //ExternalMessageEvent* msgEvent;
+
+  __EventStorageStruct__(): msg( NULL ), contextEventType(ContextEvent::TYPE_NULL), messageType(mace::InternalMessage::UNKNOWN), sid(0) { }
+  __EventStorageStruct__( const InternalMessageHelperPtr msg, const uint8_t contextEventType, const uint8_t messageType, const uint8_t sid ): msg(msg), contextEventType(contextEventType),
+    messageType(messageType), sid(sid) { } 
+
+  ~__EventStorageStruct__() { 
+    msg = NULL;     
+  }
+
+  __EventStorageStruct__& operator=(const __EventStorageStruct__& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->msg = orig.msg;
+    this->contextEventType = orig.contextEventType;
+    this->messageType = orig.messageType;
+    this->sid = orig.sid;
+    
+    return *this;
+  }
+
+  virtual void serialize(std::string& str) const;
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException);
+
+  void print(std::ostream& out) const {
+    out<< "__EventStorageStruct__(";
+    out<< "contextEventType = "; mace::printItem(out, &(contextEventType)); out<<", ";
+    out<< "msg = "; mace::printItem(out, msg); //out<<", ";
+      //out<< "contextName = "; mace::printItem(out, &(ctxName)); 
+    out<< ")";
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+    mace::PrintNode printer(name, "__EventStorageStruct__" );
+  
+    mace::printItem( printer, "contextEventType", &contextEventType );
+    mace::printItem( printer, "msg", msg );
+      //mace::printItem( printer, "ctxName", &ctxName );
+    pr.addChild( printer );
+  }
+
+  int deserializeEvent( std::istream& in ){
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( sid );
+    mace::Message* ptr;
+    int count = serviceInstance->deserializeMethod( in, ptr );
+    msg = InternalMessageHelperPtr( static_cast< InternalMessageHelperPtr >( ptr ) );
+    return count;
+  }
+  
+  int deserializeRoutine( std::istream& in ){
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( sid );
+    mace::Message* ptr;
+    int count = serviceInstance->deserializeMethod( in, ptr );
+    msg = InternalMessageHelperPtr( static_cast< InternalMessageHelperPtr >( ptr ) );
+    return count;
+  }
+
+};
+
+class __CreateEventStorage__: public Serializable, public PrintPrintable {
+public:
+  mace::InternalMessageHelperPtr msg;
+  mace::OrderID eventId;
+  uint8_t sid;
+
+  __CreateEventStorage__(): msg(NULL), eventId( ), sid(0) { }
+  __CreateEventStorage__(const mace::InternalMessageHelperPtr msg, mace::OrderID const& eventId, const uint8_t sid ) { 
+    this->msg = const_cast<mace::InternalMessageHelperPtr>(msg);
+    this->eventId = eventId;
+    this->sid = sid;
+  }
+
+  ~__CreateEventStorage__() { delete msg; } 
+
+  void print(std::ostream& out) const {
+    out << "__CreateEventStorage__(";
+    out << "msg = "; mace::printItem(out, msg); out << ",";
+    out << "eventId = "; mace::printItem(out, &eventId);
+    out << ")";  
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+     
+  }
+
+  void serialize(std::string& str) const{
+    mace::serialize( str, &sid );
+    //ASSERTMSG(msg != NULL, "__CreateEventStorage__::msg is NULL!");
+    mace::serialize( str, msg );
+    mace::serialize( str, &eventId );
+  }
+
+  int deserialize(std::istream & is) throw (mace::SerializationException){
+    int serializedByteSize = 0;
+    serializedByteSize += mace::deserialize(is, &sid);
+
+    BaseMaceService* serviceInstance = BaseMaceService::getInstance( sid );
+    mace::Message* ptr;
+    serializedByteSize += serviceInstance->deserializeMethod( is, ptr );
+    msg = InternalMessageHelperPtr( static_cast< InternalMessageHelperPtr >( ptr ) ) ;
+
+    serializedByteSize += mace::deserialize( is, &eventId );
+    return serializedByteSize;
+  }
+
+  __CreateEventStorage__& operator=(const __CreateEventStorage__& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    msg = orig.msg;
+    eventId = orig.eventId;
+    sid = orig.sid;
+
+    return *this;
+  }
+};
+
+class ContextBaseClassParams: public Serializable, public PrintPrintable {
+public:
+  ContextBaseClassParams() { }
+  ~ContextBaseClassParams() { }
+  virtual void serialize(std::string& str) const;
+  virtual int deserialize(std::istream & is) throw (mace::SerializationException);
+  void initialize( ContextBaseClass* ctxObj);
+
+  void print(std::ostream& out) const {
+    out<< "ContextBaseClassParams(";
+    out<< "contextName = "; mace::printItem(out, &(contextName)); out<<", ";
+    out<< "contextTypeName = "; mace::printItem(out, &(contextTypeName)); out<<", ";
+    out<< "serviceId = "; mace::printItem(out, &(serviceId)); out<<", ";
+    out<< "contextId = "; mace::printItem(out, &(contextId)); out<<", ";
+    out<< "createEventQueue = "; mace::printItem(out, &(createEventQueue)); out<<", ";
+    out<< "arrivedExecuteEvents = "; mace::printItem(out, &(arrivedExecuteEvents)); out<<", ";
+    out<< "executeCommitEventQueue = "; mace::printItem(out, &(executeCommitEventQueue)); out<<", ";
+    out<< "createCommitEventQueue = "; mace::printItem(out, &(createCommitEventQueue)); out<<", ";
+    out<< "executeEventQueue = "; mace::printItem(out, &(executeEventQueue)); out<<", ";
+    out<< "create_now_committing_ticket = "; mace::printItem(out, &(create_now_committing_ticket)); out<<", ";
+    out<< "execute_now_committing_eventId = "; mace::printItem(out, &(execute_now_committing_eventId)); out<<", ";
+    out<< "execute_now_committing_ticket = "; mace::printItem(out, &(execute_now_committing_ticket)); out<<", ";
+    out<< "now_serving_eventId = "; mace::printItem(out, &(now_serving_eventId)); out<<", ";
+    out<< "now_serving_execute_ticket = "; mace::printItem(out, &(now_serving_execute_ticket)); out<<", ";
+    out<< "lastWrite = "; mace::printItem(out, &(lastWrite)); out<<", ";
+    out<< "contextEventOrder = "; mace::printItem(out, &(contextEventOrder)); out<<", ";
+    out<< "createTicketNumber = "; mace::printItem(out, &(createTicketNumber)); out<<", ";
+    out<< "executeTicketNumber = "; mace::printItem(out, &(executeTicketNumber)); out<<", ";
+    out<< "nextWaitingSubEventsTicket = "; mace::printItem(out, &(nextWaitingSubEventsTicket)); out<<", ";
+    out<< "waitingSubEvents = "; mace::printItem(out, &(waitingSubEvents)); out<<", ";
+    out<< "waitingDeferredMessages = "; mace::printItem(out, &(waitingDeferredMessages)); out<<", ";
+    out<< "waitingSubEventsFlags = "; mace::printItem(out, &(waitingSubEventsFlags)); out<<", ";
+    out<< "now_serving_create_ticket = "; mace::printItem(out, &(now_serving_create_ticket)); out<<", ";
+    out<< "createWaitingFlag = "; mace::printItem(out, &(createWaitingFlag)); out<<", ";
+    out<< "numReaders = "; mace::printItem(out, &(numReaders)); out<<", ";
+    out<< "numWriters = "; mace::printItem(out, &(numWriters)); out<<", ";
+    //out<< "contextBroadcastEventsInfo = "; mace::printItem(out, &(contextBroadcastEventsInfo));
+    out<< "eventExecutionInfos = "; mace::printItem(out, &(eventExecutionInfos) ); out<<", ";
+    out<< "waitingEventIds = "; mace::printItem(out, &(waitingEventIds) );
+    out<< ")";
+  }
+
+  void printNode(PrintNode& pr, const std::string& name) const {
+     
+  }
+
+  ContextBaseClassParams& operator=(const ContextBaseClassParams& orig){
+    ASSERTMSG( this != &orig, "Self assignment is forbidden!" );
+    this->contextName = orig.contextName; ///< The canonical name of the context
+    this->contextTypeName = orig.contextTypeName;
+    this->serviceId = orig.serviceId; ///< The service in which the context belongs to
+    this->contextId = orig.contextId;
+    this->createEventQueue = orig.createEventQueue;
+    //this->commitEventQueue = ctxObj->commitEventQueue;
+    this->arrivedExecuteEvents = orig.arrivedExecuteEvents;
+    this->executeCommitEventQueue = orig.executeCommitEventQueue;
+    this->createCommitEventQueue = orig.createCommitEventQueue;
+    
+    this->executeEventQueue = orig.executeEventQueue;
+    this->create_now_committing_ticket = orig.create_now_committing_ticket;
+    this->execute_now_committing_eventId = orig.execute_now_committing_eventId;
+    this->execute_now_committing_ticket = orig.execute_now_committing_ticket;
+
+    this->now_serving_eventId = orig.now_serving_eventId;
+    this->now_serving_execute_ticket = orig.now_serving_execute_ticket;
+    this->execute_serving_flag = orig.execute_serving_flag;
+
+    this->lastWrite = orig.lastWrite;
+
+    this->contextEventOrder = orig.contextEventOrder;
+
+    this->createTicketNumber = orig.createTicketNumber;
+    this->executeTicketNumber = orig.executeTicketNumber;
+
+    this->nextWaitingSubEventsTicket = orig.nextWaitingSubEventsTicket;
+
+    this->waitingSubEvents = orig.waitingSubEvents;
+    this->waitingDeferredMessages = orig.waitingDeferredMessages;
+    this->waitingSubEventsFlags = orig.waitingSubEventsFlags;
+
+    this->now_serving_create_ticket = orig.now_serving_create_ticket;
+    this->createWaitingFlag = orig.createWaitingFlag;
+    this->numReaders = orig.numReaders;
+    this->numWriters = orig.numWriters;
+    //this->contextBroadcastEventsInfo = orig.contextBroadcastEventsInfo;
+    this->eventExecutionInfos = orig.eventExecutionInfos;
+    this->waitingEventIds = orig.waitingEventIds;
+    return *this;
+  }
+
+public:
+  mace::string contextName; ///< The canonical name of the context
+  mace::string contextTypeName;
+  
+  uint8_t serviceId; ///< The service in which the context belongs to
+  uint32_t contextId;
+  
+  mace::vector< mace::__CreateEventStorage__ > createEventQueue;
+  //ContextBaseClass::EventIDQueueType commitEventQueue;
+  ContextBaseClass::EventStorageType arrivedExecuteEvents;
+
+  mace::map<uint64_t, mace::Event> executeCommitEventQueue;
+  mace::map<uint64_t, mace::Event> createCommitEventQueue;
+
+  mace::deque<ContextEvent> executeEventQueue;
+
+  uint64_t create_now_committing_ticket;
+  OrderID execute_now_committing_eventId;
+  uint64_t execute_now_committing_ticket;
+
+  OrderID now_serving_eventId;
+  uint64_t now_serving_execute_ticket;
+  bool execute_serving_flag;
+
+  uint64_t lastWrite;
+
+  ContextEventOrder contextEventOrder;
+
+  uint64_t createTicketNumber;
+  uint64_t executeTicketNumber;
+
+  uint64_t nextWaitingSubEventsTicket;
+
+  mace::map< uint64_t, mace::Event::EventRequestType > waitingSubEvents;
+  mace::map< uint64_t, mace::Event::DeferredMessageType > waitingDeferredMessages;
+  mace::map< uint64_t, bool > waitingSubEventsFlags;
+
+  uint64_t now_serving_create_ticket;
+  bool createWaitingFlag;
+  int numReaders;
+  int numWriters;
+
+  //ContextBroadcastEventsInfo contextBroadcastEventsInfo;
+  mace::map< OrderID, EventExecutionInfo > eventExecutionInfos;
+  mace::set<OrderID> waitingEventIds;
+};
+
+
+
+};
+#endif

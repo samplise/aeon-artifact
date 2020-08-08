@@ -1,0 +1,165 @@
+#include "RandomUtil.h"
+
+
+service Chirper;
+
+provides Null;
+
+typedefs {
+
+}
+
+services {
+  Transport t;
+}
+
+constants {
+  uint16_t TYPE_SYNC = 0;
+  uint16_t TYPE_ASYNC = 1;
+  uint16_t TYPE_EVENT = 2;
+}
+
+
+constructor_parameters {
+  uint32_t N_GROUP = 1;
+  uint32_t N_USER_PER_GROUP = 4;
+  uint16_t REQUEST_TYPE = 0;
+  uint64_t N_OUTPUT = 100;
+  uint64_t ROUND = 10000;
+  uint64_t N_REQUEST = 0;
+}
+ 
+state_variables {
+  context SocialNetwork {
+    mace::vector<uint32_t> groups;
+  }
+  
+  context Group<uint32_t x>{
+    uint32_t gId;
+    mace::vector<uint32_t> users;
+    uint64_t count;
+  }
+
+  context User<uint32_t x> {
+    uint32_t uId;
+    uint64_t count;
+  }
+}
+
+messages {
+
+}
+ 
+transitions {
+  downcall maceInit()  {
+    async_initSocialNetwork();
+  }
+
+  async [SocialNetwork] initSocialNetwork() [locking = ownership] {
+    ADD_SELECTORS("Chirper");
+    maceout<< "Initialize social network with ROUND=" << ROUND << Log::endl;
+    for(uint32_t i=1; i<=N_GROUP; i++){
+      mace::string group_ctx_name = Util::generateContextName("Group", i);
+      createNewOwnership("SocialNetwork", group_ctx_name);
+      async_initGroup( i );
+    }
+  }
+
+  async [Group<g_id>] initGroup(const uint32_t& g_id) [locking = ownership] {
+    ADD_SELECTORS("Chirper");
+    maceout << "Initialize Group " << g_id << Log::endl;
+    gId = g_id;
+    count = 0;
+
+    mace::string g_ctx_name = Util::generateContextName("Group", g_id);
+
+    uint32_t start_u_id = (g_id-1) * N_USER_PER_GROUP;
+    for(uint32_t i=1; i<=N_USER_PER_GROUP; i++) {
+      uint32_t u_id = start_u_id + i;
+      users.push_back(u_id);
+      mace::string u_ctx_name = Util::generateContextName("User", u_id);
+      createNewOwnership( g_ctx_name, u_ctx_name );
+      async_initUser(u_id);
+    }
+
+    async_launchRequest(g_id);
+  }
+
+  async [User<u_id>] initUser(const uint32_t& u_id) {
+    ADD_SELECTORS("Chirper");
+    maceout << "Initialize User " << u_id << Log::endl;
+    count = 0;
+  }
+
+  async [Group<g_id>] launchRequest(const uint32_t& g_id) {
+    ADD_SELECTORS("Chirper");
+    if(count == 0){
+      sleep(3);
+    }
+
+    count ++;
+    for( uint32_t i=0; i<users.size(); i++ ){
+      if(REQUEST_TYPE == TYPE_SYNC) {
+        sUpdateUser( users[i] );
+      } else if( REQUEST_TYPE == TYPE_ASYNC ){
+        broadcast_aUpdateUser( users[i] );
+      } else {
+        async_eUpdateUser( users[i] );
+      }
+    }
+
+    if( N_REQUEST == 0 ||  count < N_REQUEST ){
+      async_launchRequest( g_id );
+    }
+  }
+
+  broadcast [User<u_id>] aUpdateUser(const uint32_t& u_id ) {
+    ADD_SELECTORS("Chirper");
+    count ++;
+
+    uint64_t m=1;
+    for(uint64_t i=0; i<ROUND; i++){
+      m += i*m % u_id;
+    }
+
+    if( count % N_OUTPUT == 0){
+      maceout << "User("<< u_id <<") count=" << count << Log::endl;
+    }
+  }
+
+  async [User<u_id>] eUpdateUser(const uint32_t& u_id ) {
+    ADD_SELECTORS("Chirper");
+    count ++;
+
+    uint64_t m=1;
+    for(uint64_t i=0; i<ROUND; i++){
+      m += i*m % u_id;
+    }
+
+    if( count % N_OUTPUT == 0){
+      maceout << "User("<< u_id <<") count=" << count << Log::endl;
+    }
+  }
+}
+
+routines {
+
+  [User<u_id>] void sUpdateUser(const uint32_t& u_id) {
+    ADD_SELECTORS("Chirper");
+    count ++;
+
+    uint64_t m=1;
+    for(uint64_t i=0; i<ROUND; i++){
+      m += i*m % u_id;
+    }
+
+    if( count % N_OUTPUT == 0){
+      maceout << "User("<< u_id <<") count=" << count << Log::endl;
+    }
+    
+    return;
+  }
+ 
+
+}
+

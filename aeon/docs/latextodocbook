@@ -1,0 +1,875 @@
+#!/usr/bin/env perl
+
+# Copyright 2005 James W. Anderson.  All rights reserved.
+# This program is free software; you can redistribute it and/or
+# modify it under the same terms as Perl itself.
+
+
+# Limitations:
+# - by no means comprehensive
+# - no support for math environments
+# - can only define new commands in the latex headers
+
+
+# See this site for the official docbook reference:
+# http://www.oasis-open.org/docbook/documentation/reference/html/docbook.html
+
+use strict;
+
+use File::Basename;
+use lib ((dirname($0) || ".")."/../lib", (dirname($0) || ".")."/../perl5");
+
+use HTML::Entities;
+use XML::Element;
+use Util qw(:all);
+use Mace::Util qw(:all);
+
+use constant REVISION_HISTORY_FILE => "revision-history";
+
+my @STARTLINE = qw(section appendix);
+my @EXTRALINE = qw(title);
+push(@EXTRALINE, @STARTLINE);
+my @INDENT = qw(title para term screen programlisting
+		revnumber date authorinitials revremark
+		firstname surname address);
+my @INLINE = qw(emphasis ulink xref command footnote email
+		classname filename function type varname literal replaceable
+		symbol parameter option);
+push(@INLINE, @INDENT);
+my @NOINDENTEND = qw(screen);
+
+my @RECOGNIZED_COMMANDS = qw(filename directory classname typename literal
+			     variablename function command replaceable symbolkw);
+
+
+my %userCommands = ();
+my $literal = 0;
+my $inAppendix = 0;
+my $createPara = 0;
+
+my $f = shift(@ARGV);
+unless (-e $f) {
+    die "usage: $0 file.tex\n";
+}
+
+my @fb = readFile($f);
+
+@fb = removeLatexComments(@fb);
+
+my @b = ();
+while (my $l = shift(@fb)) {
+    if ($l =~ m|\\input{(.*)}|) {
+	my $fn = $1;
+	my $t = $fn;
+	if ($fn =~ m|(.*?)-lg$|) {
+	    $t = $1;
+	}
+	$t .= ".tex";
+	my @t = readFile($t);
+	@t = removeLatexComments(@t);
+	push(@b, @t);
+    }
+    else {
+	push(@b, $l);
+    }
+}
+
+# split into major components
+
+my @latexHeader = ();
+while (my $el = shift(@b)) {
+    if ($el =~ m|\\begin{document}|) {
+	last;
+    }
+    push(@latexHeader, $el);
+}
+
+my @preamble = ();
+while (my $el = shift(@b)) {
+    if ($el =~ m|\\section\{|) {
+	unshift(@b, $el);
+	last;
+    }
+    push(@preamble, $el);
+}
+
+while (my $el = pop(@b)) {
+    if ($el =~ m|\\end{document}|) {
+	last;
+    }
+}
+
+# read in included files
+
+my @ib = ();
+while (my $l = shift(@b)) {
+    if ($l =~ m|^\s*\\input{(.*)}\s*$|) {
+	my $t = $1 . ".tex";
+	my @t = readFile($t);
+	@t = removeLatexComments(@t);
+	while (my $el = pop(@t)) {
+	    unshift(@b, $el);
+	}
+    }
+    else {
+	push(@ib, $l);
+    }
+}
+@b = @ib;
+
+# now split into sections
+
+my @sections = ();
+
+while (my $el = shift(@b)) {
+    if ($el =~ m|^\s*\\section\*?\{|) {
+	push(@sections, [$el]);
+    }
+    elsif ($el =~ m|^\s*\\appendix\s*$|) {
+	push(@sections, [$el]);
+    }
+    elsif ($el =~ m|^\\begin{comment}\s*$|) {
+	while (scalar(@b) and $el !~ m|\\end{comment}|) {
+	    $el = shift(@b);
+	}
+    }
+    else {
+	push(@{$sections[-1]}, $el);
+    }
+}
+
+$f =~ m|(.*)\.|;
+my $articleId = $1;
+my $root = XML::Element->new("article", id => $articleId);
+
+# process latexHeader
+
+my $articleInfo = XML::Element->new("articleinfo");
+$root->push_content($articleInfo);
+
+while (my $l = shift(@latexHeader)) {
+    if ($l =~ m|\\title\{|) {
+	my $title = matchLinesGroup('\\\\title{(.*?)}', $l, \@latexHeader);
+	$articleInfo->push_content(["title", $title]);
+    }
+    elsif ($l =~ m|\\author\{|) {
+	my $atext = splitCommandBraces("author", $l, \@latexHeader);
+	# expects string in form name\\\emph{email} [\and ...]
+	$atext =~ s|\n| |g;
+	my @authors = split(/\\and/, $atext);
+	@authors = map { trim($_) } @authors;
+	for my $el (@authors) {
+	    $el =~ s|\\_|_|g;
+	    $el =~ m|(.*?)\s*\\\\.*?{(.*)}|;
+	    my ($name, $email) = ($1, $2);
+	    $name =~ m|(.*)\s(\w+)|;
+	    my ($firstname, $surname) = ($1, $2);
+	    $articleInfo->push_content(["author",
+					["firstname", $firstname],
+					["surname", $surname],
+					["affiliation",
+					 ["address",
+					  ["email", $email]]]]);
+	}
+    }
+    elsif ($l =~ m|\\newcommand{\\(.*?)}{(.*)}|) {
+	my ($c, $v) = ($1, $2);
+	unless (grep {$c eq $_} @RECOGNIZED_COMMANDS) {
+	    $userCommands{$c} = $v;
+	}
+    }
+}
+
+if (-e REVISION_HISTORY_FILE) {
+    my @rl = readFile(REVISION_HISTORY_FILE);
+    @rl = removeHashComments(@rl);
+
+    my $rh = XML::Element->new("revhistory");
+    $articleInfo->push_content($rh);
+
+    my $all = join("", @rl);
+    my @rEnt = split(/\s*\n\s*\n/, $all);
+
+    @rEnt = map { trim($_) } @rEnt;
+    
+    for my $rel (@rEnt) {
+	$rel =~ m|^\s*(\S+)\s+(\S+)\s+(\S+)\s+(.*)|s;
+	my ($num, $date, $initials, $remark) = ($1, $2, $3, $4);
+	$rh->push_content(["revision",
+			   ["revnumber", $num],
+			   ["date", $date],
+			   ["authorinitials", $initials],
+			   ["revremark", $remark]]);
+    }
+}
+else {
+    warn "document does not have revision history\n"
+}
+
+# process preamble
+
+while (my $l = shift(@preamble)) {
+    if ($l =~ m|\\begin{abstract}\s*$|) {
+	my @abstractLines = ();
+	$l = shift(@preamble);
+	while ($l !~ m|\\end{abstract}\s*$|) {
+	    push(@abstractLines, $l);
+	    $l = shift(@preamble);
+	}
+
+	my $abstract = XML::Element->new("abstract");
+	$articleInfo->push_content($abstract);
+	processCommands($abstract, \@abstractLines);
+    }
+}
+
+# process sections
+
+for my $el (@sections) {
+    processSection($root, $el);
+}
+
+my $raw = qq{<?xml version="1.0" encoding="UTF-8" ?>\n};
+$raw .= qq{<!DOCTYPE article PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN">\n};
+print $raw;
+print prettifyXmlElement($root, 0,
+			 -inline => \@INLINE,
+			 -indent => \@INDENT,
+			 -extraline => \@EXTRALINE,
+			 -startline => \@STARTLINE,
+			 -noindentent => \@NOINDENTEND);
+
+
+
+########################################################################
+# subroutines
+########################################################################
+
+sub processCommands {
+    my ($parent, $ref) = @_;
+
+    while (my $l = shift(@$ref)) {
+	if ($l =~ m|\\(sub)+section\*?\{|) {
+	    my $sc = "subsection";
+	    if ($l =~ m|\\subsubsection|) {
+		$sc = "subsubsection";
+	    }
+
+	    my @ss = ($l);
+	    $l = shift(@$ref);
+	    while (scalar(@$ref) and ($l !~ m|\\${sc}\*?\{|)) {
+		push(@ss, $l);
+		$l = shift(@$ref);
+	    }
+	    if ($l =~ m|\\${sc}\*?\{|) {
+		unshift(@$ref, $l);
+	    }
+	    else {
+		push(@ss, $l);
+	    }
+	    processSection($parent, \@ss);
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\begin{quote}\s*$|) {
+	    my $el = XML::Element->new("blockquote");
+	    $parent->push_content($el);
+	    processCommands($el, $ref);
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\end{quote}\s*$|) {
+	    return;
+	}
+	elsif ($l =~ m|^\s*\\begin{screen}\s*$|) {
+	    my $el = XML::Element->new("screen");
+	    $parent->push_content($el);
+	    $literal++;
+	    processCommands($el, $ref);
+	    my @text = $el->content_refs_list();
+	    chomp(${$text[-1]});
+	    $literal--;
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\end{screen}\s*$|) {
+	    return;
+	}
+	elsif ($l =~ m|^\s*\\begin{programlisting}\s*$|) {
+	    my $el = XML::Element->new("programlisting");
+	    $parent->push_content($el);
+	    $literal++;
+	    processCommands($el, $ref);
+	    my @text = $el->content_refs_list();
+	    chomp(${$text[-1]});
+	    $literal--;
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\end{programlisting}\s*$|) {
+	    return;
+	}
+	elsif ($l =~ m|\\_|) {
+	    $l =~ s|\\_|_|;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|\\\#|) {
+	    $l =~ s|\\\#|\#|;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|\\\$|) {
+	    $l =~ s|\\\$|\$|;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|\\&|) {
+	    $l =~ s|\\&|&|;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|\\S[~\s]+|) {
+	    $l =~ s|\\S[~\s]+||;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|\\copyright|) {
+	    $l =~ s|\\copyright|\(c\)|;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|\\ldots|) {
+	    $l =~ s|\\ldots|\.\.\.|;
+	    unshift(@$ref, $l);
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\begin{itemize}\s*$|) {
+	    my $el = XML::Element->new("itemizedlist");
+	    $parent->push_content($el);
+	    processCommands($el, $ref);
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\end{itemize}\s*$|) {
+	    my $tag = $parent->tag();
+	    if (grep(/$tag/, qw(listitem para))) {
+		unshift(@$ref, $l);
+		return;
+	    }
+	    return;
+	}
+	elsif ($l =~ m|^\s*\\begin{enumerate}\s*$|) {
+	    my $el = XML::Element->new("orderedlist");
+	    $parent->push_content($el);
+	    processCommands($el, $ref);
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\end{enumerate}\s*$|) {
+	    my $tag = $parent->tag();
+	    if (grep(/$tag/, qw(listitem para))) {
+		unshift(@$ref, $l);
+		return;
+	    }
+	    return;
+	}
+	elsif ($l =~ m|^\s*\\begin{description}\s*$|) {
+	    my $el = XML::Element->new("variablelist");
+	    $parent->push_content($el);
+	    processCommands($el, $ref);
+	    next;
+	}
+	elsif ($l =~ m|^\s*\\end{description}\s*$|) {
+	    my $tag = $parent->tag();
+	    if (grep(/$tag/, qw(listitem para))) {
+		unshift(@$ref, $l);
+		return;
+	    }
+	    return;
+	}
+	elsif ($l =~ m|\\item\s*\[(.*?)\](.*\n)|) {
+	    my $tag = $parent->tag();
+	    if (grep(/$tag/, qw(listitem para))) {
+		unshift(@$ref, $l);
+		return;
+	    }
+	    my $varlistEntry = XML::Element->new("varlistentry");
+	    $parent->push_content($varlistEntry);
+	    my $term = XML::Element->new("term");
+	    my $varText = $1;
+	    my $restLine = $2;
+	    if ($varText =~ m|\\|) {
+		processCommands($term, [$varText]);
+	    }
+	    else {
+		$term->push_content(escapeText($varText));
+	    }
+	    $varlistEntry->push_content($term);
+
+	    my $el = XML::Element->new("listitem");
+	    $varlistEntry->push_content($el);
+	    unshift(@$ref, $restLine);
+	    processCommands($el, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\item(.*)|) {
+	    my $tag = $parent->tag();
+	    if (grep(/$tag/, qw(listitem para))) {
+		unshift(@$ref, $l);
+		return;
+	    }
+	    my $el = XML::Element->new("listitem");
+	    $parent->push_content($el);
+	    unshift(@$ref, $1);
+	    processCommands($el, $ref);
+	    next;
+ 	}
+	elsif ($l =~ m|\\href\{|) {
+	    my $regex = '\\\\href{.*?}{.*?}';
+	    if ($l =~ s|^\\href{(.*?)}{(.*?)}$||) {
+		if ($parent->tag ne "para") {
+		    $parent->push_content(["para", ["ulink", { url => $1 }, $2]]);
+		}
+		else {
+		    $parent->push_content(["ulink", { url => $1 }, $2]);
+		}
+		next;
+	    }
+	    elsif ($l =~ m|$regex|) {
+		splitLine($regex, $l, $ref);
+		next;
+	    }
+	    else {
+		warn "malformed href on $l\n";
+	    }
+	}
+	elsif ($l =~ m|\\command\{|) {
+	    if ($l =~ m|^\\command\{|) {
+		my $text = splitCommandBraces("command", $l, $ref);
+		$parent->push_content(["command", escapeText($text)]);
+		next;
+	    }
+	    else {
+		$l =~ m|(.*?)(\\command\{.*\n?)|;
+		unshift(@$ref, $2);
+		unshift(@$ref, $1);
+		next;
+	    }
+	}
+	elsif ($l =~ m|\\emph\{|) {
+	    processRecursiveCommand($parent, "emph", $l, $ref, "emphasis");
+	    next;
+	}
+	elsif ($l =~ m|\\footnote\{|) {
+	    processRecursiveCommand($parent, "footnote", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\option\{|) {
+	    processRecursiveCommand($parent, "option", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\directory\{|) {
+	    processSimpleCommand($parent, "directory", $l, $ref, "filename",
+				 { class => "directory" });
+	    next;
+	}
+	elsif ($l =~ m|\\filename\{|) {
+	    processSimpleCommand($parent, "filename", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\classname\{|) {
+	    processSimpleCommand($parent, "classname", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\function\{|) {
+	    processSimpleCommand($parent, "function", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\replaceable\{|) {
+	    processSimpleCommand($parent, "replaceable", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\literal\{|) {
+	    processSimpleCommand($parent, "literal", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\parameter\{|) {
+	    processSimpleCommand($parent, "parameter", $l, $ref);
+	    next;
+	}
+	elsif ($l =~ m|\\typename\{|) {
+	    processSimpleCommand($parent, "typename", $l, $ref, "type");
+	    next;
+	}
+	elsif ($l =~ m|\\symbolkw\{|) {
+	    processSimpleCommand($parent, "symbolkw", $l, $ref, "symbol");
+	    next;
+	}
+	elsif ($l =~ m|\\variablename\{|) {
+	    processSimpleCommand($parent, "variablename", $l, $ref, "varname");
+	    next;
+	}
+	elsif ($l =~ m|\\ref\{|) {
+	    my $regex = '\\\\ref{.*?}';
+	    if ($l =~ s|^\\ref{.*?:(.*)}$||) {
+ 		die unless hasAncestor($parent, "para");
+		$parent->push_content(["xref", { linkend => $1 }]);
+	    }
+	    else {
+		splitLine($regex, $l, $ref);
+	    }
+	    next;
+	}
+	elsif ($l =~ m|\\lgrindfile{(.*?)}|) {
+	    my @incfile = readFile($1);
+	    $parent->push_content(["programlisting", escapeText(join("", @incfile))]);
+	    next;
+	}
+	elsif ($l =~ m|\\verbatiminput{(.*?)}|) {
+	    my @incfile = readFile($1);
+	    $parent->push_content(["programlisting", escapeText(join("", @incfile))]);
+	    next;
+	}
+	elsif ($l =~ m|\\\\\n?$|) {
+ 	    $l =~ s|\\\\\n?$||;
+	    unshift(@$ref, "\n");
+	}
+	elsif ($l =~ m|^\\bigskip\s*$|) {
+	    next;
+	}
+	elsif ($l =~ m|^\\noindent\s*$|) {
+	    next;
+	}
+	elsif ($l =~ m|^\\small\s*$|) {
+	    next;
+	}
+	elsif ($l =~ m|^\\scriptsize\s*$|) {
+	    next;
+	}
+	elsif ($l =~ m|^\\normalsize\s*$|) {
+	    next;
+	}
+
+ 	if ($l =~ m|\\(\w+)\W|) {
+	    my $cmd = $1;
+	    if (exists($userCommands{$cmd})) {
+		my $v = $userCommands{$cmd};
+		$l =~ s|\\$cmd|$v|;
+		unshift(@$ref, $l);
+		next;
+	    }
+	}
+
+	if ($l =~ m|\\|) {
+	    warn "unrecognized command on: $l";
+	}
+
+	unless ($literal) {
+	    if ($l =~ m|^\s*\n$| and !$createPara) {
+		if ($parent->tag() eq "para") {
+		    return;
+		}
+		else {
+		    next;
+		}
+	    }
+
+ 	    if (chomp($l)) {
+		$l .= " ";
+	    }
+
+	    if (needParaTag($parent)) {
+		$createPara = 0;
+		my $el = XML::Element->new("para");
+		$parent->push_content($el);
+		$el->push_content(escapeText($l));
+
+		processCommands($el, $ref);
+		next;
+	    }
+	}
+
+	$parent->push_content(escapeText($l));
+
+    }
+} # processCommands
+
+sub needParaTag {
+    my $parent = shift;
+    return ($createPara or
+	    $parent->tag() eq "listitem" or
+	    $parent->tag() eq "footnote" or
+	    !hasValidTextTagAncestor($parent));
+} # needParaTag
+
+sub processRecursiveCommand {
+    my ($parent, $n, $l, $ref, $tn) = @_;
+
+    if ($l =~ m|^\\$n|) {
+	my @text = splitCommandBraces($n, $l, $ref);
+	if ($tn) {
+	    $n = $tn;
+	}
+	if (needParaTag($parent)) {
+	    $createPara = 0;
+	    my $el = XML::Element->new("para");
+	    $parent->push_content($el);
+	    $parent = $el;
+	}
+	my $el = XML::Element->new($n);
+	$parent->push_content($el);
+	processCommands($el, \@text);
+    }
+    else {
+	$l =~ m|(.*?)(\\$n.*\n?)|;
+	unshift(@$ref, $2);
+	unshift(@$ref, $1);
+    }
+} # processRecursiveCommand
+
+sub processSimpleCommand {
+    my ($parent, $n, $l, $ref, $tn, $attr) = @_;
+
+    my $orgl = $l;
+    my $regex = "\\\\$n\{.*?\}";
+    if ($l =~ s|^\\$n\{(.*?)\}$||) {
+	unless (hasValidTextTagAncestor($parent)) {
+	    unshift(@$ref, $orgl);
+	    unshift(@$ref, "\n");
+	    $createPara = 1;
+	    return;
+	}
+	if ($tn) {
+	    $n = $tn;
+	}
+	if ($attr) {
+	    $parent->push_content([$n, $1, $attr]);
+	}
+	else {
+	    $parent->push_content([$n, $1]);
+	}
+    }
+    else {
+	splitLine($regex, $l, $ref);
+    }
+} # processSimpleCommand
+
+sub processSection {
+    my ($parent, $ref) = @_;
+
+    my @a = @$ref;
+    my $t = shift(@$ref);
+
+    if ($t =~ m|^\s*\\appendix\s*$|) {
+	$inAppendix = 1;
+	return;
+    }
+
+    my $seccommand = "section";
+    if ($t =~ m|\\subsection|) {
+	$seccommand = "subsection";
+    }
+    elsif ($t =~ m|\\subsubsection|) {
+	$seccommand = "subsubsection";
+    }
+
+    if ($t =~ m|section\*|) {
+	$seccommand .= "\\*";
+    }
+    
+    my @titleLines = splitCommandBraces($seccommand, $t, $ref);
+
+    my $title = join("", @titleLines);
+    $title =~ s|\n| |g;
+
+    $t = shift(@$ref);
+    while (scalar(@$ref) and ($t =~ m|^\s*$|)) {
+	$t = shift(@$ref);
+    }
+    
+    my $id = "";
+    if ($t =~ m|\\label{sec:(.*?)}|) {
+	$id = $1;
+    }
+    else {
+	if ($seccommand !~ m|subsubsection|) {
+	    if ($t =~ m|\\label\{faq:|) {
+		# do nothing
+	    }
+	    else {
+		if ($seccommand =~ m|^section|) {
+		    die "$seccommand $title has no label\n";
+		}
+		unshift(@$ref, $t);
+	    }
+	}
+	else {
+	    unshift(@$ref, $t);
+	}
+    }
+
+    my $sec = 0;
+    if ($inAppendix and ($parent->tag() eq "article")) {
+	$sec = XML::Element->new("appendix", id => $id);
+    }
+    else {
+	if ($id) {
+	    $sec = XML::Element->new("section", id => $id);
+	}
+	else {
+	    $sec = XML::Element->new("section");
+	}
+    }
+    $parent->push_content($sec);
+
+    my $titleEl = XML::Element->new("title");
+    $sec->push_content($titleEl);
+
+    processCommands($titleEl, \@titleLines);
+
+#     $sec->push_content(["title", escapeText($title)]);
+
+    my @a = @$ref;
+    processCommands($sec, $ref);
+} # processSection
+
+sub hasValidTextTagAncestor {
+    my $e = shift;
+    my @v = qw(para term title);
+    for my $el (@v) {
+	if (hasAncestor($e, $el)) {
+	    return 1;
+	}
+    }
+    return 0;
+} # hasValidTextTagAncestor
+
+sub escapeText {
+    my $s = shift;
+
+    unless ($literal) {
+	$s =~ s|~| |g;
+	$s =~ s|\`\`|\"|g;
+	$s =~ s|\'\'|\"|g;
+	$s =~ s|\\_|_|g;
+    }
+
+    $s = HTML::Entities::encode($s);
+
+    return $s;
+} # escapeText
+
+
+sub hasAncestor {
+    my ($el, $tag) = @_;
+
+    unless ($el) {
+	return 0;
+    }
+
+    if ($el->tag() eq $tag) {
+	return 1;
+    }
+    if ($el->parent()) {
+	return hasAncestor($el->parent(), $tag);
+    }
+    return 0;
+} # hasAncestor
+
+sub replaceDoubleQuotes {
+    my @l = @_;
+    my @r = ();
+    while (my $l = shift(@l)) {
+	$l =~ s|\`\`|\"|g;
+	$l =~ s|\'\'|\"|g;
+	push(@r, $l);
+    }
+    return @r;
+} # replaceDoubleQuotes
+
+sub splitCommandBraces {
+    my ($command, $t, $ref) = @_;
+    if ($t =~ m|^\\$command\{([^\{]+?)\}(.*\n?)|) {
+	my $r = $1;
+	my $rest = $2;
+	if ($rest) {
+	    if (!$literal and $rest =~ m|^\s*\n$|) {
+		$rest = " ";
+	    }
+	    unshift(@$ref, $rest);
+	}
+	return wantarray ? ($r) : $r;
+    }
+
+    $t =~ s|^\\$command\{||;
+    my @rl = ();
+    my $count = 1;
+    my @c = ();
+    while ($count > 0) {
+	my @r = ();
+	@c = split(//, $t);
+	while (my $c = shift(@c)) {
+	    if ($c eq "{") {
+		$count++;
+	    }
+	    elsif ($c eq "}") {
+		$count--;
+		if ($count == 0) {
+		    push(@rl, join("", @r));
+		    @r = ();
+		    last;
+		}
+	    }
+	    push(@r, $c);
+
+	    if ($c eq "\n") {
+		push(@rl, join("", @r));
+		@r = ();
+	    }
+	}
+
+	if ($count > 0) {
+	    $t = shift(@$ref);
+	}
+    }
+
+    if (scalar(@c)) {
+	my $post = join("", @c);
+	if ($post !~ m|^\s*$|) {
+	    unshift(@$ref, $post);
+	}
+    }
+
+    return wantarray ? @rl : join("", @rl);
+} # splitCommandBraces
+
+sub matchLines {
+    my ($regex, $t, $ref) = @_;
+    while (scalar(@$ref) and ($t !~ m|$regex|s)) {
+	$t .= shift(@$ref);
+    }
+    return $t;
+} # matchLines
+
+sub splitLine {
+    my ($regex, $t, $ref) = @_;
+    if ($t =~ m|(.*?)($regex)(.*\n?)|) {
+	my $pre = $1;
+	my $match = $2;
+	my $post = $3;
+	for my $el ($post, $match, $pre) {
+  	    if ($el) {
+		$el =~ s|^\s*\n$| |;
+		unshift(@$ref, $el);
+	    }
+	}
+    }
+} # splitLine
+
+sub matchLinesGroup {
+    my ($regex, $t, $ref) = @_;
+    while (scalar(@$ref) and ($t !~ m|$regex|s)) {
+	$t .= shift(@$ref);
+    }
+    if ($t =~ m|$regex|s) {
+	return $1;
+    }
+    else {
+	return "";
+    }
+} # matchLines

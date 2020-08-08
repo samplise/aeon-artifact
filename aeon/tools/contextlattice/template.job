@@ -1,0 +1,13 @@
+universe = VANILLA
+#transfer_executable = TRUE
+executable = heartbeat
+#requirements = (OpSys == "LINUX") && (Arch == "INTEL")
+#arguments = "arg9 ""arg10"" 'arg with literal '' and spaces'"
+arguments = -TRACE_ALL 1 -MACE_AUTO_BOOTSTRAP_PEERS cloud01.cs.purdue.edu:5000 -isworker 1 -pid $(Process) -NUM_ASYNC_THREADS 1
+log = hb.log
+#requirements = ClusterName == "Rossmann"
+requirements = Memory >= 32 && OpSys == "LINUX" && TotalDisk > 5000000
+output = hb_$(Process).out
+error = hb_$(Process).err
+when_to_transfer_output = ON_EXIT_OR_EVICT
+kill_sig = SIGTERM

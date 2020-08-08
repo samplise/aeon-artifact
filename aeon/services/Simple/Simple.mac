@@ -1,0 +1,169 @@
+ /**
+ chuangw:
+This service is created to test the syntax compatibility of the compiler.
+The compiler is supposed to pass all test cases without complaining errors
+
+This service is not supposed to be executed.
+*/
+ #include "boost/format.hpp"
+ #include <sstream>
+ #include <math.h>
+service Simple;
+provides ServComp;
+trace=high;
+typedefs {
+    typedef mace::vector< mace::vector<double> > Matrix;
+}
+services {
+    ServComp sc = auto(private,[],[]); 
+    Transport tcp = TcpTransport();
+}
+ 
+states{
+}
+
+constants {
+    int32_t DEFAULT_ROWS    =   5;
+    int32_t DEFAULT_COLUMNS =   5;
+    uint64_t HEARTBEAT_PERIOD = 500*1000; // Period between each resend every 0.5 second
+}
+/**
+chuangw:
+to change default parameter values to foo, in parameters.default, set
+ServiceConfig.Simple.ROWS = foo and
+ServiceConfig.Simple.COLUMNS = foo
+*/
+constructor_parameters {
+    int32_t ROWS = DEFAULT_ROWS;
+    int32_t COLUMNS = DEFAULT_COLUMNS;
+}
+ 
+state_variables {
+    
+  /* Parser test: global context variables */
+  int rows;
+  int columns;
+  timer TM;
+  /* Parser test: non-parameterized context declaration */
+  context A{
+    bool test;
+    timer TMA;
+  }
+  /* Parser test: parameterized context declaration */
+  context B<int n>{
+    bool test;
+    timer TMB;
+  }
+  /* Parser test: multiple parameters context declaration */
+  context C<uint32_t m1, mace::string str, uint16_t y>{
+    bool test;
+    timer TMC;
+  }
+  /* Parser test: nested context declaration */
+  context D<int ROWS>{ 
+    int init_cells;
+    int finished_cell;
+    context E{ 
+      int z; 
+      timer TME;
+    }
+    context G{
+      int values;
+      context H<int TEST>{
+        bool testX;
+        timer TMF  __attribute(( recur(1000000) ));
+      }
+    }
+    context I<uint32_t y>{ 
+      int values;
+    }
+  }
+}
+
+messages {
+  TestMessage { int row; }
+}
+ 
+transitions {
+
+  /* maceInit() runs in global context */
+  downcall (state == init)maceInit()  {
+  }
+  /* compiler test: argument-less async transition */
+  async [A] testA(){
+
+  }
+  //async [R<row>, R<x> as Rx](state==init)rowInit( int row,int x ){
+  async [D<row>](state==init)rowInit( int row,int x ){
+     // bug: what if snapshot context is the same as the target context??
+  }
+  /* compiler test: context'ed transport deliver upcall handler */
+  upcall [B<msg.row>] deliver(const MaceKey& from, const MaceKey& dest, const TestMessage& msg) {
+    
+  }
+  upcall [B<msg.row>] (test==true) deliver(const MaceKey& from, const MaceKey& dest, const TestMessage& msg) {
+    
+  }
+  upcall [B<msg.row>] (test==false) deliver(const MaceKey& from, const MaceKey& dest, const TestMessage& msg) {
+    
+  }
+  /* compiler test: timer without context */
+  scheduler TM(){
+  }
+  /* compiler test: timer with non-parameterized context */
+  scheduler [A] TMA(){
+  }
+  /* compiler test: timer with parameterized context */
+  scheduler [B<n>] TMB(int& n){
+  }
+  /* compiler test: timer with multiple-parameterized context */
+  scheduler [C<m1,str,m2>] TMC( uint32_t& m1, mace::string& str, uint16_t& m2){
+  }
+  /* compiler test: timer with non-parameterized context within parameterized context */
+  scheduler [D<x>::E] TME(int& x){
+  }
+  // compiler test:  parameterized context within a non-parameterized context
+  scheduler [D<row>::G::H<x>] TMF(int& row, int& x){
+  }
+  async [C<m1,str,m2>] testMulti( uint32_t m1, mace::string str, uint16_t m2){
+    
+  }
+  /* test: service composition */
+   downcall [B<n>] uint32_t request(uint32_t n){
+    return 1;
+   }
+   upcall [B<param>] respond( uint32_t param){
+
+   }
+   upcall [B<param>] ask( uint32_t param ){
+    return 1;
+   }
+}
+
+routines {
+  /* compiler test: routines with context */
+  [D<row>::I<column>] bool cellInit( int row, int column){
+    //values = RandomUtil::randInt(1000);
+    return true;
+  }
+  /* compiler test: void return type routine */
+  [D<row>::I<column>] void VoidReturn( int row, int column){
+    return;
+  }
+  /* compiler test: routine parameter with default value */
+  [D<row>::I<column>] void DefaultParam( int row, int column = 1){
+    return;
+  }
+  /* compiler test: __null context routine and void return type */
+  [__null] void NullRoutine(){
+
+  }
+  /* compiler test: routine with snapshot */
+  [D<row>::I<column>, D<row> as Drow] void snapshotFunction( int row, int column){
+    return;
+  }
+  /* compiler test: routines with non-const reference */
+  [D<row>::I<column>] bool reftest( int& row, int column){
+    return true;
+  }
+}

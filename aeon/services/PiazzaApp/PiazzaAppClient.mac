@@ -1,0 +1,225 @@
+#include <random>
+
+service PiazzaAppClient;
+
+provides Null;
+
+services {
+  Transport t;
+}
+
+constants {
+  uint8_t D_REQUEST = 0;
+  uint8_t C_REQUEST = 1;
+  uint8_t S_REQUEST = 2;
+}
+
+constructor_parameters {
+  NodeSet HeadNode = NodeSet(); /* Should be only one node */
+
+  uint32_t N_CLIENTS = 8;  
+  uint32_t N_DEPARTMENTS = 4;
+  uint32_t N_COURSES = 16;
+  uint32_t N_STUDENTS = 160;
+
+  uint32_t D_PERCENT = 20;
+  uint32_t C_PERCENT = 50;
+  uint32_t S_PERCENT = 100;
+
+  uint64_t OUTPUT_COUNT = 100;
+}
+
+typedefs {
+  
+}
+
+#minclude "PiazzaAppMessages.mi"
+
+auto_types {
+  
+}
+
+state_variables {
+  context Controller {
+    
+  }
+  
+  context Client<uint32_t clientId> {
+    bool isActive;
+    uint32_t c_id;
+
+    uint32_t d_request_count;
+    uint32_t c_request_count;
+    uint32_t s_request_count;
+    uint32_t total_request_count;
+
+    MaceKey serverAddr;
+
+    uint64_t total_latency;
+    uint64_t d_latency;
+    uint64_t c_latency;
+    uint64_t s_latency;
+
+    uint64_t last_request_timestamp;
+    uint8_t last_request_type;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("PiazzaAppClient");
+
+    srand( mace::getmtime() );
+    maceout << "HeadNode=" <<HeadNode << Log::endl;
+    ASSERT( HeadNode.size() == 1 );
+    for( uint32_t i=0; i<N_CLIENTS; i++) {
+      mace::string clientCtxName = generateContextName("Client", i);
+      createNewOwnership( "globalContext", clientCtxName );
+      async_initClient(i);
+    }
+  }
+
+  async [Client<clientId>] initClient( uint32_t const& clientId) {
+    ADD_SELECTORS("PiazzaAppClient");
+        
+    isActive = true;
+    c_id = clientId;
+
+    d_request_count = 0;
+    c_request_count = 0;
+    s_request_count = 0;
+    total_request_count = 0;
+
+    total_latency = 0;
+    d_latency = 0;
+    c_latency = 0;
+    s_latency = 0;
+
+    maceout << "To initialize client " << clientId << Log::endl;
+    downcall_route( *(HeadNode.begin()), ConnectionRequest(clientId) );
+  }
+
+  async [Client<clientId>] launchRequest( uint32_t const& clientId ) {
+    ADD_SELECTORS("PiazzaAppClient");
+
+    last_request_timestamp = mace::getmtime();
+        
+    uint32_t target_percent =  (uint32_t) rand()%100;
+    
+    if( target_percent < D_PERCENT ) {
+      uint32_t d_id = (uint32_t) rand() % N_DEPARTMENTS + 1;
+      last_request_type = D_REQUEST;
+      downcall_route( serverAddr, DepartmentRequest(clientId, d_id) );
+    } else if(target_percent < C_PERCENT ) {
+      uint32_t c_id = (uint32_t) rand() % N_COURSES + 1;
+      last_request_type = C_REQUEST;
+      downcall_route( serverAddr, CourseRequest(clientId, c_id) );
+    } else {
+      uint32_t s_id = (uint32_t) rand() % N_STUDENTS + 1;
+      last_request_type = S_REQUEST;
+      downcall_route( serverAddr, StudentRequest(clientId, s_id) );
+    }
+  }
+
+  upcall [Client< msg.clientId >] deliver(const MaceKey& src, const MaceKey& dest, const Response& msg) {
+    ADD_SELECTORS("PiazzaAppClient");
+
+    total_request_count ++;
+    
+    uint64_t latency = mace::getmtime() - last_request_timestamp;
+    total_latency += latency;
+
+    if( last_request_type == D_REQUEST ){
+      d_latency += latency;
+      d_request_count ++;
+    } else if( last_request_type == C_REQUEST ){
+      c_latency += latency;
+      c_request_count ++;
+    } else if( last_request_type == S_REQUEST ){
+      s_latency += latency;
+      s_request_count ++;
+    }
+
+    if( total_request_count % OUTPUT_COUNT == 0 ) {
+      uint64_t avg_latency = (uint64_t) (total_latency / OUTPUT_COUNT);
+
+      uint64_t avg_d_latency = 0;
+      uint64_t avg_c_latency = 0;
+      uint64_t avg_s_latency = 0;
+
+      if( d_request_count > 0 ){
+        avg_d_latency = d_latency / d_request_count;
+      }
+
+      if( c_request_count > 0 ){
+        avg_c_latency = c_latency / c_request_count;
+      }
+
+      if( s_request_count > 0 ){
+        avg_s_latency = s_latency / s_request_count;
+      }
+
+
+      maceout<< "Client("<< c_id <<"): requestCount=" << total_request_count << " avg_latency=" << avg_latency << " d_count=" << d_request_count <<" avg_d_latency=" << avg_d_latency <<" c_count=" << c_request_count <<" avg_c_latency=" << avg_c_latency << " s_count=" << s_request_count <<" avg_s_latency=" << avg_s_latency << Log::endl;
+
+      
+      d_request_count = 0;
+      c_request_count = 0;
+      s_request_count = 0;
+      
+      d_latency = 0;
+      c_latency = 0;
+      s_latency = 0;
+      total_latency = 0;      
+      
+    }
+    if( isActive ) {
+      last_request_timestamp = mace::getmtime();
+        
+      uint32_t target_percent =  (uint32_t) rand()%100;
+    
+      if( target_percent < D_PERCENT ) {
+        uint32_t d_id = (uint32_t) rand() % N_DEPARTMENTS + 1;
+        last_request_type = D_REQUEST;
+        downcall_route( serverAddr, DepartmentRequest(msg.clientId, d_id) );
+      } else if(target_percent < C_PERCENT ) {
+        uint32_t c_id = (uint32_t) rand() % N_COURSES + 1;
+        last_request_type = C_REQUEST;
+        downcall_route( serverAddr, CourseRequest(msg.clientId, c_id) );
+      } else {
+        uint32_t s_id = (uint32_t) rand() % N_STUDENTS + 1;
+        last_request_type = S_REQUEST;
+        downcall_route( serverAddr, StudentRequest(msg.clientId, s_id) );
+      }
+    }
+  }
+
+  
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("PiazzaAppClient");
+    serverAddr = msg.proxyAddr;
+    maceout<< "Client("<< msg.clientId<<")'s new serverAddr=" << serverAddr << Log::endl;
+    isActive = true;
+    sleep(1);
+    async_launchRequest(msg.clientId);
+  }
+}
+
+
+routines {
+
+[__null] mace::string generateContextName( const mace::string& contextTypeName, const uint32_t& contextId ) {
+  std::ostringstream oss;
+  oss<< contextTypeName << "[" << contextId << "]";
+  return oss.str();
+}
+
+}
+
+
+

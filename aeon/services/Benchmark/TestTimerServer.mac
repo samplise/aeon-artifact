@@ -1,0 +1,34 @@
+service TestTimerServer;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  Test1 __attribute((number(0))) { }
+  Test2 { }
+}
+
+state_variables {
+  context __Dummy{}
+}
+
+
+transitions {
+  downcall maceInit() {
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Test1& msg) {
+    std::cout << curtime << " timer1 received." << std::endl;
+  }
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Test2& msg) {
+    std::cout << curtime << " timer2 received." << std::endl;
+  }
+}

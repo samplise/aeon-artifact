@@ -1,0 +1,174 @@
+#include <functional>
+#define get16bits(d) ((((uint32_t)(((const uint8_t *)(d))[1])) << 8)\
+                       +(uint32_t)(((const uint8_t *)(d))[0]) )
+
+service FakeTagClient;
+
+provides Null;
+
+time = MaceTime;
+
+constructor_parameters {
+  NodeSet TAG_SERVERS = NodeSet(); /* Just specify one head node address */
+  /* One day is 360 second */
+  uint32_t ONE_DAY = 360*1000*1000;
+  uint32_t JOIN_TIME = 80*1000*1000;
+  uint32_t LEAVE_TIME = 160*1000*1000;
+  uint32_t PLAY_PERIOD = 1*1000*1000; /* Per each second, make Play() event */
+
+  uint32_t NUM_ROOMS = 10;
+  uint32_t BURDEN = 100;              /* Higher the value, server will compute longer */
+}
+
+services {
+  Transport t;
+}
+
+
+messages {
+  Join __attribute((number(0))){
+    MaceKey player_id;
+    uint32_t room_id;
+  }
+
+  JoinReply { } 
+
+  Play {
+    uint32_t room_id;
+    uint32_t burden;  /* P value of num_primes */
+  }
+
+  PlayReply { }
+
+  Leave { 
+    MaceKey player_id;
+    uint32_t room_id;
+  }
+}
+
+/*
+ * State change cycle : { SLEEP -> JOINING -> PLAYING -> SLEEP -> .. }
+ */
+
+states {
+  SLEEP;
+  JOINING;
+  PLAYING;
+}
+
+state_variables {
+  MaceKey my_id;
+  uint32_t my_room;
+  timer joinTimer __attribute((recur(ONE_DAY)));
+  timer leaveTimer __attribute((recur(ONE_DAY)));
+  timer playTimer __attribute((recur(PLAY_PERIOD)));
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+transitions {
+  downcall maceInit() {
+    ASSERT( JOIN_TIME <= ONE_DAY );
+    ASSERT( LEAVE_TIME <= ONE_DAY );
+    ASSERT( JOIN_TIME < LEAVE_TIME );
+    ASSERT( PLAY_PERIOD < (LEAVE_TIME - JOIN_TIME) );
+    ASSERT( TAG_SERVERS.size() == 1 );
+
+    my_id = downcall_localAddress();
+    my_room = get_hash(my_id.toString()) % NUM_ROOMS;
+
+    joinTimer.schedule(JOIN_TIME);
+    leaveTimer.schedule(LEAVE_TIME);
+
+    state = SLEEP;
+  }
+
+  scheduler (state == SLEEP) joinTimer() {
+    downcall_route( *(TAG_SERVERS.begin()), Join(my_id, my_room ) );
+    state = JOINING;
+  }
+
+  upcall (state == JOINING) deliver(const MaceKey& src, const MaceKey& dest, const JoinReply& msg) {
+    state = PLAYING;
+    playTimer.schedule(PLAY_PERIOD);
+  }
+
+  scheduler (state == PLAYING) leaveTimer() {
+    downcall_route( *(TAG_SERVERS.begin()), Leave(my_id, get_hash(my_id.toString()) % NUM_ROOMS));
+    state = SLEEP;
+    playTimer.cancel();
+  }
+
+  scheduler (state == PLAYING) playTimer() {
+    downcall_route( *(TAG_SERVERS.begin()), Play(my_room, BURDEN) );
+  }
+
+  upcall (state == PLAYING) deliver(const MaceKey& src, const MaceKey& dest, const PlayReply& msg) {
+    std::cout << curtime << " latency = " << std::endl;
+  }
+
+}
+
+
+routines {
+  /*
+   * Refer to http://www.azillionmonkeys.com/qed/hash.html */
+  [__null] uint32_t get_hash(const mace::string& key) {
+    uint32_t len = key.length();
+    char * cstr = new char [key.length()+1];
+    char * data = cstr;
+    uint32_t hash = len, tmp;
+    int rem;
+
+    if (len == 0) {
+      delete[] cstr;
+      return 0;
+    }
+
+    rem = len & 3;
+    len >>= 2;
+
+    /* Main loop */
+    for (; len > 0; len--) {
+      hash  += get16bits (data);
+      tmp    = (get16bits (data+2) << 11) ^ hash;
+      hash   = (hash << 16) ^ tmp;
+      data  += 2*sizeof (uint16_t);
+      hash  += hash >> 11;
+    }
+
+    /* Handle end cases */
+    switch (rem) {
+      case 3: hash += get16bits (data);
+              hash ^= hash << 16;
+              hash ^= ((signed char)data[sizeof (uint16_t)]) << 18;
+              hash += hash >> 11;
+              break;
+      case 2: hash += get16bits (data);
+              hash ^= hash << 11;
+              hash += hash >> 17;
+              break;
+      case 1: hash += (signed char)*data;
+              hash ^= hash << 10;
+              hash += hash >> 1;
+    }
+
+    /* Force "avalanching" of final 127 bits */
+    hash ^= hash << 3;
+    hash += hash >> 5;
+    hash ^= hash << 4;
+    hash += hash >> 17;
+    hash ^= hash << 25;
+    hash += hash >> 6;
+
+    delete[] cstr;
+    return hash;
+
+    //std::hash<const char*> H;
+    //return ((uint32_t) H(key.c_str())) % (NUM_GROUPS);
+  }
+}
+
+

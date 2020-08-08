@@ -1,0 +1,7 @@
+SET(APPS gameoflife)
+#SET(LIBNAME adht)
+SET(SERVICES GameOfLife)
+#SET(EXTRALIBS Http)
+#SET(XMLRPC ${CMAKE_CURRENT_SOURCE_DIR}/StringDHT.h)
+
+INCLUDE(${CMAKE_CURRENT_BINARY_DIR}/../application.cmake)

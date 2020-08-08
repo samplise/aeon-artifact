@@ -1,0 +1,8 @@
+SET(TOOLS hextoip iptohex percentiles)
+
+FOREACH(TOOL ${TOOLS}) 
+  ADD_EXECUTABLE(${TOOL} ${TOOL}.cc)
+  TARGET_LINK_LIBRARIES(${TOOL} mace ssl pthread)
+ENDFOREACH(TOOL)
+
+ADD_CUSTOM_TARGET(tools DEPENDS ${TOOLS})

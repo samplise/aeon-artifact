@@ -1,0 +1,733 @@
+#include <functional>
+#include <random>
+
+#include <sys/file.h>
+#include <fcntl.h>
+
+#define get16bits(d) ((((uint32_t)(((const uint8_t *)(d))[1])) << 8)\
+                       +(uint32_t)(((const uint8_t *)(d))[0]) )
+
+service ElasticMemcachedServer;
+
+provides Null;
+
+time = MaceTime;
+
+constants {
+  uint8_t WRITE_TYPE = 0;
+  uint8_t READ_TYPE = 1;
+}
+
+constructor_parameters {
+  uint32_t TABLE_NUMBER = 20;
+  uint32_t DATABASE_NUMBER = 20;
+  uint64_t ITEM_NUMBER_PER_TABLE = 4000000;
+
+  uint64_t PAIRS_NUMBER = 40000000;
+
+  uint64_t OUTPUT_COUNT = 1000;
+  
+  uint64_t MIGRATION_ITEM_COUNT1 = 2000;
+  uint64_t MIGRATION_ITEM_COUNT2 = 12000;
+
+  uint32_t MIGRATION_ROUNDS = 2;
+
+  uint32_t CLIENT_NODE_NUMBER = 4;
+  uint32_t N_CLIENTS = 32;
+
+  uint32_t DELETE_COUNT = 10;
+
+  uint32_t STAGE1_N_CLIENTS = 1;
+  uint32_t STAGE2_N_CLIENTS = 2;
+  uint32_t STAGE3_N_CLIENTS = 4;
+  uint32_t STAGE4_N_CLIENTS = 6;
+
+  uint32_t STAGE1_N_NODES = 1;
+  uint32_t STAGE2_N_NODES = 2;
+  uint32_t STAGE3_N_NODES = 4;
+  uint32_t STAGE4_N_NODES = 8;
+}
+
+typedefs {
+  typedef mace::map< mace::string, Item > TableType;
+  typedef mace::deque< RemoveItem > RemoveListType;
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  ConnectionRequest {
+    
+  }
+
+  ConnectionSetup {
+    MaceKey proxyAddr;
+  }
+
+  ReadRequest {
+    uint32_t clientId;
+    mace::string key;
+  }
+
+  ReadReply {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+    bool isCacheMiss;
+    
+  }
+
+  WriteRequest {
+    uint32_t clientId;
+    mace::string key;
+    mace::string value;
+  }
+
+  WriteReply {
+    uint32_t clientId;
+    mace::string key;
+    bool isCacheMiss;
+  }
+
+  ClientNumberReport {
+    uint32_t client_number;
+  }
+
+}
+
+auto_types {
+  Item __attribute((comparable(equals=default; lessthan=default))) {
+    mace::string key;
+    mace::string value;
+    uint64_t timestamp;
+    uint8_t type;
+  }
+
+  RemoveItem __attribute((comparable(equals=default; lessthan=default))) {
+    mace::string key;
+    uint64_t timestamp;
+  }
+}
+
+state_variables {
+  context ItemTable<uint32_t taleId> {
+    uint32_t tId;
+
+    TableType table;
+    RemoveListType removeList;
+    uint64_t item_number;
+    uint64_t miss_number;
+    uint64_t get_number; 
+    uint64_t request_count;
+
+    uint64_t max_item_number;   
+
+    uint32_t migration_round;
+    mace::vector<int> report_flags;    
+  }
+
+  context DatabaseTable<uint32_t id> {
+    uint32_t dId;
+    mace::string database_file_name;
+  }
+
+  context Controller {
+    mace::set<uint32_t> tableIds;
+    uint64_t current_max_item_number;
+    uint32_t migration_round;
+
+    mace::map<MaceKey, uint32_t> clientNumberMap;
+    uint32_t node_number;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    srand( mace::getmtime() );
+    for(uint32_t i=0; i<TABLE_NUMBER; i++){
+      mace::string tableCtxName = generateContextName("ItemTable", i);
+      createNewOwnership("globalContext", tableCtxName);
+      async_initItemTable(i); 
+    }
+/*
+    for(uint32_t i=0; i<DATABASE_NUMBER; i++) {
+      std::ostringstream oss2;
+      oss2 << "DatabaseTable[" << i << "]";
+      mace::pair<mace::string, mace::string> ownership2("globalContext", oss2.str() );
+      ownerships.insert(ownership2);
+      
+      std::ostringstream oss3;
+      oss3 << "database_file_" << i << ".txt";
+      async_initDatabaseTable(i, oss3.str() );
+    }
+*/
+    //async_initController();
+  }
+
+  async [ Controller ] initController() {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    tableIds.clear();
+    
+    for(uint32_t i=0; i<TABLE_NUMBER; i++) {
+      tableIds.insert(i);
+    }
+
+    current_max_item_number = ITEM_NUMBER_PER_TABLE;
+    migration_round = 1;
+    node_number = STAGE1_N_NODES;
+    maceout<< "Initialize Controller!" << Log::endl;
+  }
+
+  async [ Controller ] startMigration(const uint32_t id) {
+    uint32_t migration_table_number = (uint32_t) (TABLE_NUMBER / 2);
+        
+    for( uint32_t i=1; i<=migration_table_number; i++ ) {
+      std::ostringstream oss;
+      oss << "migrate" << id << i;
+      migrateContext(oss.str());
+    }
+  }
+
+  async [ ItemTable<tableId> ] initItemTable(uint32_t tableId){
+    ADD_SELECTORS("ElasticMemcachedServer");
+    
+    tId = tableId;
+    item_number = 0;
+    miss_number = 0;
+    get_number = 0;  
+    request_count = 0;
+
+    max_item_number = ITEM_NUMBER_PER_TABLE;
+
+    migration_round = 0;
+    report_flags.resize(MIGRATION_ROUNDS);
+    for(uint32_t i=0; i<MIGRATION_ROUNDS; i++) {
+      report_flags[i] = 0;
+    }
+
+    maceout<< "To initialize table " << tableId <<" with MAX_ITEM_NUMBER="<< max_item_number << Log::endl;  
+  }
+
+  async [ DatabaseTable<id> ] initDatabaseTable(const uint32_t id, mace::string const& file_name) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    dId = id;
+    database_file_name = file_name;
+
+    if( creat(database_file_name.c_str(), 0666 ) < 0 ) {
+      maceout << "Fail to create the database file in context Database(" << id << ")" << Log::endl;
+      return;
+    }
+
+    int fd = open(database_file_name.c_str(), O_WRONLY, 0);
+    if( fd < 0) {
+      maceout << "Fail to open the database file in context Database(" << id << ")" << Log::endl;
+      return; 
+    }
+
+    mace::string value_str = getDefaultValue();
+    int n = write(fd, value_str.c_str(), value_str.length() );
+    if( n<=0 ) {
+      
+    }
+    close(fd);
+    maceout<< "Initialize DatabaseTable("<< id <<") successfully!" << Log::endl;
+  }
+
+  async [ DatabaseTable< getDatabaseID(id) > ] readRequestToDatabase( const uint32_t id, const uint32_t clientId, MaceKey const& clientAddr, mace::string const& key) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    char buffer[2048];
+
+    //usleep(10000);
+    int fd = open(database_file_name.c_str(), O_RDONLY, 0);
+    if( fd < 0) {
+      maceout << "Fail to open the database file in context Database(" << id << ") for read operation!" << Log::endl;
+      return; 
+    }
+    if( read(fd, buffer, 2048 ) < 0 ) {
+      close(fd);
+      maceout<< "Fail to read database file in context Database(" << id << ")" << Log::endl;
+      return;
+    }
+    close(fd);
+    mace::string value_str = buffer;
+    async_readReplyFromDatabase(id, clientId, clientAddr, key, value_str);
+  }
+
+  async [ DatabaseTable< getDatabaseID(id) > ] writeRequestToDatabase( const uint32_t id, mace::string const& key, mace::string const& value) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    
+    //usleep(10000);
+    int fd = open(database_file_name.c_str(), O_WRONLY, 0);
+    if( fd < 0) {
+      maceout << "Fail to open the database file in context Database(" << id << ") for write operation!" << Log::endl;
+      return; 
+    }
+    if( write(fd, value.c_str(), value.length() ) < 0 ) {
+      close(fd);
+      maceout<< "Fail to write database file in context Database(" << id << ")" << Log::endl;
+      return;
+    }
+    close(fd);
+
+  }
+
+  async [ItemTable<tableId>] setMaxItemNumber(const uint32_t tableId, const uint64_t new_max_item_number) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    max_item_number = new_max_item_number;
+    maceout<< "Set table("<< tableId<<") max_item_number=" << new_max_item_number << Log::endl;
+
+    //uint64_t current_time = mace::getmtime();
+    while( item_number >= max_item_number ) {
+      Item toWriteItem;
+      bool findMinItemFlag = false;
+      while( !findMinItemFlag && !removeList.empty() ) {
+        const RemoveItem& rItem = removeList.front();
+        TableType::iterator mIter = table.find(rItem.key);
+        if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+          findMinItemFlag = true;
+          toWriteItem = mIter->second;
+          table.erase(mIter);
+          item_number --;
+        }
+
+        removeList.pop_front();
+      }
+
+      if( !findMinItemFlag && ! table.empty()) {
+        TableType::iterator min_iter = table.begin();
+        table.erase(min_iter);
+        item_number --;
+      }
+    }
+  }
+
+  async [ItemTable<tableId>] readReplyFromDatabase( const uint32_t tableId, const uint32_t clientId, MaceKey const& clientAddr, mace::string const& key, mace::string const& value ) {
+    bool isCacheMiss = true;
+    uint64_t current_time = mace::getmtime();
+    while( item_number >= max_item_number ) {
+      Item toWriteItem;
+      bool findMinItemFlag = false;
+      while( !findMinItemFlag && !removeList.empty() ) {
+        const RemoveItem& rItem = removeList.front();
+        TableType::iterator mIter = table.find(rItem.key);
+        if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+          findMinItemFlag = true;
+          toWriteItem = mIter->second;
+          table.erase(mIter);
+          item_number --;
+        }
+
+        removeList.pop_front();
+      }
+
+      if( !findMinItemFlag && !table.empty() ) {
+        TableType::iterator miter = table.begin();
+        toWriteItem = miter->second;
+        table.erase(miter);
+        item_number --;
+      }
+
+      if( toWriteItem.type == WRITE_TYPE ) {
+        async_writeRequestToDatabase(tId, toWriteItem.key, toWriteItem.value);
+      }
+    }
+
+    Item item(key, value, current_time, READ_TYPE);
+    table[key] = item;
+    RemoveItem rItem(key, current_time);
+    removeList.push_back(rItem);
+    item_number ++;
+
+    downcall_route(clientAddr, ReadReply(clientId, key, value, isCacheMiss) );
+
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    const MaceAddr& commAddr = getExternalCommContextAddr(src);
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(commKey) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< src <<")!" << Log::endl;
+  }
+
+  upcall [ItemTable< get_bucket(msg.key) >] deliver(const MaceKey& src, const MaceKey& dest, const ReadRequest& msg) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+  
+    //mace::string key = msg.key; //getKeyFromRequestStr(msg.requestStr);
+    //uint32_t clientId = getClientIdFromRequestStr(msg.requestStr);
+    mace::string value = getDefaultValue();
+    request_count ++;
+    
+    downcall_route(src, ReadReply(msg.clientId, msg.key, value, false) );
+    
+  
+  /*
+    uint32_t delete_count = 0;
+    while( !removeList.empty() && delete_count <= DELETE_COUNT ) {
+      const RemoveItem& rItem = removeList.front();
+      TableType::iterator mIter = table.find(rItem.key);
+      if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+        break;
+      }
+      delete_count ++;
+      removeList.pop_front();
+    }
+
+    uint64_t current_time = mace::getmtime();
+    bool isCacheMiss = false;
+    TableType::iterator iter = table.find(msg.key);
+
+
+
+    if( iter != table.end() ) {
+      iter->second.timestamp = current_time;
+      
+      RemoveItem rItem( msg.key, current_time);
+      removeList.push_back( rItem );
+
+      downcall_route(src, ReadReply(msg.clientId, msg.key, iter->second.value, isCacheMiss) );
+    } else {
+      async_readRequestToDatabase(tId, msg.clientId, src, msg.key);
+      isCacheMiss = true;
+      miss_number ++;  
+    }
+    request_count ++;
+    if( request_count % OUTPUT_COUNT == 0) {
+      maceout<< "Table("<< tId <<"): requestCount="<<request_count<<" missCount="<<miss_number <<" CurrentItemCount=" << item_number << Log::endl; 
+      miss_number = 0;
+    }
+    */
+  }
+
+  // Only for scale up
+/*
+  upcall [Controller] deliver(const MaceKey& src, const MaceKey& dest, const ClientNumberReport& msg) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    clientNumberMap[src] = msg.client_number;
+    uint32_t active_client_number = 0;
+    mace::map<MaceKey, uint32_t>::const_iterator iter = clientNumberMap.begin();
+    for(; iter != clientNumberMap.end(); iter++) {
+      active_client_number += iter->second;
+    }
+    maceout<< "Node("<< src <<")'s new active clients="<< msg.client_number <<" total="<< active_client_number << Log::endl;
+    if( true ) {
+      if( node_number < STAGE2_N_NODES && node_number >= STAGE1_N_NODES && active_client_number >= STAGE2_N_CLIENTS ) {
+        maceout<< "Start Migration #1. From "<< node_number <<" to "<< STAGE2_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+        current_max_item_number = 2*current_max_item_number;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+
+        uint32_t migration_table_number = (uint32_t) (TABLE_NUMBER / 2);
+        
+        for( uint32_t i=1; i<=migration_table_number; i++ ) {
+          std::ostringstream oss;
+          oss << "migrate1" << i;
+          migrateContext(oss.str());
+        }
+        node_number = STAGE2_N_NODES;
+      } else if( node_number < STAGE3_N_NODES && node_number >= STAGE2_N_NODES && active_client_number >= STAGE3_N_CLIENTS ) {
+        maceout<< "Start Migration #2. From "<< node_number <<" to "<< STAGE3_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+        uint32_t migration_table_number = (uint32_t) (TABLE_NUMBER / 2);
+        
+        for( uint32_t i=1; i<=migration_table_number; i++ ) {
+          std::ostringstream oss;
+          oss << "migrate2" << i;
+          migrateContext(oss.str());
+        }
+        node_number = STAGE3_N_NODES;
+        current_max_item_number = 2*current_max_item_number;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+      } else if( node_number < STAGE4_N_NODES && node_number >= STAGE3_N_NODES && active_client_number >= STAGE4_N_CLIENTS ) {
+        maceout<< "Start Migration #4. From "<< node_number <<" to "<< STAGE4_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+        current_max_item_number = current_max_item_number * 2;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+
+        uint32_t migration_table_number = (uint32_t) (TABLE_NUMBER / 2);
+        
+        for( uint32_t i=1; i<=migration_table_number; i++ ) {
+          std::ostringstream oss;
+          oss << "migrate3" << i;
+          migrateContext(oss.str());
+        }
+        node_number = STAGE4_N_NODES;
+        
+      } 
+    }
+  }
+*/
+
+  upcall [Controller] deliver(const MaceKey& src, const MaceKey& dest, const ClientNumberReport& msg) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+    clientNumberMap[src] = msg.client_number;
+    uint32_t active_client_number = 0;
+    mace::map<MaceKey, uint32_t>::const_iterator iter = clientNumberMap.begin();
+    for(; iter != clientNumberMap.end(); iter++) {
+      active_client_number += iter->second;
+    }
+    maceout<< "Node("<< src <<")'s new active clients="<< msg.client_number <<" total="<< active_client_number << Log::endl;
+    if( true ) {
+      if( node_number == STAGE1_N_NODES && active_client_number >= STAGE2_N_CLIENTS ) {
+        maceout<< "Start Migration #1. From "<< node_number <<" to "<< STAGE2_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+        current_max_item_number = 2*current_max_item_number;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+
+        async_startMigration(1);
+        node_number = STAGE2_N_NODES;
+      } else if( node_number == STAGE2_N_NODES && active_client_number >= STAGE3_N_CLIENTS ) {
+        maceout<< "Start Migration #2. From "<< node_number <<" to "<< STAGE3_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+
+        current_max_item_number = 2*current_max_item_number;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+        async_startMigration(2);
+        node_number = STAGE3_N_NODES;
+      } else if( node_number == STAGE3_N_NODES && active_client_number < STAGE3_N_CLIENTS ) {
+        maceout<< "Start Migration #3. From "<< node_number <<" to "<< STAGE2_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+        current_max_item_number = current_max_item_number / 2;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+        async_startMigration(3);
+        node_number = STAGE2_N_NODES;
+      } else if( node_number == STAGE2_N_NODES && active_client_number < STAGE2_N_CLIENTS ) {
+        maceout<< "Start Migration #4. From "<< node_number <<" to "<< STAGE1_N_NODES <<" Active clients=" << active_client_number << Log::endl;
+        current_max_item_number = current_max_item_number / 2;
+        for( uint32_t i=0; i<TABLE_NUMBER; i++ ) {
+          async_setMaxItemNumber(i, current_max_item_number);
+        }
+
+        async_startMigration(4);
+        node_number = STAGE1_N_NODES;
+      }
+    }
+  }
+
+  upcall [ItemTable<get_bucket(msg.key)>] deliver(const MaceKey& src, const MaceKey& dest, const WriteRequest& msg) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+
+    uint32_t delete_count = 0;
+    while( !removeList.empty() && delete_count <= DELETE_COUNT ) {
+      const RemoveItem& rItem = removeList.front();
+      TableType::iterator mIter = table.find(rItem.key);
+      if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+        break;
+      }
+      delete_count ++;
+      removeList.pop_front();
+    }
+
+    uint64_t current_time = mace::getmtime();
+    bool isCacheMiss = false;
+    TableType::iterator iter = table.find(msg.key);
+    if( iter != table.end() ) {
+      iter->second.timestamp = current_time;
+      iter->second.type = WRITE_TYPE;
+
+      RemoveItem rItem( msg.key, current_time);
+      removeList.push_back( rItem );
+    } else {
+      isCacheMiss = true;
+      while( item_number >= max_item_number ) {
+        Item toWriteItem;
+        bool findMinItemFlag = false;
+        while( !findMinItemFlag && !removeList.empty() ) {
+          const RemoveItem& rItem = removeList.front();
+          TableType::iterator mIter = table.find(rItem.key);
+          if( mIter != table.end() && mIter->second.timestamp == rItem.timestamp ) {
+            findMinItemFlag = true;
+            toWriteItem = mIter->second;
+            table.erase(mIter);
+            item_number --;
+          }
+
+          removeList.pop_front();
+        }
+
+        if( !findMinItemFlag && !table.empty() ) {
+          TableType::iterator miter = table.begin();
+          toWriteItem = miter->second;
+          table.erase(miter);
+          item_number --;
+        }
+
+        if( toWriteItem.type == WRITE_TYPE ) {
+          async_writeRequestToDatabase(tId, toWriteItem.key, toWriteItem.value);
+        }
+      }
+
+
+
+      //async_writeRequestToDatabase(tId, msg.key, msg.value);
+      Item item(msg.key, msg.value, current_time, WRITE_TYPE);
+      table[msg.key] = item;
+      RemoveItem rItem(msg.key, current_time);
+      removeList.push_back(rItem);
+      item_number ++;
+
+      miss_number ++;
+    }
+
+    request_count ++;
+    if( request_count % OUTPUT_COUNT == 0) {
+      maceout<< "Table("<< tId <<"): requestCount="<<request_count<<" missCount="<<miss_number <<" CurrentItemCount=" << item_number << Log::endl;
+      miss_number = 0; 
+    }
+
+    downcall_route(src, WriteReply(msg.clientId, msg.key, isCacheMiss) );
+  }
+  
+}
+
+
+routines {
+  [__null] mace::string generateReplyStr(const uint32_t clientId, mace::string const& key, mace::string const& value, const bool isCacheMiss) {
+    uint32_t miss = 1;
+    if( !isCacheMiss ) {
+      miss = 0;
+    }
+
+    std::ostringstream oss;
+    oss<< clientId << "#" << key << "#" << value << "#" << miss;
+    return oss.str();
+  }
+
+  [__null] uint32_t getClientIdFromRequestStr(mace::string const& requestStr) {
+    ADD_SELECTORS("ElasticMemcachedServer");
+
+    StringList elems = StrUtil::split("#", requestStr );
+
+    if( elems.size() != 2 ) {
+      maceout<< "Fail to analyze reply string: " << requestStr << Log::endl;
+      return 0;
+    }
+
+    uint32_t clientId = (uint32_t) atoi( elems[0].c_str() );
+    return clientId;
+  }
+
+  [__null] mace::string getKeyFromRequestStr(mace::string const& requestStr) {
+    ADD_SELECTORS("ElasticMemcachedClient");
+
+    StringList elems = StrUtil::split("#", requestStr );
+
+    if( elems.size() != 2 ) {
+      maceout<< "Fail to analyze request string: " << requestStr << Log::endl;
+      return 0;
+    }
+    return elems[1];  
+  }
+
+  [__null] uint32_t get_bucketFromRequestStr( const mace::string& requestStr ) {
+    mace::string key = getKeyFromRequestStr( requestStr );
+    return get_bucket(key);
+  }
+  
+
+  /*
+   * Refer to http://www.azillionmonkeys.com/qed/hash.html */
+  [__null] uint32_t get_bucket(const mace::string& key) {
+    uint32_t len = key.length();
+    char * cstr = new char [key.length()+1];
+    strcpy(cstr, key.c_str());
+    char * data = cstr;
+    uint32_t hash = len, tmp;
+    int rem;
+
+    if (len == 0) {
+      delete[] cstr;
+      return 0;
+    }
+
+    rem = len & 3;
+    len >>= 2;
+
+    /* Main loop */
+    for (; len > 0; len--) {
+      hash  += get16bits (data);
+      tmp    = (get16bits (data+2) << 11) ^ hash;
+      hash   = (hash << 16) ^ tmp;
+      data  += 2*sizeof (uint16_t);
+      hash  += hash >> 11;
+    }
+
+    /* Handle end cases */
+    switch (rem) {
+      case 3: hash += get16bits (data);
+              hash ^= hash << 16;
+              hash ^= ((signed char)data[sizeof (uint16_t)]) << 18;
+              hash += hash >> 11;
+              break;
+      case 2: hash += get16bits (data);
+              hash ^= hash << 11;
+              hash += hash >> 17;
+              break;
+      case 1: hash += (signed char)*data;
+              hash ^= hash << 10;
+              hash += hash >> 1;
+    }
+
+    /* Force "avalanching" of final 127 bits */
+    hash ^= hash << 3;
+    hash += hash >> 5;
+    hash ^= hash << 4;
+    hash += hash >> 17;
+    hash ^= hash << 25;
+    hash += hash >> 6;
+
+    delete[] cstr;
+    return hash % (TABLE_NUMBER);
+  }
+
+  [__null] mace::string generateRandomKey( const uint64_t start_pair_number, const uint64_t end_pair_number ) {
+    ASSERT(end_pair_number >= start_pair_number);
+    uint64_t uint_key;
+    if( start_pair_number == end_pair_number ) {
+      uint_key = start_pair_number;
+    } else {
+      uint64_t size = end_pair_number - start_pair_number;
+      uint_key = start_pair_number + (uint64_t) rand()%size;
+      ASSERT( uint_key <= end_pair_number );
+    }
+
+    std::ostringstream oss;
+    oss<< uint_key;
+    return oss.str();
+  }
+
+  [__null] mace::string getDefaultValue() {
+    mace::string str_value = "";
+    mace::string seed_str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for(uint32_t i=0; i<19; i++) {
+      str_value += seed_str;
+    }
+    return str_value;
+  }
+
+  [__null] uint32_t getDatabaseID( const uint32_t tableId ) {
+    return tableId % DATABASE_NUMBER;
+  }
+
+  [__null] mace::string generateContextName( const mace::string& contextTypeName, const uint32_t& contextId ) {
+    std::ostringstream oss;
+    oss<< contextTypeName << "[" << contextId << "]";
+    return oss.str();
+  }
+
+}
+
+

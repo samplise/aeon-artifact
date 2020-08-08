@@ -1,0 +1,347 @@
+% 
+% pingdetail.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\section{Mace Specification Revisited}
+\label{sec:pingdetail}
+
+In this section, we will discuss the changes we made for the revised
+Ping implementation.
+
+
+\subsection{Services (Revised)}
+
+We changed the default route service to a UDP
+\classname{RouteServiceClass}.  We do not need the reliable byte
+stream semantics of TCP, and a UDP route service has less overhead.
+
+\begin{programlisting}
+services {
+  Route router = UDP();
+  //   Route router = TcpTransport();
+} // services
+\end{programlisting}
+
+Note that we do not have to change \emph{any} other code, other than
+the ``= UDP()'', to switch between TCP and UDP route
+services.  This illustrates a key advantage of using service class
+interfaces: because both the \classname{TcpTransport} and
+\classname{UDPService} provide the \classname{RouteServiceClass}, our
+code will compile seamlessly with either of them.
+
+\subsection{Constructor Parameters}
+
+The \symbolkw{constructor\_parameters} block allows you to list variables that
+can be initialized as parameters in the service constructor.  These values
+must be given defaults in the parameter list for the constructor.
+
+\begin{programlisting}
+constructor_parameters {
+  uint PING_INTERVAL = DEFAULT_PING_INTERVAL;
+  double PING_TIMEOUT = DEFAULT_PING_TIMEOUT;
+} // constructor_parameters
+\end{programlisting}
+
+We make \variablename{PING\_INTERVAL} and \variablename{PING\_TIMEOUT}
+constructor parameters, so that they can be set at runtime, as opposed
+to being fixed as constants of the Ping service.  We also provide
+defaults, which are defined in the \symbolkw{constants} block.
+
+
+\subsection{States}
+
+The \symbolkw{states} block allows you to list the possible states that your
+service could assume\footnote{Recall that services are modeled as State
+Machines.  These states are the high-level states of the finite automata.}.
+All services have an implicit state named \literal{init}.  You can change the
+state of your service by assigning the new state (one of those declared in the
+\symbolkw{states} block) to the special Mace variable \variablename{state},
+which is defined for each service instance.  You can also reference your
+current state through this variable to compare it to any of the states
+declared in the \symbolkw{states} block, plus \variablename{init}.  We will
+see examples a little later.
+
+\begin{programlisting}
+states {
+  ready;
+} // states
+\end{programlisting}
+
+Our Ping service defines just one new state, \variablename{ready}.  We will
+use this state to prevent many methods from being called on our service before
+the \function{maceInit} method is called.  Note that qualifying the maceInit
+function with the guard expression is not strictly necessary, the generated
+code treats the \function{maceInit} specially and only allows it to be called
+once.  This is also true of the \function{maceExit} function.
+
+
+\subsection{Typedefs}
+
+The \symbolkw{typedefs} block allows you to alias types needed for your
+service with the normal C++ \symbolkw{typedef} command.  The primary purpose
+for this block is to allow you to create typedefs that can both use types
+defined in the \symbolkw{auto\_types} block (not used in this example) in the
+typedef and use typedefs in that and the \symbolkw{messages} block.
+
+\begin{programlisting}
+typedefs {
+  typedef mace::list<uint64_t> PingTimeList;
+  typedef mace::hash_map<MaceKey, PingTimeList> PingListMap;
+  typedef mace::hash_map<MaceKey, uint64_t> TimeMap;
+  typedef mace::multimap<MaceKey, registration_uid_t> RegistrationMap;
+} // typedefs
+\end{programlisting}
+
+Ping defines four new types: \typename{PingTimeList}, which we will use to
+store a list of times which unacknowledged ping messages were sent;
+\typename{PingListMap}, which we will use to associate a
+\typename{PingTimeList} with each host; \typename{TimeMap}, which we will use
+to store the last time that we received a \typename{PingReply} message from a
+host; and a \typename{RegistrationMap}, which will allow us to store which
+handlers (as indicated by their registration id) are interested in callbacks
+for which hosts.
+
+\subsection{Messages (Revised)}
+
+Since in our new ping service, we will send multiple pings to each host, 
+it may be necessary to distinguish which one a given reply corresponds to.
+A simple way of accomplishing this is to pass the time the ping is sent
+to the recipient and having them echo this back to the sender.  Thus we add
+an additional field to each message.
+
+\begin{programlisting}
+messages {
+  Ping { 
+    uint64_t t;
+  }
+  PingReply {
+    uint64_t techo;
+    uint64_t t;
+  }
+} // messages
+\end{programlisting}
+
+\subsection{State Variables (Revised)}
+
+\bigskip
+\begin{programlisting}
+state_variables {
+  PingListMap sentTimes;
+  TimeMap responseTimes;
+  RegistrationMap rids;
+  timer sendtimer __attribute((recur(PING_INTERVAL)));
+} // state_variables
+\end{programlisting}
+
+We have changed our state variables to include the three maps,
+mentioned above.  We still have the \typename{timer}
+\variablename{sendtimer}, as before.  However, we use optional Mace
+syntax to specify that it is a recurring timer.  That is, the timer
+will automatically reschedule itself to expire again after
+\variablename{PING\_INTERVAL} microseconds.
+
+
+\subsection{Transitions (Revised)}
+
+Our transitions have been revised and are somewhat more involved.  You will
+notice that they now make use of the optional state expressions.  These can
+occur either immediately before the transition name, in parentheses, or they
+can appear as a block around a set of transitions, with the state expression
+in parentheses preceding the opening of the block.  State expressions may be
+arbitrary boolean expressions, with the restriction that they may not cause
+side-effects or modify any of the service's state.  State expressions may
+reference any of the service's state variables and global variables
+(constants, constructor parameters, and \variablename{state}).  A transition
+will only be executed if its state expression evaluates to \literal{true}.  If
+no state expression is provided, \literal{(true)} is assumed (meaning of
+course that the transition should always be executed).  However, for any given
+event, only the first matching transition with a true state expression will be
+executed.
+
+\begin{programlisting}
+  downcall (state == init) maceInit() {
+    state = ready;
+    sendtimer.schedule(PING_INTERVAL);
+  } // maceInit
+\end{programlisting}
+
+Here we define the \function{maceInit()} API method, overriding the
+empty default implementation in \classname{ServiceClass}.  The state
+expression \function{(state == init)} ensures that
+\function{maceInit()} will only be executed if our service is in the
+\variablename{init} state.  Calling \function{maceInit()} in any other
+state (such as \variablename{ready}) will result in a \emph{NOP}.
+
+\function{maceInit()} does two things: 1) it changes the service's
+state to \variablename{ready}, and 2) it schedules the timer.  Because
+the timer is recurring, it only needs to be scheduled once---it will
+continue to fire every \function{recur()} interval until it is
+canceled.
+
+
+\begin{programlisting}
+  (state == ready) {
+    ...
+  } // state == ready
+\end{programlisting}
+
+This is the second form of state expression syntax, which indicates
+that all transitions within the enclosing block should only be
+executed if we are in the \variablename{ready} state.  This prevents
+them from being called before \function{maceInit}.
+
+
+\begin{programlisting}
+    upcall deliver(const MaceKey& src, const MaceKey& dest, const PingReply& msg) {
+      if(sentTimes[src].empty() || sentTimes[src].front() > msg.techo) {
+        return; // ping already notified as failure
+      }
+      while(!sentTimes[src].empty() && sentTimes[src].front() <= msg.techo) {
+        sentTimes[src].pop_front();
+      }
+      responseTimes[src] = curtime;
+      if(curtime-msg.techo <= PING_TIMEOUT) {
+        upcallSuccess(src, msg.techo, responseTimes[src], msg.t);
+      } else {
+        upcallFailure(src, msg.techo);
+      }
+    } // deliver PingReply
+\end{programlisting}
+
+The \function{deliver()} callback for the receipt of a \typename{PingReply}
+message has the same idea as in our previous Ping service, but it has to do
+some bookkeeping.  First, we check if the ping has already been timed out in
+the sendtimer transition, and exit if it has.  If not, we update the
+unacknowledged ping list, and then update the response time for the given host.
+Then, if the ping reply was received before the timeout we use the routine
+\function{upcallSuccess()}, defined in the \symbolkw{routines} block (below),
+to notify interested handlers of the result. Otherwise, we use the
+\function{upcallFailure()} routine to notify interested handlers of the
+negative result.
+
+\begin{programlisting}
+    downcall monitor(const MaceKey& host, registration_uid_t rid) {
+      if (rids.find(host) == rids.end()) {
+        ping(host);
+      }
+      rids.insert(std::make_pair(host, rid));
+    } // monitor
+\end{programlisting}
+
+We update the \function{monitor()} API method as follows.  We check if
+we are already monitoring this host.  If not (the condition checked in
+the \symbolkw{if}), then call the routine \function{ping()}.  This
+check is needed to suppress sending duplicate \typename{Ping} messages
+to a host when different handlers request to monitor the same host.
+We also need to insert the mapping from the host to the registration
+id in our registration map, which will allow us to make callbacks on
+the interested handler.
+
+
+\begin{programlisting}
+    downcall getLastResponseTime(const MaceKey& host) {
+      return responseTimes[host];
+    } // getLastResponseTime
+\end{programlisting}
+
+We implement the \function{getLastResponseTime} API method as a
+straight-forward lookup in our map.
+
+
+\begin{programlisting}
+  scheduler sendtimer() {
+    for (PingListMap::iterator i = sentTimes.begin(); i != sentTimes.end(); i++) {
+      if(!i->second.empty() && curtime - i->second.front() > PING_TIMEOUT) {
+	upcallFailure(i->first, i->second.front());
+        while(!i->second.empty() && curtime - i->second.front() > PING_TIMEOUT) {
+          i->second.pop_front();
+        }
+      }
+      ping(i->first);
+    }
+  }
+\end{programlisting}
+
+Because our service monitors multiple hosts, and does so indefinitely, our
+timer transition has more complexity.  The timer is responsible for two main
+tasks: 1) notifying timeouts (failures) and 2) sending the next
+\typename{Ping} message.  Both of these tasks must be performed on each host
+that we are monitoring.  Thus, we loop over the \variablename{sentTimes} map,
+which returns us a (host, PingTimeList) pair, for every host that we are
+monitoring.  
+
+We need to make a failure callback when the PingTimeList (which is storing
+the times of unacknowledged pings) is non-empty, and the first element
+of the list is more than \variablename{PING\_TIMEOUT} microseconds in the 
+past.  After we notify the failure, we remove all unacknowledged ping messages
+which are expired from the list.
+
+Finally, we send our next ping to the host, regardless of whether we
+think it is live or not.
+
+
+\subsection{Routines}
+
+Routines are simply C++ methods that are not part of the service API
+(as either downcalls or callbacks).  They are defined within the
+\symbolkw{routines} block.  Service routines should be defined for the
+same reason you would define a normal class method: to eliminate code
+duplication for common procedures, or to abstract away a complicated
+piece of code, etc.
+
+
+\begin{programlisting}
+  void ping(const MaceKey& host) {
+    downcall_route(host, Ping(curtime));
+    sentTimes[host].push_back(curtime);
+  } // ping
+\end{programlisting}
+
+The \function{ping()} method sends a \typename{Ping()} message to the
+host, and records the time in our sent times map.
+
+\begin{programlisting}
+  void upcallSuccess(const MaceKey& k, uint64_t ts, uint64_t tr, uint64_t rt) {
+    for (RegistrationMap::iterator i = rids.find(k); i != rids.end() && i->first == k; i++) {
+      upcall_hostResponseReceived(k, ts, tr, rt, i->second);
+    }
+  } // upcallSuccess
+
+  void upcallFailure(const MaceKey& k, uint64_t ts) {
+    for (RegistrationMap::iterator i = rids.find(k); i != rids.end() && i->first == k; i++) {
+      upcall_hostResponseMissed(k, ts, i->second);
+    }
+  } // upcallFailure
+\end{programlisting}
+
+\function{upcallSuccess()} and \function{upcallFailure()} are helper
+methods that ensure that we make the appropriate callback on all
+interested handlers.  In both methods, we loop over our registration
+map, which contains (host, registration-id) pairs.
+

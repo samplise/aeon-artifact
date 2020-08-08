@@ -1,0 +1,564 @@
+#include "marray.h"
+#include "m_map.h"
+#include "RandomUtil.h"
+#include "mace-macros.h"
+
+service TagItemShareAppServer;
+
+provides Null;
+
+ 
+services {
+  Transport t;
+}
+
+constants {
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+  
+  uint16_t ROOM_SIZE = 100;
+}
+ 
+constructor_parameters {
+  uint32_t N_BUILDINGS = 1;
+  uint32_t N_ROOMS_PER_BUILDING = 10;
+  uint32_t N_ITEMS_PER_ROOM = 10;
+  uint32_t N_ITEMS_PER_PLAYER = 2;
+
+  uint16_t MOVE_AROUND_BUILDING = 1;
+  uint16_t DETAILED_FLAG = 0;
+
+  uint32_t GEN_IMAGE_TIME_PERIOD = 0;
+
+  uint16_t TO_SHARE_ITEM = 1;
+}
+
+typedefs {
+  typedef mace::map<Coordinate, int> portalMap; 
+}
+
+auto_types {
+  Coordinate __attribute((comparable(equals=default; lessthan=default))) {
+    int16_t x;
+    int16_t y;
+  }
+
+  PlayerInfo __attribute((comparable(equals=default; lessthan=default))) {
+    Coordinate coord;
+    uint16_t playerDirection;
+  }
+}
+
+#minclude "TagItemShareAppMessages.mi"
+
+state_variables {
+  context World {
+    mace::vector<uint32_t> buildingIds;
+    uint32_t nextBuildingIter;
+  }
+
+  context Building <uint32_t bId> {
+  	uint32_t buildingId;
+    mace::vector<uint32_t> roomIds;
+    uint32_t nextRoomIter;
+  }
+    
+  context Room <uint32_t rId> {
+		uint32_t buildingId;
+    uint32_t roomId;
+		mace::set<uint32_t> playersInRoom;
+    mace::vector<uint32_t> itemIds;
+		mace::array<mace::array<int, ROOM_SIZE>, ROOM_SIZE> roomMap;
+  }
+
+  context Item<uint32_t iId> {
+    uint32_t itemId;
+    uint32_t roomId;
+    uint32_t quantity;
+  }
+  
+  context Player <uint32_t pId> {
+  	uint32_t playerId;
+    
+    uint32_t curBuilding;
+    uint32_t curRoom;
+    Coordinate coord;
+    
+    uint16_t playerDirection;
+    uint16_t directChangeCount;
+
+    mace::set<uint32_t> itemIds;
+  }
+}
+
+transitions {
+  downcall maceInit() {
+    async_worldInit();
+  }
+
+  async [World] worldInit() [ locking=ownership ] {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "Initilaize world!" << Log::endl;
+    
+    nextBuildingIter = 0;
+    // Initialize the building entrance
+    for (uint32_t i = 0; i < N_BUILDINGS; i++) {
+      uint32_t buildingId = createNewContext("Building");
+      mace::string buildingCtxName = generateContextName("Building", buildingId);
+      createNewOwnership("World", buildingCtxName);
+      
+      buildingIds.push_back(buildingId);      
+    }
+
+    for( uint32_t i=0; i<buildingIds.size(); i++ ){
+      async_initBuilding( buildingIds[i] );
+    }
+  }
+  
+  // Initial a single building
+  async [Building<nBuilding>] initBuilding (uint32_t nBuilding) [ locking=ownership ] {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "Initialize Building " << nBuilding << Log::endl;
+    ASSERT(nBuilding >= 1);
+    buildingId = nBuilding; 
+    nextRoomIter = 0;
+    
+    mace::string buildingCtxName = generateContextName("Building", buildingId); 
+    for (uint32_t rCount = 0; rCount < N_ROOMS_PER_BUILDING; rCount++) {
+      uint32_t roomId = createNewContext("Room");
+      mace::string roomCtxName = generateContextName("Room", roomId);
+      createNewOwnership(buildingCtxName, roomCtxName);
+      roomIds.push_back(roomId);
+    }
+
+    for( uint32_t i=0; i<roomIds.size(); i++ ){
+      async_initRoom(roomIds[i], nBuilding);
+    }
+  }
+
+  // Initial a single room
+  async [Room<nRoom>] initRoom(uint32_t nRoom, uint32_t nBuilding) [ locking=ownership ] {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "Initialize Building["<< nBuilding <<"]room["<< nRoom <<"]!" << Log::endl;
+    ASSERT(nBuilding > 0 && nRoom > 0);
+    
+    for (uint32_t i = 0; i < ROOM_SIZE; i++) {
+      for (uint32_t j = 0; j < ROOM_SIZE; j++) {
+        roomMap[i][j] = -1;
+      }
+    }
+    roomId = nRoom;
+    buildingId = nBuilding;
+
+    mace::string roomCtxName = generateContextName("Room", roomId);
+    for (uint32_t i = 0; i < N_ITEMS_PER_ROOM; i++) {
+      uint32_t itemId = createNewContext("Item");
+      mace::string itemCtxName = generateContextName("Item", itemId);
+      createNewOwnership(roomCtxName, itemCtxName);
+      itemIds.push_back(itemId);
+      async_initItem(itemId, nRoom);
+    }
+  }
+
+  async [Item<nItem>] initItem(const uint32_t& nItem, uint32_t nRoom) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "Initialize Room["<< nRoom <<"]Item["<< nItem <<"]!" << Log::endl;
+    
+    itemId = nItem;
+    roomId = nRoom;
+    quantity = 0;
+  }
+
+  //Register new player for clients
+  upcall [World] deliver(const MaceKey& src, const MaceKey& dest, const PlayerInitRequest& msg) {
+    async_initPlayerInWorld( msg.clientId, src );
+  }
+
+  async [World] initPlayerInWorld( const uint32_t clientId, const  MaceKey& src )  [ locking=ownership ] {
+    ADD_SELECTORS("TagItemShareAppServer");
+
+    uint32_t newPlayerId = createNewContext("Player");
+    maceout << "Assign player("<< newPlayerId <<") to client("<< clientId<<") from " << src << Log::endl;
+    
+    uint32_t nBuilding = buildingIds[ nextBuildingIter ];
+    nextBuildingIter = (nextBuildingIter+1) % buildingIds.size();
+    broadcast_initPlayerInBuilding( nBuilding, newPlayerId, clientId, src );
+  }
+
+  broadcast [Building<nBuilding>] initPlayerInBuilding( const uint32_t nBuilding, const uint32_t nPlayer, const uint32_t clientId, 
+      const  MaceKey& src ) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "To initialze Player("<< nPlayer<<") in Building["<< buildingId <<"]!" << Log::endl;
+
+    //uint32_t nRoomIter = RandomUtil::randInt() % roomIds.size();
+    uint32_t nRoomIter = nextRoomIter;
+    nextRoomIter = (nextRoomIter+1) % roomIds.size();
+
+    uint32_t nRoom = roomIds[nRoomIter];
+    broadcast_initPlayerInRoom( nRoom, nBuilding, nPlayer, clientId, src);
+  }
+
+  broadcast [Room<nRoom>] initPlayerInRoom( const uint32_t nRoom, const uint32_t nBuilding, const uint32_t nPlayer, 
+      const uint32_t clientId, const MaceKey& src) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "To initialze Player("<< nPlayer<<") in Building["<< nBuilding <<"]Room["<< nRoom <<"]!" << Log::endl;
+
+    mace::set<uint32_t> nItems;
+
+    for( uint32_t i=0; i<N_ITEMS_PER_PLAYER; i++ ){
+      while(true) {
+        uint32_t nItemIter = RandomUtil::randInt() % itemIds.size();
+        uint32_t nItem = itemIds[nItemIter];
+        if( nItems.count(nItem) == 0 ){
+          nItems.insert(nItem);
+          lockItem(nItem, nPlayer);
+          break;
+        }
+      }
+    }
+    
+    Coordinate cd;
+    while( true ){
+      cd.x = RandomUtil::randInt(ROOM_SIZE);
+      cd.y = RandomUtil::randInt(ROOM_SIZE);
+
+      if( cd.x == 0 && cd.y == 0 ){
+        continue;
+      }
+
+      if( roomMap[cd.x][cd.y] >= 0 ){
+        continue;
+      }
+
+      roomMap[cd.x][cd.y] = nPlayer;
+      break;
+    }
+
+    mace::string roomCtxName = generateContextName("Room", roomId);
+    mace::string playerCtxName = generateContextName("Player", nPlayer);
+    createNewOwnership( roomCtxName, playerCtxName );
+
+    initPlayer( nPlayer, nRoom, nBuilding, cd, nItems );
+    playersInRoom.insert(nPlayer);
+    downcall_route( src, PlayerInitReply(clientId, nPlayer, nRoom, nBuilding) );
+  }
+
+  upcall [Room<msg.roomId>] deliver(const MaceKey& src, const MaceKey& dest, const MoveRequest& msg) {
+    ADD_SELECTORS("TagAppItemShareServer");
+    ASSERT( playersInRoom.count(msg.playerId) > 0 );
+
+    PlayerInfo playerInfo = getPlayerInfo( msg.playerId );
+    
+    Coordinate newCoord;
+    newCoord.x = playerInfo.coord.x;
+    newCoord.y = playerInfo.coord.y;
+    
+    switch (playerInfo.playerDirection) {
+      case DIRECTION_UP:
+        newCoord.y++;
+        break;
+      case DIRECTION_DOWN:
+        newCoord.y--;
+        break;
+      case DIRECTION_LEFT:
+        newCoord.x--;
+        break;
+      case DIRECTION_RIGHT:
+        newCoord.x++;
+        break;
+      default:
+        ABORT("Player direction invalid!");
+    }
+
+    if( newCoord.x<0 || newCoord.x >= ROOM_SIZE || newCoord.y<0 || newCoord.y>=ROOM_SIZE || roomMap[newCoord.x][newCoord.y]!=-1 ) {
+      uint16_t new_direction = playerInfo.playerDirection + 1;
+      if( new_direction>4 ) new_direction = 1;
+      maceout << "Change Player("<< msg.playerId <<")'s direction to " << new_direction << Log::endl;
+      broadcast_updatePlayerInfo( msg.playerId, buildingId, roomId, playerInfo.coord, new_direction );
+      downcall_route( src, RequestReply(msg.clientId, buildingId, roomId, 0) );
+    } else {
+      roomMap[newCoord.x][newCoord.y] = msg.playerId;
+      roomMap[playerInfo.coord.x][playerInfo.coord.y] = -1;
+
+      if( newCoord.x==0 && newCoord.y == 0 && MOVE_AROUND_BUILDING == 1 ) {
+        async_movePlayerAroundBuilding(buildingId, roomId, msg.playerId, msg.clientId, src);
+      } else {
+        broadcast_updatePlayerInfo( msg.playerId, buildingId, roomId, newCoord, playerInfo.playerDirection );
+        downcall_route( src, RequestReply(msg.clientId, buildingId, roomId, 0) );
+      }
+    }
+  }
+
+  broadcast [Player<nPlayer>] updatePlayerInfo( const uint32_t nPlayer, const uint32_t nBuilding, const uint32_t nRoom, 
+      const Coordinate& newCoord, const uint16_t new_direction ) {
+    curBuilding = nBuilding;
+    curRoom = nRoom;
+    coord.x = newCoord.x;
+    coord.y = newCoord.y;
+    playerDirection = new_direction;
+  }
+
+  async [Building<nBuilding>] movePlayerAroundBuilding( const uint32_t nBuilding, const uint32_t nRoom, const uint32_t nPlayer, 
+      const uint32_t clientId, const MaceKey& src) [ locking=ownership ] {
+    ADD_SELECTORS("TagAppItemShareServer");
+    movePlayerFromRoom(nRoom, nPlayer);
+
+    uint32_t new_nRoom = nRoom;
+    while( new_nRoom == nRoom ){
+      uint32_t nRoomIter = RandomUtil::randInt() % roomIds.size();
+      new_nRoom = roomIds[nRoomIter];
+    }
+
+    syncMovePlayerToRoom( new_nRoom, buildingId, nPlayer);
+    downcall_route( src, RequestReply(clientId, buildingId, new_nRoom, 0) );
+  }
+
+  broadcast [Room<nRoom>] movePlayerToRoom( const uint32_t nRoom, const uint32_t nBuilding, const uint32_t nPlayer) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "Move Player("<< nPlayer<<") to Building["<< nBuilding <<"]Room["<< nRoom <<"]!" << Log::endl;
+
+    mace::set<uint32_t> nItems;
+
+    for( uint32_t i=0; i<N_ITEMS_PER_PLAYER; i++ ){
+      while(true) {
+        uint32_t nItemIter = RandomUtil::randInt() % itemIds.size();
+        uint32_t nItem = itemIds[nItemIter];
+        if( nItems.count(nItem) == 0 ){
+          nItems.insert(nItem);
+          lockItem(nItem, nPlayer);
+          break;
+        }
+      }
+    }
+
+    Coordinate cd;
+    while( true ){
+      cd.x = RandomUtil::randInt(ROOM_SIZE);
+      cd.y = RandomUtil::randInt(ROOM_SIZE);
+
+      if( cd.x == 0 && cd.y == 0 ){
+        continue;
+      }
+
+      if( roomMap[cd.x][cd.y] >= 0 ){
+        continue;
+      }
+
+      roomMap[cd.x][cd.y] = nPlayer;
+      break;
+    }
+
+    mace::string roomCtxName = generateContextName("Room", roomId);
+    mace::string playerCtxName = generateContextName("Player", nPlayer);
+    createNewOwnership( roomCtxName, playerCtxName );
+
+    initPlayer( nPlayer, nRoom, nBuilding, cd, nItems );
+    playersInRoom.insert(nPlayer);
+  }
+
+  upcall [Player<msg.playerId>] deliver(const MaceKey& src, const MaceKey& dest, const ItemAccessRequest& msg ) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    
+    for( mace::set<uint32_t>::iterator iter=itemIds.begin(); iter!=itemIds.end(); iter++ ){
+      broadcast_accessItem( *iter );
+    }
+    downcall_route( src, RequestReply(msg.clientId, 0, 0, msg.reqId) );
+  }
+
+  broadcast [Item<nItem>] accessItem( const uint32_t nItem ){
+    quantity ++;
+  }
+
+  upcall [Room<msg.roomId>] deliver( const MaceKey& src, const MaceKey& dest, const ItemChangeRequest& msg ) {
+    async_changeItemInRoom( msg.roomId, msg.playerId, msg.clientId, msg.reqId, src );  
+  }
+
+  async [Room<nRoom>] changeItemInRoom( const uint32_t& nRoom, const uint32_t& nPlayer, const uint32_t& clientId, const uint64_t& reqId,
+      const MaceKey& src ) [ locking=ownership ] {
+    mace::set<uint32_t> p_itemIds = getPlayerItems( nPlayer );
+    uint32_t new_itemId = 0;
+
+    uint32_t endIter = RandomUtil::randInt() % itemIds.size();
+    uint32_t startIter = (endIter + 1) % itemIds.size();
+    uint32_t i = startIter;
+    while( i != endIter ){
+      if( p_itemIds.count(itemIds[i]) == 0 ) {
+        new_itemId = itemIds[i];
+        break; 
+      }
+      i = (i + 1) % itemIds.size();
+    }
+
+    if( new_itemId > 0 ) {
+      lockItem( new_itemId, nPlayer );
+      changeItem( nPlayer, new_itemId );
+    }
+
+    downcall_route( src, RequestReply(clientId, 0, 0, reqId) );  
+  }
+
+  upcall [Building<msg.buildingId>] deliver( const MaceKey& src, const MaceKey& dest, const MoveInBuildingRequest& msg ) {
+    async_movePlayerAroundBuilding( msg.buildingId, msg.roomId, msg.playerId, msg.clientId, src);
+  }
+  
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    std::ostringstream oss;
+    oss << src <<"["<<msg.clientId<<"]";
+
+    MaceAddr commAddr = getExternalCommContextAddr( src, oss.str() );
+    maceout << "commAddr=" << commAddr << Log::endl;
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(msg.clientId, commKey) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< msg.clientId <<") from " << src << Log::endl;
+  }
+}
+
+routines {
+  // initialize player
+  [Player<nPlayer>] void initPlayer( const uint32_t nPlayer, const uint32_t nRoom, const uint32_t nBuilding, const Coordinate& cd, 
+      const mace::set<uint32_t>& nItems ) {
+    
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "To initialize Player("<< nPlayer <<") is in Building["<< nBuilding <<"]Room["<< nRoom <<"] with coord="<< cd <<"; items="<< nItems << Log::endl;
+    ASSERT(nPlayer > 0);
+    
+    playerId = nPlayer;
+    curBuilding = nBuilding;
+    curRoom = nRoom;
+           
+    coord.x = cd.x;
+    coord.y = cd.y;
+    playerDirection = RandomUtil::randInt(4)+1;
+    maceout << "Player("<< nPlayer <<") init direction=" << playerDirection << Log::endl;
+    itemIds = nItems;
+
+    
+
+    mace::string playerCtxName = generateContextName("Player", playerId);
+    for (mace::set<uint32_t>::iterator iter=itemIds.begin(); iter!=itemIds.end(); iter++ ) {
+      mace::string itemCtxName = generateContextName("Item", *iter);
+      createNewOwnership(playerCtxName, itemCtxName);
+    }
+  }
+
+  [Player<nPlayer>] mace::set<uint32_t> getItems( const uint32_t& nPlayer) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    return itemIds;
+  }
+
+  [Item<nItem>] void lockItem( const uint32_t nItem, const uint32_t nPlayer ){
+    ADD_SELECTORS("TagItemShareAppServer");
+    // maceout << "Lock item("<< nItem <<") by Player("<< nPlayer <<")!" << Log::endl; 
+  }
+
+  // move player
+  [Player<nPlayer>] PlayerInfo getPlayerInfo( const uint32_t nPlayer ) {
+    PlayerInfo info;
+    info.coord.x = coord.x;
+    info.coord.y = coord.y;
+    info.playerDirection = playerDirection;
+
+    return info;
+  }
+
+  [Player<nPlayer>] void preparePlayerMovement( const uint32_t nPlayer) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    coord.x = 0;
+    coord.y = 0;
+
+    mace::string playerCtxName = generateContextName("Player", playerId);
+    for( mace::set<uint32_t>::iterator iter=itemIds.begin(); iter!=itemIds.end(); iter++ ) {
+      const uint32_t nItem = *iter;
+      mace::string itemCtxName = generateContextName("Item", nItem);
+      removeOwnership(playerCtxName, itemCtxName);
+    }
+    itemIds.clear();
+  }
+
+  [Player<nPlayer>] mace::set<uint32_t> getPlayerItems( const uint32_t& nPlayer ) {
+    return itemIds;
+  }
+
+  [Player<nPlayer>] void changeItem( const uint32_t& nPlayer, const uint32_t& new_itemId ) {
+    mace::string playerCtxName = generateContextName("Player", playerId);
+    if( itemIds.size() > 0 ) {
+      mace::set<uint32_t>::iterator iter=itemIds.begin();
+      const uint32_t nItem = *iter;
+      lockItem(nItem, nPlayer);
+      mace::string itemCtxName = generateContextName("Item", nItem);
+      removeOwnership(playerCtxName, itemCtxName);
+      itemIds.erase( nItem );
+    }
+
+    if( new_itemId > 0 && itemIds.count(new_itemId) == 0 ) {
+      itemIds.insert(new_itemId);
+      mace::string itemCtxName = generateContextName("Item", new_itemId);
+      createNewOwnership(playerCtxName, itemCtxName);
+    }
+  }
+
+  [Room<nRoom>] void movePlayerFromRoom(const uint32_t nRoom, const uint32_t nPlayer) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    ASSERT( playersInRoom.count(nPlayer) > 0 );
+    maceout << "Move Player("<< nPlayer<<") from Building["<< buildingId <<"]Room["<< nRoom <<"]!" << Log::endl;
+    preparePlayerMovement( nPlayer );
+
+    playersInRoom.erase(nPlayer);
+
+    mace::string roomCtxName = generateContextName("Room", nRoom);
+    mace::string playerCtxName = generateContextName("Player", nPlayer);
+    removeOwnership( roomCtxName, playerCtxName );
+  }
+
+  [Room<nRoom>] void syncMovePlayerToRoom( const uint32_t nRoom, const uint32_t nBuilding, const uint32_t nPlayer) {
+    ADD_SELECTORS("TagItemShareAppServer");
+    maceout << "Move Player("<< nPlayer<<") to Building["<< nBuilding <<"]Room["<< nRoom <<"]!" << Log::endl;
+
+    mace::set<uint32_t> nItems;
+
+    for( uint32_t i=0; i<N_ITEMS_PER_PLAYER; i++ ){
+      while(true) {
+        uint32_t nItemIter = RandomUtil::randInt() % itemIds.size();
+        uint32_t nItem = itemIds[nItemIter];
+        if( nItems.count(nItem) == 0 ){
+          nItems.insert(nItem);
+          lockItem(nItem, nPlayer);
+          break;
+        }
+      }
+    }
+
+    Coordinate cd;
+    while( true ){
+      cd.x = RandomUtil::randInt(ROOM_SIZE);
+      cd.y = RandomUtil::randInt(ROOM_SIZE);
+
+      if( cd.x == 0 && cd.y == 0 ){
+        continue;
+      }
+
+      if( roomMap[cd.x][cd.y] >= 0 ){
+        continue;
+      }
+
+      roomMap[cd.x][cd.y] = nPlayer;
+      break;
+    }
+
+    mace::string roomCtxName = generateContextName("Room", roomId);
+    mace::string playerCtxName = generateContextName("Player", nPlayer);
+    createNewOwnership( roomCtxName, playerCtxName );
+
+    initPlayer( nPlayer, nRoom, nBuilding, cd, nItems );
+    playersInRoom.insert(nPlayer);
+  }
+
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}

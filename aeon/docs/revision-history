@@ -1,0 +1,7 @@
+# in the form: rev-number date author-initials remarks
+# separate entries by a blank line
+
+0.8.1 2006-10-20 jwa updates for new syntax
+
+0.8 2005-05-19 jwa preliminary draft
+

@@ -1,0 +1,46 @@
+service FirstPing;
+
+provides Ping;
+
+services {
+  Transport router;
+} // services
+
+constants {
+  uint64_t PING_TIMEOUT = 2 * 1000 * 1000; // 2 seconds in micros
+} // constants
+
+messages {
+  Ping { }
+  PingReply {
+    uint64_t t;
+  }
+} // messages
+
+state_variables {
+  MaceKey target;
+  uint64_t timeSent;
+  timer sendtimer;
+} // state_variables
+
+transitions {
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Ping& msg) {
+    downcall_route(src, PingReply(curtime));
+  } // deliver Ping
+
+  upcall (src == target) deliver(const MaceKey& src, const MaceKey& dest, const PingReply& msg) {
+    sendtimer.cancel();
+    upcall_hostResponseReceived(src, timeSent, curtime, msg.t);
+  } // deliver PingReply
+
+  downcall monitor(const MaceKey& host) {
+    timeSent = curtime;
+    target = host;
+    downcall_route(target, Ping());
+    sendtimer.schedule(PING_TIMEOUT);
+  } // monitor
+
+  scheduler sendtimer() {
+    upcall_hostResponseMissed(target, timeSent);
+  } // expire timer sendtimer
+} // transitions

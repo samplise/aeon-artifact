@@ -1,0 +1,37 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Carp;
+use Getopt::Long;
+
+use File::Basename;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+
+use Mace::Compiler::XmlRpcCompiler;
+
+unless (scalar(@ARGV)) {
+    die "usage: $0 [-c classname] file [serialization class...]\n";
+}
+
+my $classname = undef;
+GetOptions("classname=s" => \$classname);
+my $file = shift(@ARGV);
+my @serial = @ARGV;
+
+open(IN, $file) or die "cannot open $file: $!\n";
+my @in = <IN>;
+close(IN);
+my $in = join("", @in);
+
+$SIG{__WARN__} = sub { confess $_[0] };
+
+my $filename = $file;
+if ($filename =~ m|.*/(.*)|) {
+    $filename = $1;
+}
+
+# $Mace::Compiler::Globals::filename = $filename;
+
+my $compiler = Mace::Compiler::XmlRpcCompiler->new();
+my $sc = $compiler->compileHeader($in, $filename, $classname, @serial);
+

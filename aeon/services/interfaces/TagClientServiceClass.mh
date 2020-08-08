@@ -1,0 +1,10 @@
+serviceclass TagClient {
+  //handlers TagClientData;
+	virtual void sendmsg(uint16_t id);	
+	virtual void checkKidNum(uint16_t id,uint16_t nBuilding, uint16_t nRoom);
+	
+	virtual void requireRoomMap(uint16_t id,uint16_t nBuilding,uint16_t nRoom);
+	virtual void movePlayer(uint16_t id,uint16_t direction);
+	virtual void changeRoom(uint16_t id,uint16_t newBuilding, uint16_t newRoom);
+
+};

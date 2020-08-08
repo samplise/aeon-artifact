@@ -1,0 +1,89 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+#use lib $ENV{HOME} . "/mace/perl5";
+
+use Getopt::Long;
+use File::Basename;
+use lib ((dirname($0) || "."), (dirname($0) || ".")."/../mace-extras/perl5");
+
+use Mace::Util qw{:all};
+use Mace::Compiler::MInclude;
+use Mace::Compiler::VariantRecDescent;
+use Carp;
+use Cwd;
+
+my @includes;
+my $nooutput;
+Getopt::Long::Configure("bundling");
+GetOptions("I=s" => \@includes, "n!", \$nooutput);
+
+unless (scalar(@ARGV)) {
+    die "usage: $0 file [-I path [-I path ...]]\n";
+}
+
+$SIG{__DIE__} = sub{ confess $_[0]; };
+$SIG{__WARN__} = sub{ confess $_[0]; die; };
+
+BEGIN {
+  @main::global_variables = qw($Werror $Wall $Wunusual $Wnounusual $Wdeprecated $Wnodeprecated $Wundefined $Wnoundefined $Wunimplemented $Wnounimplemented);
+}
+use vars @main::global_variables;
+
+use Mace::Compiler::Globals;
+push(@Mace::Compiler::Globals::INCLUDE_PATH, @includes, cwd(), dirname($0)."/../services/interfaces");
+$Mace::Compiler::Globals::NUM_WARN = 0;
+$Mace::Compiler::Globals::NUM_ERROR = 0;
+
+my $file = shift(@ARGV);
+
+# $Mace::Compiler::Globals::filename = $file;
+
+my $svname = "";
+if ($file =~ m{^(.*/)?([^.]+)\.}) {
+  $svname = $2;
+}
+else {
+  die ("invalid file name");
+}
+
+# open(IN, $file) or die "cannot open $file: $!\n";
+# my @in = <IN>;
+# close(IN);
+
+my @in;
+
+Mace::Compiler::MInclude::expandFile($file, \@in);
+
+my @linemap;
+my @filemap;
+my @offsetmap;
+
+Mace::Compiler::MInclude::getLines($file, \@in, \@linemap, \@filemap, \@offsetmap);
+
+my $in = join("", @in);
+
+$Mace::Compiler::Grammar::text = $in;
+
+my $parser = Mace::Compiler::VariantRecDescent->new();
+
+$parser->{local}{linemap} = \@linemap;
+$parser->{local}{filemap} = \@filemap;
+$parser->{local}{offsetmap} = \@offsetmap;
+
+my $variantref = $parser->VariantFile($in, 1, $svname, $nooutput);
+die("Invalid parse") if (not defined $variantref);
+my @variantlist = @{$variantref};
+
+if ($nooutput) {
+  print "@variantlist\n";
+}
+else {
+  for my $variant (@variantlist) {
+    #print "Found variant $variant\n";
+    open(OUT, ">", "$variant.mac");
+    print OUT $parser->GetVariant("", 0, $variant);
+    close(OUT);
+  }
+}

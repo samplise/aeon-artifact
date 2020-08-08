@@ -1,0 +1,1264 @@
+#!/usr/bin/perl -w
+
+# TODO:
+# begin searching from step
+# paging
+
+use strict;
+use Carp;
+use File::Basename;
+use FindBin;
+use lib "$FindBin::Bin";
+use lib ($ENV{HOME} . '/mace/perl5', $ENV{HOME}.'/lib/perl5');
+use SimulatorScriptsCommon;
+use Mace::Util qw(:all);
+use Getopt::Long;
+use POSIX qw(:sys_wait_h);
+use POSIX qw(setpgid);
+use FileHandle;
+use IPC::Open2gpid;
+use Term::ReadLine;
+use Term::ReadKey;
+use Term::ANSIColor;
+use Text::Diff;
+
+use constant PLUS_COLOR => "bold white on_green";
+use constant MINUS_COLOR => "bold white on_cyan";
+use constant NODE_COLOR => "bold green";
+use constant SELECTOR_COLOR => "bold cyan";
+use constant TRACE_COLOR => "bold blue";
+use constant DEBUG_COLOR => "bold red";
+use constant ERROR_COLOR => "bold white on_red";
+use constant WARNING_COLOR => "black on_yellow";
+use constant KEYWORD_COLOR => "bold magenta";
+use constant SEARCH_COLOR => "bold white on_magenta";
+use constant PROMPT_COLOR => "bold white";
+
+use constant SIMULATION_COMPLETE => '\[HALT\] Simulation complete';
+my $SIMULATOR_STEP_RE = '\[main\] Now on simulator step (\d+)';
+my $RANDOM_INPUT = '\[ReplayRandomUtil::randInt\] Random number requested between 0 and (\d+)';
+my $REPLAY_RANDOM_RESULT = '\[ReplayRandomUtil::randInt\] replay: returning (\d) currentPos (\d)';
+my @KEYWORDS = ('STARTING', 'ENDING', 'APP_EVENT', 'NET_EVENT', 'SCHED_EVENT');
+my $RANDOM_REPLAY = "1000000";
+my $GUSTO_TOGGLE = "1000001";
+my $PRINT_PATH = "1000002";
+my $RUN_UNTIL_LIVE = "1000003";
+my $TOGGLE_PROMPT = "1000004";
+my $PRINT_PATH_TO_STEP = "1000005";
+my $EXIT_MODELCHECKER = "1000006";
+my $MAX_GUSTO = "4294967295";
+
+
+$SIG{__WARN__} = sub { confess $_[0] };
+
+my @termSize = GetTerminalSize();
+my $termWidth = shift(@termSize);
+my $termHeight = shift(@termSize);
+
+my @lines = ();
+my %steps = ();
+my $maxstep = 0;
+my $minstep = -1;
+my %nodeSteps = ();
+
+my $excludeFilter = "";
+my $includeFilter = "";
+my $includeSelector = "";
+my $excludeSelector = "";
+
+my $configFile = "";
+my $printUsageHelp = 0;
+my $interactive = "";
+my $mcpath = $FindBin::Bin;
+my $searchPrefix = "";
+GetOptions("config=s" => \$configFile,
+	   "path=s" => \$mcpath,
+	   "interactive=s" => \$interactive,
+	   "searchprefix=s" => \$searchPrefix,
+	   "help" => \$printUsageHelp);
+
+my $file = shift(@ARGV) || "";
+if ($printUsageHelp || (!-e $file && !$interactive)) {
+    my $usage =<<EOF;
+usage: $0 [-h] [-c config] [-p path to tools] logfile | -i modelchecker-config -s search-prefix
+EOF
+    die $usage;
+}
+
+if ($configFile) {
+    Mace::Util::loadConfig($configFile,
+			   "exclude=s" => \$excludeFilter,
+			   "include=s" => \$includeFilter,
+			   "selector=s" => \$includeSelector,
+                           "exselector=s" => \$excludeSelector);
+}
+
+my $mcapp = SimulatorScriptsCommon::findSimulator();
+my $eventGraph = "$mcpath/generateEventGraph.pl";
+my $curstep = 0;
+my $search = "";
+my $whichNode = -1;
+my $properties = 0;
+my $globalSearchRegex = "";
+my $step = 0;
+
+my $rfh;
+my $wfh;
+my $mcpid;
+my $mcConfig = "";
+my $runToLive = 0;
+my $nextStepMcPid = 0;
+if ($interactive) {
+    unless (-e $mcapp) {
+	die "cannot execute $mcapp\n";
+    }
+    unless (-e $interactive) {
+	die "cannot open config file $interactive\n";
+    }
+    $mcConfig = $interactive;
+
+    $SIG{PIPE} = sub {
+	if ($nextStepMcPid) {
+	    return;
+	}
+	ReadMode("normal");
+
+# 	print "mc=$mcpid ns=$nextStepMcPid\n";
+	die "modelchecker died\n";
+    };
+    $SIG{INT} = sub { 
+	if ($runToLive) { 
+# 	    print "sending kill to $mcpid\n";
+	    kill("INT", $mcpid);
+	} 
+	elsif ($nextStepMcPid) {
+# 	    print "sending kill to $nextStepMcPid\n";
+	    kill("INT", $nextStepMcPid);
+	}
+	else { 
+	    ReadMode("normal");
+	    exit(1); 
+	}
+# 	print "ignoring int\n";
+    };
+    forkmc($searchPrefix);
+}
+else {
+    my $infile = new FileHandle();
+    $infile->open($file) or die "cannot read $file: $!\n";
+    my $s = 0;
+    readLines($infile, \$s, SIMULATION_COMPLETE, \@lines, \%steps, \$minstep, \$maxstep);
+    $infile->close();
+}
+
+if ($minstep > 0) {
+    $curstep = $minstep;
+}
+
+my $term = Term::ReadLine->new("Mace Debugger");
+my $line;
+
+ReadMode("cbreak");
+
+if ($interactive) {
+    readInteractiveLines();
+}
+
+printPrompt($curstep);
+my $rinput = "";
+while (1) {
+    my $key = ReadKey(0);
+
+    if ($interactive && ($key =~ m|\d|)) {
+	print "$key\n";
+	my $maxinput = -1;
+	if ($lines[-1] =~ m|$RANDOM_INPUT|) {
+	    $maxinput = $1;
+	}
+	else {
+	    die "could not parse max input\n";
+	}
+	ReadMode("normal");
+	my $n = $term->readline("enter choice [0 - $maxinput): ", $key);
+	ReadMode("cbreak");
+
+	if ($n !~ m|^-?\d+$| || $n < 0 || $n >= $maxinput) {
+	    print "invalid input $n: please select a number between [0 - $maxinput)\n";
+	}
+	else {
+	    print $wfh "$n\n";
+	    readInteractiveLines();
+	}
+    }
+    elsif ($interactive && $key eq 'r') {
+	print "$key\n";
+	print $wfh "$RANDOM_REPLAY\n";
+	readInteractiveLines();
+    }
+    elsif ($interactive && $key eq 'R') {
+	print "$key\n";
+	print $wfh "$RUN_UNTIL_LIVE\n";
+        $interactive = 0;
+        $runToLive = 1;
+	readInteractiveLines();
+        $runToLive = 0;
+        $interactive = 1;
+    }
+    elsif ($interactive && $key eq 'P') {
+	print "$key\n";
+	ReadMode("normal");
+	my $choice = $term->readline("(select option: p - complete path | " .
+				     "c - path to current step | g - event-graph | " .
+				     "l - output log | q - cancel) ");
+	$choice = trim($choice);
+	if (length($choice) == 1 && $choice =~ /p|c|g|l/) {
+	    my $f = $term->readline("enter filename: ");
+	    ReadMode("cbreak");
+	    $f = trim($f);
+	    if ($choice eq 'p') {
+		print $wfh "$PRINT_PATH $f\n";
+		readInteractiveLines();
+	    }
+	    elsif ($choice eq 'c') {
+		print $wfh "$PRINT_PATH_TO_STEP $curstep $f\n";
+		readInteractiveLines();
+	    }
+	    elsif ($choice eq 'g') {
+		generateEventGraph($f);
+	    }
+	    elsif ($choice eq 'l') {
+		my $fh = new FileHandle();
+		$fh->open(">$f") or die "cannot open $f: $!\n";
+		for my $el (@lines) {
+		    print $fh $el;
+		}
+		$fh->close();
+	    }
+	}
+	else {
+	    ReadMode("cbreak");
+	}
+    }
+    elsif ($interactive && $key eq 'B') {
+	print "$key\n";
+	my $tmpf = `mktemp .branchpath-XXXXXXX`;
+	chomp($tmpf);
+	print $wfh "$PRINT_PATH_TO_STEP $curstep $tmpf\n";
+	exitmc();
+	forkmc($tmpf);
+	unlink($tmpf);
+	readInteractiveLines();
+    }
+    elsif ($interactive && $key eq 'G') {
+	print "$key\n";
+	print $wfh "$GUSTO_TOGGLE\n";
+	readInteractiveLines();
+    }
+    elsif ($interactive && $key eq 'a') {
+	print "$key\n";
+	my $tmpf = `mktemp .prefixpath-XXXXXXX`;
+	chomp($tmpf);
+	print $wfh "$PRINT_PATH $tmpf\n";
+	my $mcl = <$rfh>;
+	if ($mcl !~ m|Saved sequence as|) {
+	    die "unexpected input: $mcl\n";
+	}
+	my $showstep = $step - 1;
+	my $cmd = ("$mcapp $mcConfig -TRACE_ALL 1 -USE_RANDOM_WALKS 0 -SEARCH_DEPTH 1 " .
+		   "-RANDOM_UTIL_PREFIX_FILE $tmpf -USE_STEP_SEARCH 1 " .
+		   "-USE_STATE_HASHES 0 -USE_BEST_FIRST 0 -search_print_mask 0 " .
+                   "-MAX_SEARCH_DEPTH 1 -START_SEARCH_WITHOUT_GUSTO 0 -TEST_PROPERTIES_EARLY 0 ".
+                   "-LOGGING_START_STEP $showstep");
+
+	my $mcr;
+	my $mcw;
+	$nextStepMcPid = open2gpid($mcr, $mcw, $cmd) or die "cannot open $cmd: $!\n";
+	
+	
+	my $gr;
+	my $gw;
+	my $genpid = open2gpid($gr, $gw, "$eventGraph -s $showstep -w $termWidth")
+	    or die "cannot open $eventGraph: $!\n";
+
+	while (my $l = <$mcr>) {
+	    print $gw $l;
+	}
+
+	waitpid($nextStepMcPid, 0);
+
+	$gw->close();
+
+	my @events = ();
+	my $e = "";
+	while (my $l = <$gr>) {
+	    if ($l =~ /----PATH----/) {
+		$l = <$gr>;
+		chomp($l);
+		push(@events, [substr($e, 2), $l]);
+		$e = "";
+	    }
+	    else {
+		$e .= "   $l";
+	    }
+	}
+
+	waitpid($genpid, 0);
+	print "\r";
+	my $spaces = ' ' x $termWidth;
+	print "$spaces\r";
+
+        $nextStepMcPid = 0;
+
+	my @items = ();
+	my $li = -1;
+	my $lookingForMax = 1;
+	while (1) {
+	    my $l = $lines[$li];
+	    if ($l =~ m|Item (\d+)\[(\d+),(\d+)\)|) {
+		my $itemNo = $1;
+		my $itemStart = $2;
+		my $itemEnd = $3;
+		unshift(@items, [$itemStart, $itemEnd]);
+		if ($itemNo == 0) {
+		    last;
+		}
+	    }
+	    elsif ($l =~ m|\[SimRandomUtil::randInt\] max \d+ currentPos|) {
+		if ($lookingForMax) {
+		    $lookingForMax = 0;
+		}
+		else {
+		    last;
+		}
+	    }
+	    $li--;
+	}
+
+	my $maxinput = 0;
+	if ($lines[-1] =~ m|$RANDOM_INPUT|) {
+	    $maxinput = $1;
+	}
+	else {
+	    die "could not parse max input\n";
+	}
+
+	if (($maxinput == scalar(@items)) || (scalar(@items) == 0)) {
+	    for my $a (@events) {
+		my ($e, $i) = @$a;
+		print "$i)";
+		print $e;
+	    }
+	}
+	else {
+	    for my $iref (@items) {
+		my ($is, $ie) = @$iref;
+		if (scalar(@events)) {
+		    print "$is-$ie)";
+		    my $e = shift(@events);
+		    print $$e[0];
+		    for (1..($ie-$is-1)) {
+			shift(@events);
+		    }
+		}
+		else {
+		    last;
+		}
+	    }
+	}
+
+	unlink($tmpf) or die "cannot remove $tmpf: $!";
+	readInteractiveLines();
+    }
+    elsif ($key eq 'g') {
+	print "$key\n";
+	generateEventGraph();
+    }
+    elsif ($key eq 'j') {
+	print "$key\n";
+	ReadMode("normal");
+	my $n = $term->readline("enter step ($minstep - $maxstep): ");
+	ReadMode("cbreak");
+
+	if ($n !~ m|^-?\d+$| || $n < $minstep || $n > $maxstep) {
+	    print "invalid step $n: please select a number between $minstep - $maxstep\n";
+	}
+	else {
+	    $curstep = $n;
+	}
+    }
+    elsif ($key eq 'd') {
+	print "$key\n";
+	ReadMode("normal");
+	my $s = $term->readline("enter steps (0 - $maxstep): ");
+	ReadMode("cbreak");
+
+	if ($s =~ m|^\s*(\d+)\s+(\d+)\s*$|) {
+	    my $s1 = $1;
+	    my $s2 = $2;
+	    if ($s1 > $maxstep || $s2 > $maxstep) {
+		print "invalid steps $s: please select two numbers between 0 - $maxstep\n";
+	    }
+	    else {
+		diffStates($s1, $s2);
+	    }
+	}
+	else {
+	    print "invalid steps $s: please select two numbers between 0 - $maxstep\n";
+	}
+	
+    }
+    elsif (!$interactive && $key eq 'm') {
+	print "$key\n";
+	ReadMode("normal");
+	my $f = $term->readline("enter log filename: ");
+	ReadMode("cbreak");
+	$f = trim($f);
+	if (-e $f) {
+	    my @l = ();
+	    my %s = ();
+	    my $mins = 0;
+	    my $maxs = 0;
+	    loadFile($f, \@l, \%s, \$mins, \$maxs);
+	    my $s1 = getStateString($steps{$curstep}, $steps{$curstep + 1} - 1, \@lines);
+	    my $s2 = getStateString($s{$curstep}, $s{$curstep + 1} - 1, \@l);
+# 	    print "state string for $file\n$s1\n";
+# 	    print "**************************************\n";
+# 	    print "state string for $f\n$s2\n";
+	    diffStateStrings($s1, $s2);
+	}
+	else {
+	    print "file $f does not exist\n";
+	}
+    }
+    elsif ($key eq 'w') {
+	print "$key\n";
+	ReadMode("normal");
+	my $maxNode = scalar(keys(%nodeSteps)) - 1;
+	my $n = $term->readline("enter node (-1 - $maxNode): ");
+	ReadMode("cbreak");
+
+	if ($n !~ m|^-?\d+$| || $n < -1 || $n > $maxNode) {
+	    print "invalid step $n: please select a number between -1 - $maxNode\n";
+	}
+	else {
+	    $whichNode = $n;
+	    if ($n != -1) {
+		$curstep = ${$nodeSteps{$whichNode}}[0];
+	    }
+	}
+    }
+    elsif ($key eq 's') {
+	print "$key\n";
+	ReadMode("normal");
+	$search = $term->readline("enter search regex: ", $search);
+	ReadMode("cbreak");
+    }
+    elsif ($key eq 'i') {
+	print "$key\n";
+	ReadMode("normal");
+	$includeFilter = $term->readline("enter include filter regex: ", $includeFilter);
+	ReadMode("cbreak");
+    }
+    elsif ($key eq 'e') {
+	print "$key\n";
+	ReadMode("normal");
+	$excludeFilter = $term->readline("enter exclude filter regex: ", $excludeFilter);
+	ReadMode("cbreak");
+    }
+    elsif ($key eq 'I') {
+	print "$key\n";
+	ReadMode("normal");
+	$includeSelector = $term->readline("enter include selector filter regex: ",
+					   $includeSelector);
+	ReadMode("cbreak");
+    }
+    elsif ($key eq 'E') {
+	print "$key\n";
+	ReadMode("normal");
+	$excludeSelector = $term->readline("enter exclude selector filter regex: ",
+					   $excludeSelector);
+	ReadMode("cbreak");
+    }
+    elsif (ord($key) == 27) {
+	# ESC
+	$key = ReadKey(0);
+	if ($key ne '[') {
+	    print "unrecognized command $key\n";
+	}
+	else {
+	    $key = ReadKey(0);
+	    if ($key eq 'F') {
+		print "END\n";
+		$curstep = $maxstep;
+	    }
+	    elsif ($key eq 'H') {
+		print "HOME\n";
+		$curstep = 0;
+	    }
+	    else {
+		print "unrecognized command $key\n";
+	    }
+	}
+    }
+    elsif ($key eq 'n') {
+	if ($whichNode != -1) {
+	    my $i = 0;
+	    my $r = $nodeSteps{$whichNode};
+	    while ($i < scalar(@$r) - 1 && $$r[$i] < $curstep) {
+		$i++;
+	    }
+	    if ($i < scalar(@$r) - 1) {
+		$i++;
+	    }
+	    $curstep = $$r[$i];
+	}
+	else {
+	    $curstep++;
+	    if ($curstep > $maxstep) {
+		$curstep = $maxstep;
+	    }
+	}
+    }
+    elsif ($key eq 'p') {
+	if ($whichNode != -1) {
+	    my $r = $nodeSteps{$whichNode};
+	    my $i = scalar(@$r) - 1;
+	    while ($i > 0 && $$r[$i] > $curstep) {
+		$i--;
+	    }
+	    if ($i > 0) {
+		$i--;
+	    }
+	    $curstep = $$r[$i];
+	}
+	else {
+	    $curstep--;
+	    if ($curstep < $minstep) {
+		$curstep = $minstep;
+	    }
+	}
+    }
+    elsif ($key eq 'P') {
+	print "$key\n";
+	listStep();
+    }
+    elsif ($key eq 'l') {
+	print "$key\n";
+	listStep(program => $ENV{PAGER} || "less -R");
+    }
+    elsif ($key eq 'L') {
+	print "$key\n";
+	listStep(program => dirname($0)."/state-dump.sh");
+    }
+    elsif ($key eq 'h') {
+	print "$key\n";
+	printHelp();
+    }
+    elsif ($key eq 't') {
+	print "$key\n";
+	$properties = !$properties;
+    }
+    elsif ($key eq 'q') {
+	print "$key\n";
+	exitmc();
+	ReadMode("normal");
+	exit(0);
+    }
+    elsif ($key eq 'c') {
+	system("clear");
+    }
+    elsif ($key eq 'x') {
+	print "$key\n";
+	ReadMode("normal");
+	$globalSearchRegex = $term->readline("enter global search regex: ", $globalSearchRegex);
+	ReadMode("cbreak");
+        if(!isValidRegex($globalSearchRegex)) {
+            print "Regex '$globalSearchRegex' is not a valid regular expression\n";
+#            $globalSearchRegex = ""; 
+        } else {
+            searchSteps();
+        }
+    }
+    else {
+	if ($key !~ m|\s|) {
+	    print "$key\n";
+	    print "unrecognized command: $key";
+	    print "\npress h for help\n";
+	}
+    }
+
+    printPrompt();
+}
+
+ReadMode("normal");
+
+sub printPrompt {
+    print "\r";
+    print colored("(mdb $curstep) ", PROMPT_COLOR);
+}
+
+sub forkmc {
+    my $prefix = shift || "";
+
+    $step = 0;
+    @lines = ();
+    %steps = ();
+    $minstep = -1;
+    $maxstep = 0;
+    %nodeSteps = ();
+
+    my $mcopts = "-RUN_DIVERGENCE_MONITOR 0 -TRACE_ALL 1 -RANDOM_REPLAY_FILE -";
+    $mcpid = open2gpid($rfh, $wfh, "$mcapp $mcConfig $mcopts")
+	or die "cannot open $mcapp: $!";
+    
+    if ($prefix) {
+	my @i = readFile($prefix);
+	while (scalar(@i) > 1) {
+	    my $l = shift(@i);
+	    print $wfh $l;
+	}
+	$interactive = 0;
+	print $wfh "$TOGGLE_PROMPT\n";
+	readInteractiveLines();
+	$interactive = 1;
+	my @tmp = split(/ /, shift(@i));
+	my $l = pop(@tmp);
+	print $wfh $l;
+    }
+    else {
+	print $wfh "$MAX_GUSTO\n";
+	print $wfh "$TOGGLE_PROMPT\n";
+    }
+} # forkmc
+
+sub exitmc {
+    if ($interactive) {
+	print $wfh "$EXIT_MODELCHECKER\n";
+	$wfh->close();
+	$rfh->close();
+	my $pid = waitpid($mcpid, 0);
+    }
+} # exitmc
+
+sub generateEventGraph {
+    my $output = shift || "";
+    if ($output) {
+	$output = " -u >$output";
+    }
+    else {
+        $output = " | less -r";
+    }
+    my $fh = new FileHandle();
+    $fh->open("| $eventGraph $output")
+	or die "cannot open $eventGraph: $!\n";
+    for my $el (@lines) {
+	print $fh $el;
+    }
+    $fh->close();
+} # generateEventGraph
+
+sub searchSteps {
+    my $body = "";
+    my $sel = "";
+    my $node = "";
+    my $timestamp = "";
+    my $out = "";
+    my $lineCount=0;
+    my $stepCount=-1;
+    for my $l (@lines) {
+# 	print "trying to match $l\n";
+# 	if ($l =~ m/(\S+) (\d+\.\d+|\[.*?\]) \d{2} \[(.*)\] (.*)/s) {
+	if ($l =~ m/^([^\[\] \t]+) (.*?)\d{2} \[(.*)\] (.*)/s ||
+	    $l =~ m/^([^\[\] \t]+) (.*?)\[(.*)\] (.*)/s) {
+	    if ($body) {
+#		if (!$properties && ($l =~ m|Testing safety properties|)) {
+#		    last;
+#		}
+                if ($body !~ m/$globalSearchRegex/si) {
+                  $body = "";
+                }
+#		$out .= "$stepCount: ".formatLine($node, $sel, $body);
+                if($body) {
+                    print "$stepCount: ".formatLine($node, $sel, $body, 0, "");
+                }
+	    }
+	    $node = $1;
+	    $timestamp = $2;
+	    $sel = $3;
+	    $body = $4;
+
+# 	    print "parsed $node $sel\n";
+#	    if ($excludeFilter && ($body =~ m/$excludeFilter/s)) {
+#		$body = "";
+#	    }
+#	    if ($excludeSelector && ($sel =~ m/$excludeSelector/i)) {
+#		$body = "";
+#	    }
+#	    if ($includeFilter && ($body !~ m/$includeFilter/si)) {
+#		$body = "";
+#	    }
+#	    if ($includeSelector && ($sel !~ m/$includeSelector/i)) {
+#		$body = "";
+#	    }
+# 	    print "matched node=$node sel=$sel body=$body\n";
+	}
+ 	elsif ($body) {
+# 	    print "parsed body $body\n";
+	    $body .= $l;
+	}
+        $lineCount++;
+        if($stepCount < $maxstep && $lineCount > $steps{$stepCount+1}) {
+#          print "incrementing step count from $stepCount\n";
+          $stepCount++;
+#          print "now $stepCount\n";
+        }
+    }
+    if ($body !~ m/$globalSearchRegex/si) {
+      $body = "";
+    }
+    if ($body) {
+#	$out .= "$stepCount: ".formatLine($node, $sel, $body);
+        print "$stepCount: ".formatLine($node, $sel, $body, 0, "");
+    }
+    print $out;
+} # searchSteps
+
+sub diffStates {
+    my ($s1, $s2) = @_;
+    my %str = ();
+    for my $s ($s1, $s2) {
+	my $start = 0;
+	my $end = 0;
+	if ($s >= 0) {
+	    $start = $steps{$s};
+	}
+
+	if ($s == $maxstep) {
+	    $end = scalar(@lines) - 1;
+	}
+	else {
+	    $end = $steps{$s + 1};
+	}
+	$end--;
+
+	$str{$s} = getStateString($start, $end, \@lines);
+    }
+    diffStateStrings($str{$s1}, $str{$s2});
+} # diffStates
+
+sub getStateString {
+    my ($start, $end, $lines) = @_;
+    my $append = 0;
+    my $r = "";
+    for my $l (@$lines[$start..$end]) {
+	if (!$properties && ($l =~ m|Testing safety properties|)) {
+	    last;
+	}
+	elsif ($l =~ m|\[__Simulator__::dumpState\] (.*)|) {
+	    $append = 1;
+	    $r .= $1;
+	}
+	elsif ($append) {
+	    $r .= $l;
+	}
+    }
+    return $r;
+} # getStateString
+
+sub diffStateStrings {
+    my ($s1, $s2) = @_;
+    my $d = diff(\$s1, \$s2, { CONTEXT => 2000 });
+    $d =~ s|(.*?)\n||s;
+
+    print formatLine("", "", $d, 0, "");
+} # diffStateStrings
+
+sub listStep {
+    my %params = @_;
+#     print "listing step $curstep\n";
+    my $start = 0;
+    my $end = 0;
+    if ($curstep >= 0) {
+	$start = $steps{$curstep};
+    }
+
+    my $fileh;
+    if ($params{program}) {
+        open($fileh, "|".$params{program});
+    }
+    else {
+        open($fileh, ">&STDOUT");
+    }
+
+    if ($curstep == $maxstep) {
+	$end = scalar(@lines) - 1;
+    }
+    else {
+	$end = $steps{$curstep + 1};
+    }
+    if (not $interactive) {
+	$end--;
+    }
+#     print "start=$start end=$end\n";
+    my $body = "";
+    my $sel = "";
+    my $node = "";
+    my $timestamp = "";
+    my $out = "";
+    my $indent = 0;
+    my $indentSize = 2;
+    my $state = "";
+    my $appendState = 0;
+    my $nodeState = "";
+    my $appendNodeState = 0;
+
+    for my $l (@lines[$start..$end]) {
+# 	print "trying to match $l\n";
+# 	if ($l =~ m/(\S+) (\d+\.\d+|\[.*?\]) \d{2} \[(.*)\] (.*)/s) {
+        if ($params{program} and $params{unformatted}) {
+            print $fileh $l;
+            next;
+        }
+
+	if ($appendState && $l =~ m|Testing safety properties|) {
+	    $appendState = 0;
+	}
+
+	if ($l =~ m|\[__Simulator__::dumpState\].*Begin Printer State|) {
+	    $appendNodeState = 1;
+	    next;
+	}
+	if ($l =~ m|\[__Simulator__::dumpState\].*End Printer State|) {
+	    $appendNodeState = 0;
+	    next;
+	}
+	if ($appendNodeState) {
+	    $nodeState .= $l;
+	    next;
+	}
+	if ($l =~ m|\[__Simulator__::dumpState\] (.*)|) {
+	    $appendState = 1;
+	    $state = "$1\n";
+	    next;
+	}
+	if ($appendState) {
+	    $state .= $l;
+	    next;
+	}
+	
+	if ($l =~ m/^([^\[\] \t]+) (.*?)\d{2} \[(.*)\] (.*)/s ||
+	    $l =~ m/^([^\[\] \t]+) (.*?)\[(.*)\] (.*)/s) {
+            if (!$properties && ($l =~ m|Testing safety properties|)) {
+              last;
+            }
+	    if ($body) {
+                if ($body =~ /(.*ENDING.*)/) {
+                    $indent -= $indentSize;
+                    if ($indent < 0) {
+                        $indent = 0;
+                    }
+                }
+                print $fileh formatLine($node, $sel, $body, $indent, $timestamp);
+#		$out .= formatLine($node, $sel, $body);
+                if ($body =~ /(.*STARTING.*)/) {
+                    $indent += $indentSize;
+                }
+	    }
+
+	    $node = $1;
+	    $timestamp = $2;
+	    $sel = $3;
+	    $body = $4;
+
+# 	    print "parsed $node $sel\n";
+	    if ($excludeFilter && ($body =~ m/$excludeFilter/s)) {
+		$body = "";
+	    }
+	    if ($excludeSelector && ($sel =~ m/$excludeSelector/i)) {
+		$body = "";
+	    }
+	    if ($includeFilter && ($body !~ m/$includeFilter/si)) {
+		$body = "";
+	    }
+	    if ($includeSelector && ($sel !~ m/$includeSelector/i)) {
+		$body = "";
+	    }
+#  	    print "matched node=$node sel=$sel body=$body\n";
+	}
+ 	elsif ($body) {
+#             print "parsed body $body\n";
+	    $body .= $l;
+	}
+
+    }
+    if ($body) {
+        if ($body =~ /(.*ENDING.*)/) {
+            $indent -= $indentSize;
+            if ($indent < 0) {
+                $indent = 0;
+            }
+        }
+        print $fileh formatLine($node, $sel, $body, $indent, $timestamp);
+#		$out .= formatLine($node, $sel, $body);
+        if ($body =~ /(.*STARTING.*)/) {
+            $indent += $indentSize;
+        }
+    }
+    print $fileh $out;
+    print $fileh "\nNode State dump:\n";
+    print $fileh formatNodeState($nodeState);
+#    print $fileh "\nState dump:\n";
+#     print $fileh formatState($state);
+    print $fileh $state;
+    if ($params{program}) {
+        close($fileh);
+    }
+} # listStep
+
+sub formatNodeState {
+    my $state = shift;
+    my $r = colorRegex($state, '\d+\.\d+\.\d+\.\d+:\d+', NODE_COLOR,
+		       sub {
+			   my $ip = shift;
+			   if ($ip =~ m|^(\d+)\.0\.0\.0|) {
+			       return $1 - 1;
+			   }
+			   return $ip;
+		       });
+    $r = colorRegex($r, '[0-9a-f]{40}', NODE_COLOR,
+		       sub {
+			   my $sha = shift;
+			   if ($sha =~ m|^([0-9a-f]{6})[0-9a-f]{32}([0-9a-f]{2})|) {
+			       return "$1..$2";
+			   }
+			   return $sha;
+		       });
+    if ($search) {
+	$r = colorRegex($r, $search, SEARCH_COLOR);
+    }
+    return $r;
+}
+
+sub formatState {
+    my $state = shift;
+    my $r = "";
+#     print "!!!!!!!!!!$state\n!!!!!!!!!!!!\n";
+    while (1) {
+	my $app = "";
+	($app, $state) = parseMatching('[', ']', $state);
+	if (!$app) {
+	    last;
+	}
+	$r .= formatApp($app);
+	if ($state =~ m|^\nNetwork State|) {
+	    last;
+	}
+    }
+    $r .= $state;
+
+    $r = colorRegex($r, '\d+\.\d+\.\d+\.\d+:\d+', NODE_COLOR);
+    $r = colorRegex($r, '[0-9a-f]{40}', NODE_COLOR);
+    if ($search) {
+	$r = colorRegex($r, $search, SEARCH_COLOR);
+    }
+
+    return $r;
+}
+
+sub formatApp {
+    my $app = shift;
+    my $r = "";
+    my @l = split(/\n/, $app);
+    for my $l (@l) {
+	if ($l =~ m|^(\w+=)(.*)| && length($l) > $termWidth) {
+	    $r .= $1 . formatElement($2);
+	}
+	else {
+	    $r .= "$l\n";
+	}
+    }
+    return $r;
+}
+
+sub formatElement {
+    my $l = shift;
+    $l =~ s|\),|\),\n\t|g;
+    $l =~ s|\) \(|\)\n\t\(|g;
+    return "$l\n";
+}
+
+sub parseMatching {
+    my ($start, $end, $text) = @_;
+    my @c = split(//, $text);
+    my $r = "";
+    my $l = 0;
+    while (scalar(@c)) {
+	my $c = shift(@c);
+	if ($r && $l == 0) {
+# 	    print "returning '$r'\n";
+	    return ($r, join("", @c));
+	}
+	if ($c eq $start) {
+	    $l++;
+	}
+	elsif ($l == 0) {
+	    next;
+	}
+	elsif ($c eq $end) {
+	    $l--;
+	}
+	$r .= $c;
+    }
+    return ($r, join("", @c));
+}
+    
+
+sub formatLine {
+    my ($node, $sel, $body, $indent, $timestamp) = @_;
+    my $out = "";
+    if ($node) {
+	$out .= colored($node, NODE_COLOR);
+    }
+    if (defined $timestamp and $timestamp ne "") {
+      $timestamp =~ s/^\s+//;
+      $timestamp =~ s/\s+$//;
+      $timestamp = "$timestamp ";
+    }
+    if ($sel) {
+        $out .= ' 'x$indent;
+        $out .= " $timestamp";
+
+        if ($sel =~ /^(TRACE)(.*)/) {
+          $out .= colored("[", SELECTOR_COLOR);
+          $out .= colored($1, TRACE_COLOR);
+          $out .= colored("$2] ", SELECTOR_COLOR);
+        }
+        elsif ($sel =~ /^(DEBUG)(.*)/) {
+          $out .= colored("[", SELECTOR_COLOR);
+          $out .= colored($1, DEBUG_COLOR);
+          $out .= colored("$2] ", SELECTOR_COLOR);
+        }
+        elsif ($sel =~ /(.*?)(ERROR)(.*)/) {
+          $out .= colored("[$1", SELECTOR_COLOR);
+          $out .= colored($2, ERROR_COLOR);
+          $out .= colored("$3] ", SELECTOR_COLOR);
+        }
+        elsif ($sel =~ /(.*?)(WARNING)(.*)/) {
+          $out .= colored("[$1", SELECTOR_COLOR);
+          $out .= colored($2, WARNING_COLOR);
+          $out .= colored("$3] ", SELECTOR_COLOR);
+        }
+        else {
+          $out .= colored("[$sel] ", SELECTOR_COLOR);
+        }
+    }
+    $body = colorRegex($body, '\d+\.\d+\.\d+\.\d+:\d+', NODE_COLOR);
+    $body = colorRegex($body, '[0-9a-f]{40}', NODE_COLOR);
+    if ($search) {
+	$body = colorRegex($body, $search, SEARCH_COLOR);
+    }
+    $out .= $body;
+
+    for my $el (@KEYWORDS) {
+	my $c = colored($el, KEYWORD_COLOR);
+	$out =~ s|$el|$c|gs;
+    }
+
+    $out = colorLines($out, '^\+', PLUS_COLOR);
+    $out = colorLines($out, '^-', MINUS_COLOR);
+
+    return $out;
+} # formatLine
+
+sub colorLines {
+    my ($body, $regex, $color) = @_;
+    my @l = split(/\n/, $body);
+    my @r = ();
+    for my $l (@l) {
+	if ($l =~ m|$regex|i) {
+	    my $reset = chr(27) . '\[0m';
+	    my @frag = split(/$reset/, $l);
+	    my $realReset = color('reset');
+	    push(@r, join($realReset, map { colored($_, $color) } @frag));
+	}
+	else {
+	    push(@r, $l);
+	}
+    }
+    return join("\n", @r) . "\n";
+}
+
+sub colorRegex {
+    my ($body, $regex, $color, $subst) = @_;
+
+    my $out = "";
+    while ($body =~ m|(.*?)($regex)(.*)|is) {
+	my $pre = $1;
+	my $match = $2;
+	$body = $3;
+	$out .= $pre;
+	if (defined($subst)) {
+	    $match = &$subst($match);
+	}
+	$out .= colored($match, $color);
+    }
+    $out .= $body;
+    return $out;
+}
+
+sub printHelp {
+    print <<EOF;
+h - print help
+j - jump to step
+END - jump to last step
+HOME - jump to first step
+n - next step
+p - previous step
+l - display current step in pager
+P - list current step
+L - list step to external program state-dump.sh
+s - regex search
+d - diff states
+m - diff states across log files (non-interactive only)
+I - filter include selectors
+E - filter exclude selectors
+i - filter include
+e - filter exclude
+w - select which node to step
+t - disable/enable properties
+c - clear the screen
+x - search all steps
+g - generate event graph
+q - quit
+r - choose random number (interactive only)
+a - show possible next steps (interactive only)
+R - run until live (interactive only)
+B - branch modelchecker from current step (interactive only)
+P - print to file: path, path to current step, event graph, output log (interactive only)
+G - toggle gusto (interactive only)
+EOF
+} # printHelp
+
+sub readInteractiveLines {
+    STDOUT->autoflush(1);
+    readLines($rfh, \$step, $RANDOM_INPUT, \@lines, \%steps, \$minstep, \$maxstep);
+    STDOUT->autoflush(0);
+    $curstep = $step - 1;
+} # readInteractiveLines
+
+sub readLines {
+    my ($file, $step, $endre, $lines, $steps, $minstep, $maxstep) = @_;
+    my $continue = 1;
+    my $count =0;
+    my $foundFirstStep = 0;
+
+#    $$step = 35000;
+
+    #while (my $l = $lines[$i]) {
+    #  if ($l =~ m|\[SimulateEventBegin\] (\d+) (\d+)) {
+    #    $s = $1;
+    #    last;
+    #  }
+    #}
+
+    while ($continue && (my $l = <$file>)) {
+        $count++;
+        if ($count % 1000000 == 0) {
+          print "Parsing line $count, step ".$$step."\n";
+        }
+	if ($interactive) {
+	    print $l;
+	}
+	if ($l =~ m~$SIMULATOR_STEP_RE~) {
+            if (not $foundFirstStep) {
+                $foundFirstStep = 1;
+                $$minstep = $1;
+                $$step = $1;
+            }
+	    #if (scalar(@$lines) == 0) {
+	    #    $$minstep = 0;
+	    #}
+	    $steps->{$$step} = scalar(@$lines);
+	    $$step++;
+	    if ($runToLive) {
+		$curstep = $$step - 1;
+		printPrompt();
+	    }
+	}
+	elsif ($l =~ m|$endre|) {
+	    $continue = 0;
+	}
+	push(@$lines, $l);
+    }
+#     if ($step == 0) {
+# 	die "could not match any steps with $stepre\n";
+#     }
+    $$maxstep = $$step - 1;
+    if ($interactive && $continue) {
+	$interactive = 0;
+    }
+
+    #print "**********\n\n\n";
+    #for my $s (sort { $a <=> $b } keys(%steps)) {
+    #  print "$s ".$steps{$s}."\n";
+    #}
+    #exit(0);
+
+    assignNodeSteps();
+} # readLines
+
+sub loadFile {
+    my ($filename, $lines, $steps, $mins, $maxs) = @_;
+    my $s = 0;
+    my $f = new FileHandle();
+    $f->open($filename) or die "cannot open $filename: $!\n";
+    readLines($f, \$s, SIMULATION_COMPLETE, $lines, $steps, $mins, $maxs);
+} # loadFile
+
+sub assignNodeSteps {
+    my %sc = %steps;
+
+    %nodeSteps = ();
+    for my $s (sort { $a <=> $b } keys(%sc)) {
+	my $i = $sc{$s};
+	my $found = 0;
+	while (my $l = $lines[$i]) {
+	    if ($l =~ m|\[SimulateEventBegin\] (\d+) (\d+)|) {
+		if ($1 != $s) {
+		    die "step mismatch: $1 != $s\n";
+		}
+		if (defined($nodeSteps{$2})) {
+		    push(@{$nodeSteps{$2}}, $s);
+		}
+		else {
+		    $nodeSteps{$2} = [$s];
+		}
+# 		print "added step $s to node $2\n";
+		$found = 1;
+		last;
+	    }
+	    $i++;
+	}
+# 	if (!$found) {
+# 	    if ($s == $maxstep) {
+# 		delete($sc{$s});
+# 		$maxstep--;
+# 	    }
+# 	    else {
+# 		die "could not assign node for step $s\n";
+# 	    }
+# 	}
+    }
+} # assignNodeSteps
+
+sub isValidRegex {
+    my $regex = shift;
+    eval { 
+        my $t  = "";
+        $t =~ /$regex/;
+    };
+    if($@) { 
+        return 0;
+    } 
+    return 1;
+}

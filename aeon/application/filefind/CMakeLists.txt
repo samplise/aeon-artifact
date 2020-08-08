@@ -1,0 +1,6 @@
+SET(APPS filefind)
+#SET(LIBNAME )
+SET(SERVICES Find)
+#SET(EXTRALIBS )
+
+INCLUDE(${CMAKE_CURRENT_BINARY_DIR}/../application.cmake)

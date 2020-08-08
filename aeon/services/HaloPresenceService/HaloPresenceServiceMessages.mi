@@ -1,0 +1,58 @@
+messages {
+  JoinGameSession {
+  	uint32_t clientId;
+  	uint32_t gsId;
+    uint32_t joinedTimes;
+  }
+
+  JoinGameSessionReply {
+  	uint32_t clientId;
+    uint32_t routerId;
+  	uint32_t gsId;
+    uint32_t playerId;
+  }
+
+  LeaveGameSession {
+    uint32_t clientId;
+    uint32_t gsId;
+  }
+
+  LeaveGameSessionReply {
+    uint32_t clientId;
+  }
+
+  UpdateRouterID {
+  	uint32_t clientId;
+  	uint32_t routerId;
+  }
+
+  GetRouterID {
+    uint32_t clientId;
+  }
+
+  GetRouterIDReply {
+    uint32_t clientId;
+    uint32_t routerId;
+  }
+
+  Heartbeat {
+  	uint32_t clientId;
+    uint32_t routerId;
+    uint32_t gsId;
+  	uint32_t playerId;
+  }
+
+  HeartbeatReply {
+    uint32_t clientId;
+    bool succFlag;
+  }
+
+  ConnectionRequest {
+    uint32_t clientId;
+  }
+
+  ConnectionSetup {
+    uint32_t clientId;
+    MaceKey proxyAddr;
+  }
+}

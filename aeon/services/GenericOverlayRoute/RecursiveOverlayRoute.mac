@@ -1,0 +1,105 @@
+/* 
+ * RecursiveOverlayRoute.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+service RecursiveOverlayRoute;
+
+provides Transport,Route;
+attributes hopbyhop,sharedrouter;
+
+trace=med;
+
+services 
+{
+  OverlayRouter router_ = auto(shared,[],[]); //Bamboo(rt); (RTW)
+  Transport data_ = auto(shared,[],[reliable]); //TcpTransport(TransportCryptoServiceClass::NONE, true);
+}
+
+state_variables 
+{
+  MaceKey meRouter; // Address from the overlay router service
+  MaceKey meTransport; // Address from the route service
+}
+
+messages 
+{
+  Data {  // Data is sent low priority by default
+    MaceKey src;
+    MaceKey dest;
+    int regId;
+    mace::string payload __attribute((dump(no)));
+  }
+}
+
+local_address {
+  return downcall_localAddress(router_);
+}
+
+transitions {
+  downcall maceInit() {
+    meRouter = downcall_localAddress(router_);
+    meTransport = downcall_localAddress(data_);
+    ASSERT(!meRouter.isNullAddress());
+    ASSERT(!meTransport.isNullAddress());
+    dumpState(maceout); //Show the initial state including MaceKey addresses
+  }
+
+  downcall route(const MaceKey& dest, const std::string& message, registration_uid_t regId) {
+    return downcall_route(downcall_getNextHop(dest), Data(meRouter, dest, regId, message));
+  }
+
+  upcall messageError(const MaceKey& dest, TransportError::type errcode, const Data& msg, registration_uid_t rid) {
+    downcall_route(downcall_getNextHop(msg.dest), msg);
+  }
+
+  upcall deliver(const MaceKey& from, const MaceKey& dest, const Data& msg) {
+    MaceKey nextHopRouter;
+    MaceKey nextHop;
+    maceout << "Testing getNextHop START" << Log::endl;
+    nextHop = downcall_getNextHop(msg.dest, nextHopRouter);
+    maceout << "Testing getNextHop END" << Log::endl;
+    
+    MaceKey savedNextHop = nextHopRouter;
+
+    if(upcall_forward(msg.src, msg.dest, nextHopRouter, msg.payload, msg.regId)) {
+      if(nextHopRouter != savedNextHop) {
+        nextHop = downcall_getNextHop(nextHopRouter);
+      }
+      if(nextHop == meTransport) {
+        upcall_deliver(msg.src, msg.dest, msg.payload, msg.regId);
+      } else {
+        downcall_route(nextHop, msg); //XXX: future for efficiency -- have message store internally a serialized form.
+      }
+    }
+  }
+
+  //  XXX: TODO Error upcalls
+  //   upcall (true) error(const MaceKey& nodeId, int error_code, registration_uid_t registrationUid) {
+  //   } // API error
+}

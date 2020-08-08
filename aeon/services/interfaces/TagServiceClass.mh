@@ -1,0 +1,6 @@
+serviceclass Tag {
+    virtual int getKidNumInRoom(uint64_t nBuilding, uint64_t nRoom);
+    virtual void sendMsg(uint64_t srcKid, uint64_t desKid, mace::string msg);
+    virtual void joinGame();
+    virtual void leftGame();
+};

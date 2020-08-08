@@ -1,0 +1,35 @@
+//CK: Suggest putting comments in this file to indicate what each message is for, and who sends it.
+messages {
+  ConnectionRequest {
+    uint32_t clientId;
+  }
+
+  ConnectionSetup {
+    MaceKey proxyAddr;
+    uint32_t clientId;
+  }
+
+  PlayerInitRequest {
+    uint32_t clientId;
+  }
+
+  PlayerInitReply {
+    uint32_t clientId;
+    uint32_t playerId;
+    uint32_t roomId;
+  }
+
+  MoveRequest {
+    uint32_t clientId;
+    uint32_t playerId;
+    uint32_t roomId;
+  }
+
+  MoveReply {
+    uint32_t clientId;
+  }
+
+  ClientNumberReport {
+    uint32_t client_number;
+  }
+}

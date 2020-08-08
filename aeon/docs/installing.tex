@@ -1,0 +1,242 @@
+% 
+% installing.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\section{Getting and Installing Mace}
+\label{sec:installing}
+
+\subsection{Mace dependencies}
+
+Mace requires the following system software packages:
+
+\begin{description}
+
+\item[gcc/g++] The GNU C and C++ compilers.  Mace is tested with GCC
+  versions 3.4 (including MinGW), 4.0, 4.1, and 4.2.  It has in the past
+  worked with a few GCC version 3.3.X systems, but most frequently
+  causes internal compiler segmentation faults.  Using at least version
+  3.4 is highly recommended.  This should also be accompanied with a
+  build system that cmake can output builds for.
+
+\item[perl] Perl version 5.8 or greater.  Additionally,
+Class-MakeMethods and Parse-RecDescent modules are needed (and are
+included in mace-extras).
+%TODO: I don't think people need to get these anymore, with mace-extras,
+%right?
+
+\item[system libraries] libpthread, libm, libcrypto, libstdc++, and libssl.
+
+\item[libboost] Used in a few places for shared pointers and lexical casting.
+
+\item[libdb\_cxx] Version 4.2, 4.3 or 4.4.  This is the Berkeley DB
+  package, and is optional for building Mace.
+
+\item[cmake] Mace uses the \href{http://www.cmake.org}{CMake} build
+  system for cross-platform building.  
+
+\item[lgrind] For making the documentation from the source files, beautifying 
+  the source code.  Also needs LaTeX.
+
+\end{description}
+
+Mace is regularly tested on Debian GNU/Linux and CentOS.  It has been
+tested on 32 and 64 bit Linux systems, 64 bit OSX systems, and WinXP
+(under MinGW). 
+
+\paragraph{Compiling on Windows.}
+When building Mace under MinGW (Windows), users will have to install
+OpenSSL libraries, GNU libregex, pthreads for windows, and (if desired)
+build the Berkeley DB C++ library by hand (the binary distribution does
+not include it as far as we could tell).
+
+% XXX
+% Chip, what else should we write here about platforms?
+
+
+\subsection{Getting the Mace source code}
+\label{sec:downloading}
+
+Mace is Open Source Software which is be published under a BSD-style license.
+The latest Mace source code release can be found at the following URL: \\
+
+\href{http://mace.ucsd.edu/release}{http://mace.ucsd.edu/release} \\
+
+Download this file and save it in the directory where you will be
+doing your development.  Unpack it using 
+\command{tar -xvzf mace-latest.tar.gz}
+where  latest is replaced by the version string
+from the version downloaded.
+
+Or download mace from the subversion repository using: \\
+
+\command{svn co http://mace.ucsd.edu/svn/mace/trunk mace}
+
+\subsection{Installing Mace}
+\label{sec:unpacking}
+
+Currently, the Mace distribution does not require the installation of any
+Mace-related files outside of the Mace source tree.  All development using Mace
+can be done inside the source tree.
+
+To build the Mace distribution (in brief), use the following commands:
+
+\begin{screen}
+\command{
+$ cd mace
+$ mkdir builds
+$ cd builds
+$ cmake ../
+$ make edit\_cache #or ccmake .
+$ make
+}
+\end{screen}
+%$
+
+This will build the Mace libraries (described in
+\S~\ref{sec:lib}), services
+(\S~\ref{sec:packaged-services}), and applications
+(\S~\ref{sec:applications}).
+
+\subsection{The Mace Build System}
+\label{sec:cmake}
+
+Mace uses CMake to generate its build system.  CMake greatly simplified
+the process of supporting various platforms, with different paths,
+operating systems, bit sizes, and build systems.  It can even generate
+visual studio projects (though Mace cannot build presently under visual
+studio).  
+
+This document is far from an instruction guide to using CMake, but in
+this section, we'll cover several topics about using CMake to build
+Mace.  If you know CMake, or just want to get on to learning about Mace,
+you can skip the rest of this section for now.
+
+\subsubsection{CMake is a build system generator}
+
+CMake does not actually build Mace.  What it does is generate the build
+system, which in turn does the actual work of building Mace.  In my own
+work with Mace, this output build system has always been Makefiles for
+use with GNU Make.  Readers should refer to the CMake documentation for
+other options.  References following will assume a Makefile build.
+
+\subsubsection{Out of source builds}
+
+Mace now requires builds to be done "out-of-source."  What this means is
+that none of the generated code, object files, or application binaries
+are placed inside the source directory.  Attempts to configure CMake for
+in-source build will be rejected by the Mace CMakeLists.txt (CMake
+configuration file).  Out of source builds have the advantage that they
+do not modify the original source directory, so building multiple
+outputs is simplified, and cleaning up builds is also simpler.  Also, it
+avoids confusion from having generated source files along side the
+original source files.
+
+\subsubsection{Running CMake}
+
+To run CMake, use \command{cmake [path-to-mace]}, where you supply cmake
+the path to the top level Mace directory.  CMake will read the
+CMakeLists.txt in that directory, and configure the build accordingly.
+You should run cmake from the directory in which you intend to build
+Mace.  If all goes well, it will indicate that the build system is
+generated (not just configured), and there will now be a Makefile you
+can use.
+
+\subsubsection{Configuring a CMake Build (and turning on debugging symbols)}
+
+When you run cmake, a number of things may need configuring.  This may
+include the paths to various required or optional libraries, header
+files, or include directories.  Alternately, you may wish to set a
+release type.  There are (at least) two ways to configure a CMake build.
+If the build system hasn't been generated yet, you have to use the
+first.  That method is \command{ccmake [path]}, where ccmake is either
+the path to a partially configured CMake build (usually '.'), or the
+path to the Mace top-level directory (to start a new build directory).
+This opens the configuration editor, where you can set variables and
+reconfigure the build.  After setting a variable, you must first run
+"Configure" (perhaps more than once), and finally "Generate", to
+regenerated the build system.  Until you do this, changed values may not
+be saved.  This method is probably what will be needed after a failed
+CMake configuration (e.g. for a missing library).  
+
+If the build system has already been generated, another way to enter the
+configuration editor is the command \command{make edit\_cache}.  This is
+the method commonly used for changing configuration parameters after a
+complete configuration, such as the release type.  By default, CMake
+will generated a normal build, in which no special flags are included.
+Other options include "DEBUG" (enable debugging symbols),
+"RELWITHDEBINFO" (enable moderate optimizations and debugging symbols),
+and "RELEASE" (enable extreme optimizations and not debugging symbols).
+After changing the release type, use Configure and Generate to
+regenerate the build system.
+
+\subsubsection{Changing the CMake Input Configuration Files}
+
+If you edit any of the CMake input files, the build system will be
+automatically regenerated the next time you run "make".  Be careful not
+to edit any of the generated input files, as these will just be
+overwritten.
+
+\subsubsection{Adding New Source Files}
+
+In writing our CMake input files, rather than listing each source file
+manually (and editing the input files when adding new files), we use the
+globbing features to have CMake scan for input files.  As a result, when
+you add new files, CMake will \emph{not detect} that a change has
+occurred.  To give CMake the opportunity to include the newly added
+files, run \command{cmake rebuild\_cache}, which will cause the build
+system to be reconfigured and generated.  (This also applies if new
+files were added by subversion, so be aware you may need to run this in
+that case).
+
+\subsubsection{Features of CMake Makefiles}
+
+CMake Makefiles have some automatically built features.  These include:
+\begin{description}
+\item [progress] Percentages are displayed during builds, which give a
+rough idea of how far through the build you are.  (These are rough
+only---in my experience they may halt either before or after 100\%.  In
+one rare circumstance, I saw it get as high as 500\%.
+\item [quiet] By default, the builds are quiet, displaying descriptions
+of what is going on.  To see the full commands, include "VERBOSE=1" in
+the command, such as \command{make VERBOSE=1}.
+\item [parallel build] CMake Makefiles support parallel builds.  To run
+make with 4 parallel processes, use \command{make -j4}.  
+\item [help] From any level of the Makefile, you can run \command{make
+help}, which displays all targets you could make.
+\item [edit\_cache] \command{make edit\_cache} invokes the CMake configuration editor.
+\item [rebuild\_cache] \command{make rebuild\_cache} re-runs cmake to
+regenerate the build system.
+\item [selective build] When building any particular application or
+service, CMake will only build (or rebuild) those services which are
+needed (instead of always building all services).
+\item [shared libraries] CMake can build Mace libraries as shared
+libraries instead of static libraries, by editing the configuration to
+set USE\_SHARED to on.  Note that this is not as well tested, and may
+not work in all circumstances.
+\end{description}

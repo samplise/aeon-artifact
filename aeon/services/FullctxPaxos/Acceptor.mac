@@ -1,0 +1,123 @@
+#include "mmultimap.h"
+#include "message.mi"
+
+service FullCtxPaxos;
+
+provides Consensus;
+
+trace=high;
+
+services {
+  //use the TCP protocal to sent the msg
+  Transport t = auto(shared,[reliable],[]);
+}
+
+constants {
+  
+}
+
+constructor_parameters {
+ 
+}
+
+states {
+  
+}
+
+typedefs {
+
+}
+
+messages {
+  	AcceptorPromise {
+				uint64_t proposer;
+				uint64_t proposeID;
+				Value value;
+		}
+
+		AcceptorLearnMsg {
+				Value value;	
+		}
+}
+
+
+state_variables {
+		mace::queue<uint64_t> learners;
+		mace::map<uint64_t, MaceKey> logicalNodesMap;
+		uint64_t local_logicalNodeID;
+
+		context Acceptor {
+				uint64_t confirmedMaxID;
+				Value curValue;
+				
+		}
+
+}
+
+transitions {
+  	downcall (state == init) maceInit() {
+    		downcall_route(masterKey, ReportMsg());
+				async_acceptorInit();
+		}
+      
+  	async [Acceptor] acceptorInit() {
+			
+		}
+
+		async [Acceptor] prepare( uint64_t proposeID, Value& value, uint64_t proposerID ){
+				if(proposeID > confirmedMaxID){
+						confirmedMaxID = proposeID;
+						curValue = value;
+						downcall_route( ContextMapping::getHead(), AcceptorPromise(proposerID, proposeID, value) );
+				}	
+		}
+
+		async [Acceptor] accept( Value value ){
+				if(value.key == curValue.key){
+						downcall_route( ContextMapping::getHead(), AcceptorLearnMsg(value));
+						value.key = "";
+				}				
+    }
+
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const Prepare& m){
+				async_prepare( m.proposerLogicalNodeID, m.proposeID, m.value );	
+		}
+
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const Accept& m){
+				async_accept( m.value );	
+		}
+
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const AcceptorLearnMsg& m){
+				mace::queue<uint64_t>::iterator learnerIter = learners.begin();
+				while( learnerIter != learners.end()){
+						downcall_route( logicalNodesMap[*learnerIter], Learn(m.value) );
+				}
+		}
+
+		upcall void deliver( const MaceKey& src, const MAceKey& dest, const AcceptorPromise& m){
+				downcall_route( logicalNodesMap[m.proposer], Promise(m.proposeID, m.value) );	
+		}
+
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const LogicalNodesInfoMsg& m){
+			    logicalNodesMap = m.logicalNodesMap;
+					mace::map<uint64_t,  MaceKey>::iterator iter = logicalNodesMap.begin();
+					while( iter!=logicalNodesMap.end() ){
+							if(localAddress() == iter->second){
+									local_logicalNodeID = iter->first;
+									break;
+							}
+							iter++;
+					}
+					
+					iter = logicalNodesMap.begin();
+					while( iter!=logicalNodesMap.end() ){
+							downcall_route(iter->second,  RoleAnounceMsg(local_logicalNodeID,  "acceptor"));
+					}
+		}
+																																																																																																																																																																																																																																																																																														
+		upcall void deliver(const MaceKey& src,  const MaceKey& dest,  const RoleAnounceMsg& m){
+				if(m.role == "client"){
+						clients.push(m.logicalNodeID);
+				}
+		}
+}

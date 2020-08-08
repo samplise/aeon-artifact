@@ -1,0 +1,122 @@
+/* 
+ * SimAggregateApp.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, Charles Killian, James W. Anderson
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+
+service SimAggregateApp;
+
+provides SimApplication;
+trace=med;
+
+constants {
+  int INIT = 0;
+  int JOINED = 1;
+  int ROOT_ONLY = 0;
+  int NEXT_NODE = 1;
+  int RANDOM_LESSER = 2;
+  channel_id_t CHANNEL_ID = 1;
+}
+
+constructor_parameters {
+  int PEERSET_STYLE = ROOT_ONLY;
+}
+
+states {
+  needJoin;
+  needSubscribe;
+  done;
+}
+
+services {
+  Overlay tree_;
+  Aggregate rs_agg_;
+}
+
+state_variables {
+  int numNodes = 0;
+  int popCount = 0;
+  timer initiateJoin __attribute((simWeight(40)));
+  timer initiateSubscribe __attribute((simWeight(40)));
+}
+
+transitions {
+
+  downcall (state == init) maceInit() {
+    numNodes = upcall_getNodeCount();
+    state = needJoin;
+    initiateJoin.schedule(1);
+  }
+
+  scheduler (state == needJoin) initiateJoin() {
+    state = needSubscribe;
+    initiateSubscribe.schedule(1);
+    NodeSet peers;
+    
+    if(PEERSET_STYLE == NEXT_NODE) {
+      peers.insert(upcall_getMaceKey((upcall_getNodeNumber() + 1) % numNodes));
+    
+    } else if(PEERSET_STYLE == RANDOM_LESSER && upcall_getNodeNumber() != 0) {
+      peers.insert(upcall_getMaceKey(RandomUtil::randInt(upcall_getNodeNumber()))); // get a random node below you (if you're not node 0)
+    
+    } else {
+      peers.insert(upcall_getMaceKey(0)); // pass in the same node to everyone
+    }
+    
+    downcall_joinOverlay(peers);
+//    return "joinOverlay(" + peers.toString() + ")";
+  }
+
+  scheduler (state == needSubscribe) initiateSubscribe() {
+    state = done;
+    downcall_aggregateSubscribe(CHANNEL_ID);
+//    return "aggregateSubscribe()";
+  }
+
+  upcall distributeAggregateData(channel_id_t channelId, const std::string& data,
+                                 AggregateNodeBlobMap& cmap, const int count,
+                                 AggregateNodeCountMap& nmap, const MaceKey& distributor) {
+    //ASSERT(state == done);
+    //CK: Strange, get distribute even when not subscribed.  Is that okay?
+    if(state != done) { return; }
+    ASSERT(channelId == CHANNEL_ID);
+    if(count == numNodes) {
+      popCount++;
+    }
+    else {
+      popCount = 0;
+    }
+  }
+
+}
+
+properties {
+  liveness {
+    allPop : \forall n \in \nodes: n.popCount \geq 5;
+  }
+}

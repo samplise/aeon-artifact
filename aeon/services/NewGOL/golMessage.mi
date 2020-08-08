@@ -1,0 +1,13 @@
+typedefs {
+    //typedef mace::map<Position, int> PositionValueMap;
+    typedef mace::vector<uint8_t> PositionValueMap;
+    typedef mace::vector< mace::vector<uint8_t> > Matrix;		
+    typedef mace::pair<uint32_t, uint32_t> Position;
+}
+messages {
+		MonitorMsg { mace::string msg; }
+		ValueMsg { mace::vector<Position> myPos; mace::vector<int> myValues; }
+		ValueMsg2 { Position p; int value; }
+
+		ReadyMsg { int x;  int y; }
+}

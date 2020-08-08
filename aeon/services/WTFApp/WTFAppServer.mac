@@ -1,0 +1,690 @@
+#include "marray.h"
+#include "m_map.h"
+#include "RandomUtil.h"
+#include "mace-macros.h"
+
+#include <iostream>
+#include <fstream>
+
+service WTFAppServer;
+
+provides Null;
+
+ 
+services {
+  Transport t;
+}
+
+constants {
+  uint8_t INODE_TYPE_DIRE = 0;
+  uint8_t INODE_TYPE_FILE = 1;
+
+  uint8_t MAPPER = 0;
+  uint8_t REDUCER = 1;
+
+  uint8_t INPUT = 0;
+  uint8_t OUTPUT = 1;
+}
+ 
+constructor_parameters {
+  mace::string ROOT_DIR = "tmp"; 
+
+  uint32_t N_MAPPER = 3;
+  uint32_t N_REDUCER = 1;
+}
+
+typedefs {
+  
+}
+
+auto_types {
+  
+}
+
+#minclude "WTFAppMessages.mi"
+
+state_variables {
+  context WTFRoot {
+    mace::map< mace::string, uint32_t> children;
+
+    ////
+    uint32_t waitingClientId;
+    MaceKey clientAddr;
+    mace::set<uint32_t> doneReducers;
+  }
+
+  context Inode<uint32_t id> {
+  	uint8_t inodeType;
+    mace::string inodeName;
+    mace::string fileName;
+    uint32_t parentInodeId;
+    mace::map< mace::string, uint32_t> children;
+    mace::set<uint32_t> hardlinkChildren;
+    int acount;
+  }
+
+  context Mapper<uint32_t mId> {
+    uint32_t dirInodeId;
+
+    uint32_t ifileInode;
+    uint32_t ofileInode;
+  }
+
+  context Reducer<uint32_t mId> {
+    uint32_t dirInodeId;
+
+    uint32_t ifileInode;
+    uint32_t ofileInode;
+
+    bool isToCreateIOFiles;
+
+    mace::map<uint32_t, uint32_t> readyMappers;
+    mace::set<uint32_t> doneMappers;
+  }
+    
+}
+
+transitions {
+  downcall maceInit() {
+    async_initWTF();
+
+    for( uint32_t i=1; i<=N_MAPPER; i++ ) {
+      mace::string ctxName = Util::generateContextName("Mapper", i );
+      createNewOwnership( "globalContext", ctxName );
+      async_initMapper(i);
+    }
+
+    for( uint32_t i=1; i<=N_REDUCER; i++ ) {
+      mace::string ctxName = Util::generateContextName("Reducer", i );
+      createNewOwnership( "globalContext", ctxName );
+      async_initReducer(i);
+    }
+  }
+
+  async [WTFRoot] initWTF()  {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Initilaize Warp File System!" << Log::endl;
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("WTFAppServer");
+    std::ostringstream oss;
+    oss << src <<"["<<msg.clientId<<"]";
+
+    MaceAddr commAddr = getExternalCommContextAddr( src, oss.str() );
+    maceout << "commAddr=" << commAddr << Log::endl;
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(msg.clientId, commKey) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< msg.clientId <<") from " << src << Log::endl;
+  }
+
+  // create directory or file
+  upcall [WTFRoot] deliver(const MaceKey& src, const MaceKey& dest, const CreateInodeWTF& msg) {
+    async_createDirectoryOrFileWTF( msg.path, msg.inodeType, msg.clientId, src );
+  }
+
+  async [WTFRoot] createDirectoryOrFileWTF( const mace::string& path, const uint8_t& inode_type, const uint32_t& cId, 
+      const MaceKey& src ) [ locking=ownership ] {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "To create inode: " << path << Log::endl;
+    mace::string restPath;
+    mace::string name = extractFirstNameFromPath( path, restPath );
+        
+    if( children.find(name) != children.end() && restPath != "" ) {
+      broadcast_createDirectoryOrFile( children[name], restPath, inode_type, cId, src );
+    } else if( children.find(name) == children.end() && restPath == "" ) {
+      uint32_t inode_id = createNewContext("Inode");
+      mace::string cctxName = Util::generateContextName("Inode", inode_id);
+      createNewOwnership("WTFRoot", cctxName);
+      initInode( inode_id, 0, path, inode_type );
+
+      children[ name ] = inode_id;
+
+      writeChildrenToFile("WTFRoot", children);
+
+      downcall_route( src, CreateInodeReply( cId, inode_id ) );
+    } else {
+      maceout << "Invalid path: " << path << Log::endl;
+      downcall_route( src, CreateInodeReply( cId, 0 ) );
+    }
+
+  }
+
+  broadcast [Inode<nId>] createDirectoryOrFile( const uint32_t& nId, const mace::string& path, const uint8_t& inode_type, 
+      const uint32_t& cId, const MaceKey& src ) {
+    ADD_SELECTORS("WTFAppServer");
+    mace::string restPath;
+    mace::string name = extractFirstNameFromPath( path, restPath );
+        
+    if( children.find(name) != children.end() && restPath != "" ) {
+      broadcast_createDirectoryOrFile( children[name], restPath, inode_type, cId, src );
+    } else if( children.find(name) == children.end() && restPath == "" ) {
+      uint32_t inode_id = createNewContext("Inode");
+      mace::string cctxName = Util::generateContextName("Inode", inode_id);
+      createNewOwnership("WTFRoot", cctxName);
+      initInode( inode_id, nId, name, inode_type );
+
+      children[ name ] = inode_id;
+
+      writeChildrenToFile( fileName, children );
+
+      downcall_route( src, CreateInodeReply( cId, inode_id ) );
+    } else {
+      maceout << "Invalid path: " << path << Log::endl;
+      downcall_route( src, CreateInodeReply( cId, 0 ) );
+    }
+  }  
+
+  upcall [Inode<msg.nId>] deliver(const MaceKey& src, const MaceKey& dest, const CreateInodeDIR& msg) {
+    async_createDirectoryOrFileDIR( msg.nId, msg.name, msg.inodeType, msg.clientId, src );
+  }
+
+  async [Inode<nId>] createDirectoryOrFileDIR( const uint32_t& nId, const mace::string& name, const uint8_t& inode_type, 
+      const uint32_t& cId, const MaceKey& src ) [ locking=ownership ] {
+    ADD_SELECTORS("WTFAppServer");
+    
+    if( children.find(name) == children.end() ) {
+      uint32_t inode_id = createNewContext("Inode");
+      mace::string pctxName = Util::generateContextName("Inode", nId);
+      mace::string cctxName = Util::generateContextName("Inode", inode_id);
+      createNewOwnership(pctxName, cctxName);
+      initInode( inode_id, nId, name, inode_type );
+
+      children[ name ] = inode_id;
+
+      writeChildrenToFile(fileName, children);
+
+      downcall_route( src, CreateInodeReply( cId, inode_id ) );
+    } else {
+      maceout << "Inode("<< nId <<") already has child: " << name << Log::endl;
+      downcall_route( src, CreateInodeReply( cId, 0 ) );
+    }
+  }
+
+  // open file
+  upcall [Inode<msg.nId>] deliver(const MaceKey& src, const MaceKey& dest, const OpenInodeDIR& msg) {
+    acount ++;
+
+    updateAccessCount( fileName, acount );
+    
+    downcall_route( src, RequestReply( msg.clientId, 1 ) );
+  }
+  
+  // rename directory
+  upcall [Inode<msg.nId>] deliver(const MaceKey& src, const MaceKey& dest, const RenameInodeDIR& msg) {
+    inodeName = msg.newName;
+    downcall_route( src, RequestReply(msg.clientId, 1) );
+  }
+
+  async [Inode<nId>] renameInodeDIR( const uint32_t& nId, const mace::string& newName, const uint32_t& cId, const mace::MaceKey& src ) {
+    ADD_SELECTORS("WTFAppServer");
+    if( parentInodeId > 0 ) {
+      async_renameChildInode( parentInodeId, inodeName, newName, cId, src );
+    } else {
+      async_renameChildInodeWTF( inodeName, newName, cId, src );
+    }
+    inodeName = newName;
+  }
+
+  async [Inode<nId>] renameChildInode( const uint32_t& nId, const mace::string& oname, const mace::string& nname, const uint32_t& cId, 
+      const mace::MaceKey& src ) {
+    ADD_SELECTORS("WTFAppServer");
+    if( children.find(oname) != children.end() ) {
+      children[ nname ] = children[ oname ];
+      children.erase(oname);
+      writeChildrenToFile( fileName, children );
+    }
+    downcall_route( src, RequestReply(cId, 1) );
+  }
+
+  async [WTFRoot] renameChildInodeWTF( const mace::string& oname, const mace::string& nname, const uint32_t& cId, const mace::MaceKey& src ) {
+    ADD_SELECTORS("WTFAppServer");
+    if( children.find(oname) != children.end() ) {
+      children[ nname ] = children[ oname ];
+      children.erase(oname);
+      writeChildrenToFile( "WTFRoot", children );
+    }
+    downcall_route( src, RequestReply(cId, 1) );
+  }
+
+  // delete directory or file
+  upcall [Inode<msg.nId>] deliver(const MaceKey& src, const MaceKey& dest, const DeleteInodeDIR& msg) {
+    async_deleteInodeDIR( msg.nId, msg.name, msg.clientId, src );
+  }
+
+  async [Inode<nId>] deleteInodeDIR( const uint32_t& nId, const mace::string& name, const uint32_t& cId, 
+      const MaceKey& src ) [ locking=ownership ] {
+    ADD_SELECTORS("WTFAppServer");
+            
+    if( children.find(name) != children.end() ) {
+      mace::string pctxName = Util::generateContextName("Inode", nId);
+      mace::string cctxName = Util::generateContextName("Inode", children[name]);
+      removeOwnership(pctxName, cctxName);
+      
+      children.erase(name);
+
+      FILE * fp = fopen( inodeName.c_str(), "w" );
+      for( mace::map<mace::string, uint32_t>::const_iterator iter = children.begin(); iter != children.end(); iter ++ ) {
+        fprintf( fp, "%s ", (iter->first).c_str() );
+      }
+      fclose( fp );
+    } else {
+      maceout << "Invalid name: " << name << Log::endl;
+    }
+
+    downcall_route( src, RequestReply(cId, 1) );
+  }
+
+  // delete files in a directory
+  upcall [Inode<msg.nId>] deliver(const MaceKey& src, const MaceKey& dest, const DeleteFiles& msg) {
+    async_deleteFiles( msg.nId, msg.clientId, src );
+  }
+
+  async [Inode<nId>] deleteFiles( const uint32_t& nId, const uint32_t& cId, const MaceKey& src ) [ locking=ownership ] {
+    ADD_SELECTORS("WTFAppServer");
+    
+    mace::string pctxName = Util::generateContextName("Inode", nId);    
+    mace::vector<mace::string> toDelete;
+
+    for( mace::map<mace::string, uint32_t>::const_iterator iter = children.begin(); iter != children.end(); iter ++ ) {
+      if( getInodeType( (iter->second) ) == INODE_TYPE_DIRE ) {
+        continue;
+      }
+
+      mace::string cctxName = Util::generateContextName("Inode", iter->second);
+      removeOwnership(pctxName, cctxName);
+      
+      toDelete.push_back(iter->first);
+
+    }
+
+    for( uint32_t i=0; i<toDelete.size(); i++ ) {
+      children.erase(toDelete[i]);
+    }
+
+    writeChildrenToFile( fileName, children );
+    downcall_route( src, RequestReply(cId, 1) );
+  }
+
+  // ls directory 
+  /*
+  async [WTFRoot] lsDirectoryWTF( const mace::string& path, const uint32_t& cId ) {
+    ADD_SELECTORS("WTFAppServer");
+    mace::string restPath;
+    mace::string name = extractFirstNameFromPath( path, restPath );
+        
+    if( children.find(name) != children.end() && restPath != "" ) {
+      broadcast_lsDirectoryOrFile( children[name], restPath, cId );
+    } else if( children.find(name) != children.end() && restPath == "" && inodeType == INODE_TYPE_DIRE ) {
+      mace::set<mace::string> childrenNames;
+      for( mace::map<mace::string, uint32_t>::iterator iter = children.begin(); iter != children.end(); iter ++ ) {
+        childrenName.insert( iter->first );
+      }
+
+      async_replyClientIsDirectory(cId, childrenNames);
+    } else {
+      maceout << "Invalid path: " << path << Log::endl;
+      async_replyClient(cId, 0, false);
+    }
+  }
+
+  broadcast [Inode<nId>] lsDirectory( const uint32_t& nId, const mace::string& path, const uint32_t& cId ) {
+    ADD_SELECTORS("WTFAppServer");
+    mace::string restPath;
+    mace::string name = extractFirstNameFromPath( path, restPath );
+        
+    if( children.find(name) != children.end() && restPath != "" ) {
+      broadcast_lsDirectoryOrFile( children[name], restPath, cId );
+    } else if( children.find(name) != children.end() && restPath == "" && inodeType == INODE_TYPE_DIRE ) {
+      mace::set<mace::string> childrenNames;
+      for( mace::map<mace::string, uint32_t>::iterator iter = children.begin(); iter != children.end(); iter ++ ) {
+        childrenName.insert( iter->first );
+      }
+
+      async_replyClientIsDirectory(cId, childrenNames);
+    } else {
+      maceout << "Invalid path: " << path << Log::endl;
+      async_replyClient(cId, 0, false);
+    }
+  }  
+  
+
+  async [Inode<nId>] lsDirectoryDIR( const uint32_t& nId, const uint32_t& cId ) {
+    ADD_SELECTORS("WTFAppServer");
+            
+    if( inodeType == INODE_TYPE_DIRE ) {
+      mace::set<mace::string> childrenNames;
+      for( mace::map<mace::string, uint32_t>::iterator iter = children.begin(); iter != children.end(); iter ++ ) {
+        childrenNames.insert( iter->first );
+      }
+
+      async_replyClientIsDirectory(cId, childrenNames);
+    } else {
+      maceout << "Invalid path: " << path << Log::endl;
+      async_replyClient(cId, 0, false);
+    }
+  }
+  */
+
+
+  // MapReduce
+  async [Mapper<mId>] initMapper( const uint32_t& mId ) {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Initialize Mapper " << mId << Log::endl;
+    dirInodeId = 0;
+
+    ifileInode = 0;
+    ofileInode = 0;
+
+    async_createFolderForMapperWTF( mId );
+  }
+
+  async [WTFRoot] createFolderForMapperWTF( const uint32_t& mId ) [ locking=ownership ] {
+    ADD_SELECTORS("WTFAppServer");
+    uint32_t inode_id = createNewContext("Inode");
+    
+    std::ostringstream oss;
+    oss << "mapper-dir-" << mId;
+    mace::string name = oss.str();
+
+    mace::string cctxName = Util::generateContextName("Inode", inode_id);
+    createNewOwnership("WTFRoot", cctxName);
+
+    initInode( inode_id, 0, name, INODE_TYPE_DIRE );
+    
+    children[ name ] = inode_id;
+    writeChildrenToFile( "WTFRoot", children );
+
+    async_replyMapperAfterFolderCreate( mId, inode_id);
+  }
+
+  async [Mapper<mId>] replyMapperAfterFolderCreate( const uint32_t& mId, const uint32_t& folder_inode ) {
+    dirInodeId = folder_inode;
+  } 
+
+  async [Reducer<rId>] initReducer( const uint32_t& rId ) {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Initialize Reducer " << rId << Log::endl;
+    dirInodeId = 0;
+
+    ifileInode = 0;
+    ofileInode = 0;
+
+    isToCreateIOFiles = false;
+
+    async_createFolderForReducerWTF( rId );
+  }
+
+  async [WTFRoot] createFolderForReducerWTF( const uint32_t& rId ) [ locking=ownership ] {
+    uint32_t inode_id = createNewContext("Inode");
+    
+    std::ostringstream oss;
+    oss << "reducer-dir-" << rId;
+    mace::string name = oss.str();
+
+    mace::string cctxName = Util::generateContextName("Inode", inode_id);
+    createNewOwnership("WTFRoot", cctxName);
+
+    initInode( inode_id, 0, name, INODE_TYPE_DIRE );
+    
+    children[ name ] = inode_id;
+    writeChildrenToFile( "WTFRoot", children );
+
+    async_replyReduerAfterFolderCreate( rId, inode_id);
+  }
+
+  async [Reducer<mId>] replyReduerAfterFolderCreate( const uint32_t& mId, const uint32_t& folder_inode ) {
+    dirInodeId = folder_inode;
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+  async [Inode<nId>] createIOFiles( const uint32_t& nId, const mace::string& job_name, const uint32_t& id, 
+      const uint8_t& type ) [ locking=ownership ] {
+    ADD_SELECTORS("WTFAppServer");
+  
+    std::ostringstream ioss;
+    ioss << job_name << "-input-file";
+    
+    std::ostringstream ooss;
+    ooss << job_name << "-output-file";
+
+    mace::string ifilename = ioss.str();
+    mace::string ofilename = ooss.str();
+        
+    uint32_t iinode_id = createNewContext("Inode");
+    uint32_t oinode_id = createNewContext("Inode");
+
+    mace::string pctxname = Util::generateContextName("Inode", nId);
+
+    mace::string icctxName = Util::generateContextName("Inode", iinode_id);
+    mace::string occtxName = Util::generateContextName("Inode", oinode_id);
+    createNewOwnership(pctxname, icctxName);
+    createNewOwnership(pctxname, occtxName);
+      
+    initInode( iinode_id, nId, ifilename, INODE_TYPE_FILE );
+    initInode( oinode_id, nId, ofilename, INODE_TYPE_FILE );
+
+    children[ ifilename ] = iinode_id;
+    children[ ofilename ] = oinode_id;
+
+    writeChildrenToFile( fileName, children );
+
+    if( type == MAPPER ){
+      async_replyMapperCreateIOFiles(id, iinode_id, oinode_id);
+    } else {
+      async_replyReducerCreateIOFiles(id, iinode_id, oinode_id);
+    }
+
+  }
+
+  async [Inode<nId>] readFile( const uint32_t& nId, const uint32_t& id, const uint32_t& mId, const uint8_t& type ) {
+    acount ++;
+    updateAccessCount(fileName, acount);
+
+    if( type == MAPPER ) {
+      async_mapperReadDone( id );
+    } else {
+      async_reducerReadDone( id, mId );
+    }
+  }
+
+  async [Inode<nId>] writeFile( const uint32_t& nId, const uint32_t& id, const uint32_t& mId, const uint8_t& type, 
+      const uint8_t& ftype ) {
+    acount ++;
+    updateAccessCount(fileName, acount);
+
+    if( type == MAPPER ) {
+      async_mapperWriteDone( id );
+    } else if( ftype == INPUT) {
+      async_reducerWriteInputDone( id, mId );
+    } else {
+      async_reducerWriteOutputDone( id );
+    }
+  }
+
+
+  //////////////////////////////////////////////////////////////////////////////
+
+  upcall [WTFRoot] deliver(const MaceKey& src, const MaceKey& dest, const MapReduceJob& msg) {
+    waitingClientId = msg.clientId;
+    clientAddr = src;
+
+    for( uint32_t i=1; i<=N_MAPPER; i++ ) {
+      async_startTask(i, msg.jobName);
+    }
+  }
+
+  async [Mapper<mId>] startTask( const uint32_t& mId, const mace::string& job_name ) {
+    async_createIOFiles( dirInodeId, job_name, mId, MAPPER );
+  }
+
+  async [Mapper<mId>] replyMapperCreateIOFiles( const uint32_t& mId, const uint32_t& iinode, const uint32_t& oinode) {
+    ifileInode = iinode;
+    ofileInode = oinode;
+
+    async_readFile( ifileInode, mId, mId, MAPPER );
+  }
+
+  async [Mapper<mId>] mapperReadDone( const uint32_t& mId ) {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Mapper("<< mId <<") has read input file!" << Log::endl;
+    doComputation();
+    async_writeFile( ofileInode, mId, mId, MAPPER, OUTPUT );
+  }
+
+  async [Mapper<mId>] mapperWriteDone( const uint32_t& mId ) {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Mapper("<< mId <<") has write output file!" << Log::endl;
+    for( uint32_t i=1; i<=N_REDUCER; i++ ) {
+      async_mapperTaskDone( i, mId, ofileInode );
+    }
+  }
+
+  async [Reducer<rId>] mapperTaskDone( const uint32_t& rId, const uint32_t& mId, const uint32_t& iinode ) {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Reducer("<< rId <<") is informed Mapper("<< mId <<") is done!" << Log::endl;
+
+    if( readyMappers.find(mId) == readyMappers.end() ) {
+      readyMappers[mId] = iinode;
+    } else {
+      ASSERT(false);
+    }
+
+    if( ifileInode == 0 && !isToCreateIOFiles ){
+      async_createIOFiles( dirInodeId, "new_job", rId, REDUCER );
+      isToCreateIOFiles = true;
+    } else if( ifileInode>0 ) {
+      async_readFile( iinode, rId, mId, REDUCER );
+    }
+  }
+
+  async [Reducer<rId>] replyReducerCreateIOFiles( const uint32_t& rId, const uint32_t& iinode_id, const uint32_t& oinode_id) {
+    ifileInode = iinode_id;
+    ofileInode = oinode_id;
+
+    for( mace::map<uint32_t, uint32_t>::iterator iter = readyMappers.begin(); iter != readyMappers.end(); iter++ ) {
+      async_readFile( iter->second, rId, iter->first, REDUCER );
+    }
+  }
+
+  async [Reducer<rId>] reducerReadDone( const uint32_t& rId, const uint32_t& mId ) {
+    ADD_SELECTORS("WTFAppServer");
+    async_writeFile( ifileInode, rId, mId, REDUCER, INPUT );
+  }
+
+  async [Reducer<rId>] reducerWriteInputDone( const uint32_t& rId, const uint32_t mId ) {
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Reducer("<< rId <<") read from Mapper("<< mId <<")!" << Log::endl;
+
+    ASSERT( doneMappers.count(mId) == 0 );
+    doneMappers.insert( mId );
+
+    if( doneMappers.size() == N_MAPPER ){
+      doComputation();
+      async_writeFile( ofileInode, rId, rId, REDUCER, OUTPUT );
+      maceout << "Reducer("<< rId <<") have read all data!" << Log::endl;
+    }
+  } 
+
+  async [Reducer<rId>] reducerWriteOutputDone( const uint32_t& rId ){
+    async_reducerTaskDone( rId );
+  }
+
+  async [WTFRoot] reducerTaskDone(const uint32_t& rId ){
+    ADD_SELECTORS("WTFAppServer");
+    maceout << "Reducer("<< rId <<") has done!" << Log::endl;
+
+    ASSERT( doneReducers.count(rId) == 0 );
+    doneReducers.insert( rId );
+
+    if( doneReducers.size() == N_REDUCER ) {
+      downcall_route( clientAddr, RequestReply( waitingClientId, 1) );
+    }
+  }
+
+}
+
+routines {
+  [__null] mace::string extractFirstNameFromPath( const mace::string& path, mace::string& restPath ) {
+    if( path[0] != '/' ) {
+      return "";
+    }
+
+    mace::string str_temp = path.substr(1);
+    std::size_t pos = str_temp.find( "/" );
+    if( pos == std::string::npos ){
+      restPath = "";
+      return str_temp;
+    } else {
+      restPath = str_temp.substr(pos+1);
+      mace::string name = str_temp.substr(0, pos);
+      return name;
+    }
+  }
+
+  [__null] mace::string getInodeNameFromPath( const mace::string& path ) {
+    mace::string name = path;
+    for( uint32_t i=0; i<name.length(); i++ ) {
+      if( name[i] == '/' ) {
+        name[i] = '-';
+      }
+    }
+    return name;
+  }
+
+  [__null] void writeChildrenToFile( const mace::string& inodeName, const mace::map<mace::string, uint32_t>& children ) {
+    ADD_SELECTORS("WTFAppServer");
+    if( children.size() == 0 ){
+      return;
+    }
+
+    mace::string fileName = inodeName;
+    
+    std::ofstream myfile;
+    myfile.open ( fileName.c_str() );
+    for( mace::map<mace::string, uint32_t>::const_iterator iter = children.begin(); iter != children.end(); iter ++ ) {
+      myfile << "inode-" << iter->second << " ";
+    }
+    myfile.close();
+  
+  }
+
+  [__null] void updateAccessCount( const mace::string& fileName, const uint64_t& acount ) {
+    FILE* fp = fopen (fileName.c_str(),"w");
+    ASSERT( fp != NULL );
+    fprintf(fp, "Type=%d\n", (int)acount);
+    fclose(fp);
+  }
+
+  [__null] void doComputation() {
+
+  }
+
+  [Inode<nId>] void initInode( const uint32_t& nId, const uint32_t& pnId, const mace::string& name, const uint8_t type ) {
+    ADD_SELECTORS("WTFAppServer");
+    inodeName = name;
+    maceout << "Create inode: " << name << " in Inode("<< pnId <<")." << Log::endl;
+
+    std::ostringstream oss;
+    oss << "WTF-inode-" << nId;
+    fileName = ROOT_DIR + "/" + oss.str();  
+    
+    inodeType = type;
+    parentInodeId = pnId;
+    acount = 0;
+
+    FILE* fp = fopen (fileName.c_str(),"w");
+    ASSERT( fp != NULL );
+    fprintf(fp, "Type=%d\n", inodeType);
+    fclose(fp);
+  
+  }
+
+  [Inode<nId>] uint8_t getInodeType( const uint32_t& nId ) {
+    ADD_SELECTORS("WTFAppServer");
+    return inodeType;
+  }
+
+
+  
+}

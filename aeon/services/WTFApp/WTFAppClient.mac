@@ -1,0 +1,321 @@
+#include "marray.h"
+#include "RandomUtil.h"
+#include "mvector.h"
+#include "mlist.h"
+#include "m_map.h"
+#include <stdio.h>
+#include <sys/time.h>
+
+service WTFAppClient;
+ 
+provides Null;
+
+
+services {
+  Transport t;
+}
+ 
+constants {
+  
+}
+ 
+constructor_parameters {
+  uint32_t N_CLIENT = 1;
+	NodeSet TagServer = NodeSet();
+
+  uint32_t DIR_DEPTH = 1;
+  uint32_t N_DIR_PER_DEPTH = 2;
+  uint64_t TOTAL_N_REQUEST = 10;
+  uint64_t N_OUTPUT = 100;
+}
+
+#minclude "WTFAppMessages.mi"
+
+state_variables {
+  context Client <uint32_t clientId> {
+    uint32_t clientId;
+   
+    MaceKey serverAddr;
+    
+    uint64_t lastRequestTime;
+    uint8_t lastRequestType;
+    
+    uint64_t reqCount;
+    uint64_t requestTimePeriod;
+
+    uint32_t inodeId;
+    
+    uint32_t dirDepth;
+    uint32_t nDirCurDepth;
+
+    mace::vector<uint32_t> nextInodeIds;
+    mace::map<uint32_t, uint32_t> inodeDepths;
+  }
+
+  context Controller {
+
+  }
+
+}
+ 
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "Start WTFAppClient!" << Log::endl;
+    ASSERT( TagServer.size() == 1 );
+    for( uint32_t i=0; i<=N_CLIENT; i++) {
+      uint32_t clientId = i;
+      mace::string clientCtxName = generateContextName("Client", clientId);
+      createNewOwnership("globalContext", clientCtxName);
+      async_initClient(clientId);
+    }
+
+  }
+
+  async [Client<nClient>] initClient(const uint32_t& nClient) {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "To initialize Client("<< nClient <<")!" << Log::endl;
+
+    clientId = nClient;
+    inodeId = 0;
+    
+    reqCount = 0;
+    requestTimePeriod = 0;
+
+    dirDepth = 0;
+    nDirCurDepth = 0;
+
+    downcall_route( *( TagServer.begin() ), ConnectionRequest(clientId) );
+  }
+
+
+  /// create files in the same folder
+  /*
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+
+    if( msg.clientId == 0 ) {
+      sleep(3);
+      mace::string dirName = "/client-0-dir";
+      downcall_route( serverAddr, CreateInodeWTF(msg.clientId, dirName, 0) );
+    }
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const CreateInodeReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    if( msg.clientId == 0 ){
+      for( uint32_t i=1; i<=N_CLIENT; i++ ){
+        async_createFileInDir( i, msg.inodeId );
+      }
+    } else {
+      uint64_t latency = mace::getmtime() - lastRequestTime;
+      requestTimePeriod += latency;
+      if( reqCount < 10 ) {
+        reqCount ++;
+        std::ostringstream oss;
+        oss << Util::getMaceAddr() << "-client-" <<msg.clientId << "-" << reqCount;
+
+        lastRequestTime = mace::getmtime();
+        downcall_route(serverAddr, CreateInodeDIR(clientId, inodeId, oss.str(), 1) );
+      } else {
+        double avg_latency = requestTimePeriod / reqCount;
+        maceout << "client("<< msg.clientId <<") reqCount=" << reqCount << " avgLatency=" << avg_latency << Log::endl; 
+      }
+    }
+  }
+
+  async [Client<nClient>] createFileInDir( const uint32_t& nClient, const uint32_t& nId ){
+    ADD_SELECTORS("WTFAppClient");
+    inodeId = nId;
+
+    reqCount ++;
+
+    std::ostringstream oss;
+    oss << Util::getMaceAddr() << "-client-" << nClient << "-" << reqCount;
+
+    lastRequestTime = mace::getmtime();
+    downcall_route(serverAddr, CreateInodeDIR(clientId, nId, oss.str(), 1) );
+  }
+  */
+
+  /// create files in different folders
+  /*
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+
+    if( msg.clientId > 0 ) {
+      std::ostringstream oss;
+      oss << "/" << Util::getMaceAddr() << "-client-" <<msg.clientId << "-dir";
+      downcall_route( serverAddr, CreateInodeWTF(msg.clientId, oss.str(), 0) );
+    }
+  }
+
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const CreateInodeReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    if( inodeId == 0 ){
+      inodeId = msg.inodeId;
+    } else {
+      uint64_t latency = mace::getmtime() - lastRequestTime;
+      requestTimePeriod += latency;
+    }
+      
+    if( reqCount < 10 ) {
+      reqCount ++;
+      std::ostringstream oss;
+      oss << Util::getMaceAddr() << "-client-" <<msg.clientId << "-" << reqCount;
+
+      lastRequestTime = mace::getmtime();
+      downcall_route(serverAddr, CreateInodeDIR(clientId, inodeId, oss.str(), 1) );
+    } else {
+      double avg_latency = requestTimePeriod / reqCount;
+      maceout << "client("<< msg.clientId <<") reqCount=" << reqCount << " avgLatency=" << avg_latency << Log::endl; 
+    }
+  }
+  */
+
+  /// rename folders
+  /*
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+
+    if( msg.clientId > 0 ) {
+      dirDepth ++;
+      std::ostringstream oss;
+      oss << "/" << Util::getMaceAddr() << "-client-" << msg.clientId << "-dir-" << dirDepth ;
+      downcall_route( serverAddr, CreateInodeWTF(msg.clientId, oss.str(), 0) );
+    }
+  }
+
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const CreateInodeReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    ASSERT( msg.inodeId != 0 );
+    if( inodeId == 0 ){
+      inodeId = msg.inodeId;
+    }
+
+    nextInodeIds.push_back( msg.inodeId );
+    inodeDepths[ msg.inodeId ] = dirDepth;
+    // maceout << "inode("<< msg.inodeId <<") depth: " << dirDepth << Log::endl;
+
+    while( nextInodeIds.size() > 0 ) {
+      uint32_t nnId = nextInodeIds[0];
+      // maceout << "client("<< msg.clientId <<") next inodeId: " << nnId << Log::endl;
+      if( nDirCurDepth == N_DIR_PER_DEPTH ){
+        nDirCurDepth = 0;
+        nextInodeIds.erase( nextInodeIds.begin() );
+      } else if( inodeDepths[nnId] >= DIR_DEPTH ) {
+        nextInodeIds.erase( nextInodeIds.begin() );
+      } else {
+        dirDepth = inodeDepths[ nnId ] + 1;
+        nDirCurDepth ++;
+        std::ostringstream oss;
+        oss << "client-" << msg.clientId << "-dir-" << dirDepth << "-" << nDirCurDepth ;
+        downcall_route( serverAddr, CreateInodeDIR(msg.clientId, nnId, oss.str(), 0 ) );
+        break;
+      }
+    }
+
+    if( nextInodeIds.size() == 0 ){
+      reqCount ++;
+      lastRequestTime = mace::getmtime();
+
+      downcall_route( serverAddr, RenameInodeDIR(msg.clientId, inodeId, "newName" ) );
+    }
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const RequestReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    requestTimePeriod += latency;
+
+    if( reqCount < TOTAL_N_REQUEST ) {
+      reqCount ++;
+      lastRequestTime = mace::getmtime();
+      downcall_route( serverAddr, RenameInodeDIR(msg.clientId, inodeId, "newName" ) );
+    } else {
+      double avg_latency = requestTimePeriod / reqCount;
+      maceout << "client("<< msg.clientId <<") reqCount=" << reqCount << " avgLatency=" << avg_latency << Log::endl;
+    }
+  }
+  */ 
+
+  /// Access private files
+  /*
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+    sleep(3);
+
+    if( msg.clientId > 0 ) {
+      std::ostringstream oss;
+      oss << "/" << Util::getMaceAddr() << "-client-" << msg.clientId << "-dir";
+      downcall_route( serverAddr, CreateInodeWTF(msg.clientId, oss.str(), 0) );
+    }
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const CreateInodeReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    ASSERT( msg.inodeId != 0 );
+    inodeId = msg.inodeId;
+
+    reqCount ++;
+    lastRequestTime = mace::getmtime();
+    downcall_route( serverAddr, OpenInodeDIR( msg.clientId, inodeId ) );
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const RequestReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    requestTimePeriod += latency;
+
+    if( reqCount % N_OUTPUT == 0 ) {
+      double avg_latency = requestTimePeriod / N_OUTPUT;
+      maceout << "client("<< msg.clientId <<") reqCount=" << reqCount << " avgLatency=" << avg_latency << Log::endl;
+
+      requestTimePeriod = 0;
+    } 
+
+    reqCount ++;
+    lastRequestTime = mace::getmtime();
+    downcall_route( serverAddr, OpenInodeDIR( msg.clientId, inodeId ) );
+  }
+  */
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    maceout << "Client("<< msg.clientId <<")'s serverAddr=" << msg.proxyAddr << Log::endl;
+    serverAddr = msg.proxyAddr;
+    sleep(3);
+
+    if( msg.clientId == 1 ) {
+      lastRequestTime = mace::getmtime();
+      downcall_route( serverAddr, MapReduceJob(msg.clientId, "new-job" ) );
+    }
+  }
+
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const RequestReply& msg) {
+    ADD_SELECTORS("WTFAppClient");
+    
+    uint64_t latency = mace::getmtime() - lastRequestTime;
+    maceout << "client("<< msg.clientId <<") latency=" << latency << Log::endl;
+  }
+}
+
+routines {
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}

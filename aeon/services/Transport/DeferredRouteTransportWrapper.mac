@@ -1,0 +1,102 @@
+#include "lib/GlobalCommit.h"
+#include "ThreadStructure.h"
+#include "Event.h"
+
+service DeferredRouteTransportWrapper;
+
+provides Route;  // should be changed.
+
+trace=med;
+
+services
+{
+  Transport trans = TcpTransport();
+}
+
+
+messages 
+{
+  Data {
+    MaceKey source;
+    MaceKey dest;
+    registration_uid_t regId;
+    mace::string data;
+  }
+}
+
+auto_types {
+  Packet {
+    MaceKey src;
+    MaceKey dest;
+    registration_uid_t regId;
+    mace::string data;
+  }
+}
+
+typedefs {
+  typedef mace::multimap<mace::OrderID, Packet> MessageQueue;
+}
+
+state_variables {
+  MaceKey me;
+  MessageQueue queued;
+
+  pthread_mutex_t deliverMutex __attribute((serialize(no)));
+
+}
+
+transitions 
+{
+  downcall maceInit() {
+    me = localAddress();
+
+    mace::SpecificCommitWrapper<DeferredRouteTransportWrapperService>* executor = new mace::SpecificCommitWrapper<DeferredRouteTransportWrapperService>(this, &DeferredRouteTransportWrapperService::commitCallBack);
+    mace::GlobalCommit::registerCommitExecutor(executor);
+    pthread_mutex_init(&deliverMutex, 0);
+  }
+  downcall route(const MaceKey& dest, const std::string& msg, registration_uid_t regId) [locking=none] {
+    MaceKey nextHop = dest;
+
+    maceout << "comparing my ticket("<<ThreadStructure::myEventID()<<") with current ticket("<<ThreadStructure::current_eventId()<<")" << Log::endl;
+
+    if(upcall_forward(me, dest, nextHop, msg, regId)) {
+      // we actually have to return the value from downcall_route() but this is simply ignored on Bamboo.
+      // So we are just simply using queue to save message.
+      if( ThreadStructure::myEventID() == ThreadStructure::current_eventId() ) {
+        downcall_route(nextHop, Data(me, dest, regId, msg));
+      } else {
+        maceout << "enqueuing message..." << Log::endl;
+
+        ScopedLock sl(deliverMutex);
+
+        queued.insert(mace::pair<mace::OrderID, Packet>(ThreadStructure::myEventID(), Packet(me, dest, regId, msg)));    // queue else
+      }
+    }
+    return true;
+
+  }
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Data& msg) [locking=none] {
+    upcall_deliver(msg.source, msg.dest, msg.data, msg.regId);
+  }
+  upcall error(const MaceKey& nodeId, TransportError::type error_code, const std::string& m, registration_uid_t registrationUid) [locking=none] {
+    upcallAllVoid(error, nodeId, error_code, m);
+  }
+  upcall messageError(const MaceKey& dest, TransportError::type error_code, const Data& msgData, registration_uid_t regId) [locking=none] {
+    upcall_messageError(msgData.dest, error_code, msgData.data, msgData.regId);
+  }
+}
+
+
+routines {
+  void commitCallBack(uint64_t myTicket) {
+    maceout << "commitCallback called. Processing outstanding " << queued.size() << " messages." << Log::endl;
+    MessageQueue::iterator i;
+    for (i=queued.begin(); i!= queued.end(); i++) {
+      Packet m = i->second;
+      downcall_route(m.dest, Data(m.src, m.dest, m.regId, m.data));
+    }
+    queued.clear();
+  }
+
+}
+

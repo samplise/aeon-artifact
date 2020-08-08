@@ -1,0 +1,59 @@
+#ifndef _maceConfig_h
+#define _maceConfig_h
+
+/* #undef EINVAL_IS_NOTCONN */
+/* #undef STUPID_FD_SET_CONST_HACK */
+
+/* #undef HAVE_UNISTD_H */
+/* #undef HAVE_SYS_TIME_H */
+/* #undef HAVE_NETDB_H */
+/* #undef HAVE_NETINET_IN_H */
+/* #undef HAVE_ARPA_INET_H */
+/* #undef HAVE_SYS_SELECT_H */
+/* #undef HAVE_SYS_WAIT_H */
+
+/* #undef HAVE_DRAND48 */
+/* #undef HAVE_RAND_S */
+#define HAVE_RAND
+/* #undef HAVE_PIPE */
+#define HAVE__PIPE
+/* #undef HAVE_FCNTL */
+/* #undef HAVE_IOCTLSOCKET */
+/* #undef HAVE_SIGACTION */
+/* #undef HAVE_GETPPID */
+/* #undef HAVE_WAITPID */
+#define HAVE__CWAIT
+
+/* #undef INCLUDE_CGI */
+
+#define WINDOWS_FILES
+
+/* #undef SIGNED_SOCKET */
+#ifdef SIGNED_SOCKET
+typedef int socket_t;
+#else
+typedef unsigned int socket_t;
+#endif
+
+/* #undef HAVE_USECONDS_T */
+#ifndef HAVE_USECONDS_T
+typedef unsigned int useconds_t;
+#endif
+
+/* #undef HAVE_SUSECONDS_T */
+#ifndef HAVE_USECONDS_T
+typedef int suseconds_t;
+#endif
+
+/* #undef HAVE_UINT */
+#ifndef HAVE_UINT
+typedef unsigned int uint;
+typedef unsigned short ushort;
+#endif
+
+/* #undef HAVE_IN_ADDR_T */
+#ifndef HAVE_IN_ADDR_T
+typedef uint32_t in_addr_t;
+#endif
+
+#endif //_maceConfig_h

@@ -1,0 +1,347 @@
+#include "RandomUtil.h"
+
+service BTreeClient;
+
+provides Null;
+
+services {
+  Transport t;
+}
+
+constants {
+  uint8_t READ_OP = 0;
+  uint8_t INSERT_OP = 1;
+  uint8_t DELETE_OP = 2;
+
+  uint16_t LOG_LEVEL_1 = 1;
+  uint16_t LOG_LEVEL_2 = 2;
+}
+
+constructor_parameters {
+  NodeSet HeadNode = NodeSet(); /* Should be only one node */
+
+  uint32_t N_CLIENTS = 8;  
+  uint32_t CACHED_KEY = 0;
+
+  uint32_t P_READ = 80;
+  uint32_t P_INSERT = 90;
+  uint32_t P_DELETE = 100;
+
+  uint64_t MAX_KEY = 1000;
+
+  uint64_t MAX_CACHED_NODE = 100;
+
+  uint32_t OUTPUT_COUNT = 10;
+
+  uint64_t MAX_N_REQ = 1000;
+
+  uint16_t LOG_LEVEL = 1;
+
+  uint64_t INSERT_WARM_N_REQUEST = 100;
+  uint64_t READ_WARM_N_REQUEST = 600;
+}
+
+typedefs {
+  
+}
+
+#minclude "BTreeMessages.mi"
+
+auto_types {
+  OpInfo {
+    int key;
+    uint8_t opType;
+  }
+
+  CacheNodeInfo __attribute((comparable(equals=default; lessthan=default))) {
+    int min_key;
+    int max_key;
+  }
+}
+
+state_variables {
+  context Client<uint32_t clindId> {
+    uint32_t clientId;
+
+    uint64_t totalReqCount;
+    uint64_t readReqCount;
+    uint64_t insertReqCount;
+    uint64_t deleteReqCount;
+    
+    uint64_t lastReqLauchedTime;
+    
+    uint64_t totalReqLatency;
+    uint64_t readReqLatency;
+    uint64_t insertReqLatency;
+    uint64_t deleteReqLatency;
+        
+    mace::map<uint32_t, CacheNodeInfo> cachedNodeInfos;
+
+    OpInfo lastOp;
+
+    MaceKey serverAddr;
+  }
+}
+
+local_address {
+  return downcall_localAddress();
+}
+
+
+transitions {
+  downcall maceInit() {
+    ADD_SELECTORS("BTreeClient");
+
+    srand( mace::getmtime() );
+    maceout << "HeadNode=" <<HeadNode << Log::endl;
+    ASSERT( HeadNode.size() == 1 );
+
+    for( uint32_t i=0; i<N_CLIENTS; i++) {
+      // mace::string clientCtxName = generateContextName("Client", i);
+      // createNewOwnership( "globalContext", clientCtxName );
+      async_initClient(i);
+    }
+  }
+
+  async [Client<cId>] initClient(const uint32_t& cId) {
+    ADD_SELECTORS("BTreeClient");
+    maceout<< "To initialize Client " << cId << Log::endl;
+    clientId = cId;
+    
+    totalReqCount = 0;
+    readReqCount = 0;
+    insertReqCount = 0;
+    deleteReqCount = 0;
+    
+    totalReqLatency = 0;
+    readReqLatency = 0;
+    insertReqLatency = 0;
+    deleteReqLatency = 0;
+
+    downcall_route( *(HeadNode.begin()), ConnectionRequest(clientId) );
+  }
+
+  async [Client<cId>] launchRequest( const uint32_t& cId ) {
+    ADD_SELECTORS("BTreeClient");
+    
+    int nextKey =  ( rand()+cId ) % MAX_KEY;
+    uint64_t pc = ( rand()+nextKey ) % 100;
+
+    uint8_t opType = READ_OP;
+
+    if( pc < P_READ ){
+      opType = READ_OP;
+    } else if ( pc < P_INSERT ) {
+      opType = INSERT_OP;
+    } else {
+      opType = DELETE_OP;
+    }
+    
+    lastOp.key = nextKey;
+    lastOp.opType = opType;
+    
+    lastReqLauchedTime = mace::getmtime();
+
+    // using cache information
+    if( CACHED_KEY > 0 ){
+      uint32_t nodeId = 0;  
+      int min_key = 0;
+      int max_key = 0;
+      for( mace::map<uint32_t, CacheNodeInfo>::iterator iter=cachedNodeInfos.begin(); iter != cachedNodeInfos.end(); iter++ ){
+        if( (iter->second).min_key <= nextKey && nextKey <= (iter->second).max_key ) {
+          if( nodeId == 0 ){
+            nodeId = iter->first;
+            min_key = (iter->second).min_key;
+            max_key = (iter->second).max_key;
+          } else if( min_key <= (iter->second).min_key && (iter->second).max_key <= max_key ) {
+            nodeId = iter->first;
+            min_key = (iter->second).min_key;
+            max_key = (iter->second).max_key;
+          }
+          
+        }
+      }
+      if( nodeId > 0 ){
+        if( opType == READ_OP ){
+          downcall_route( serverAddr, CacheSearchRequest(clientId, nextKey, nodeId) );
+        } else if( opType == INSERT_OP ){
+          downcall_route( serverAddr, CacheInsertRequest(clientId, nextKey, nodeId) );
+        } else {
+          downcall_route( serverAddr, CacheDeleteRequest(clientId, nextKey, nodeId) );
+        }
+        return;
+      }
+    }
+
+    if( opType == READ_OP ){
+      downcall_route( serverAddr, SearchRequest(clientId, nextKey) );
+    } else if( opType == INSERT_OP ){
+      downcall_route( serverAddr, InsertRequest(clientId, nextKey) );
+    } else {
+      downcall_route( serverAddr, DeleteRequest(clientId, nextKey) );
+    }
+  }
+
+  upcall [Client< msg.clientId >] deliver(const MaceKey& src, const MaceKey& dest, const Response& msg) {
+    ADD_SELECTORS("BTreeClient");
+
+    if(LOG_LEVEL >= LOG_LEVEL_2 ){
+      maceout << "Client("<< msg.clientId <<") recv response for key("<< msg.key <<")!" << Log::endl;
+    }
+
+    for( uint32_t i=0; i<msg.nodeIds.size(); i++ ){
+        if( msg.nodeIds[i] > 0 ){
+            CacheNodeInfo cacheNodeInfo(msg.min_keys[i], msg.max_keys[i]);
+            cachedNodeInfos[ msg.nodeIds[i] ] = cacheNodeInfo;
+        }
+    }
+    while( cachedNodeInfos.size() > MAX_CACHED_NODE ) {
+      mace::map<uint32_t, CacheNodeInfo>::iterator iter=cachedNodeInfos.begin();
+      cachedNodeInfos.erase(iter);
+    }
+
+    uint64_t lastReqLatency = mace::getmtime() - lastReqLauchedTime;
+    totalReqCount ++;
+    totalReqLatency += lastReqLatency;
+
+    if( lastOp.opType == READ_OP ) {
+      readReqCount ++;
+      readReqLatency += lastReqLatency;
+    } else if( lastOp.opType == INSERT_OP ) {
+      insertReqCount ++;
+      insertReqLatency += lastReqLatency;
+    } else {
+      deleteReqCount ++;
+      deleteReqLatency += lastReqLatency;
+    }
+
+    if( totalReqCount % OUTPUT_COUNT == 0 ) {
+      double avgReqLatency = totalReqLatency / OUTPUT_COUNT;
+
+      double avgReadReqLatency = 0;
+      if( readReqCount > 0 ){
+        avgReadReqLatency = readReqLatency/readReqCount;
+      }
+
+      double avgInsertReqLatency = 0;
+      if( insertReqCount > 0 ){
+        avgInsertReqLatency = insertReqLatency/insertReqCount;
+      }
+
+      double avgDeleteReqLatency = 0;
+      if( deleteReqCount > 0 ){
+        avgDeleteReqLatency = deleteReqLatency/deleteReqCount;
+      }
+
+      maceout << "Client("<< msg.clientId <<") totalReqCount=" << totalReqCount << " avgReqLatency=" << avgReqLatency <<
+      "; readReqCount=" << readReqCount << " avgReadReqLatency="<< avgReadReqLatency <<
+      "; insertReqCount=" << insertReqCount << " avgInsertReqLatency="<< avgInsertReqLatency <<
+      "; deleteReqCount=" << deleteReqCount << " avgDeleteReqLatency="<< avgDeleteReqLatency <<  Log::endl;
+      
+      totalReqLatency = 0;
+
+      readReqCount = 0;
+      readReqLatency = 0;
+
+      insertReqCount = 0;
+      insertReqLatency = 0;
+
+      deleteReqCount = 0;
+      deleteReqLatency = 0;
+    }
+
+    
+    if( totalReqCount >= MAX_N_REQ && MAX_N_REQ > 0 ) {
+      maceout << "Client("<< msg.clientId <<") has launched " << totalReqCount << Log::endl;
+      return;
+    }
+    
+
+    int nextKey =  ( rand()+clientId ) % MAX_KEY;
+    uint64_t pc = ( rand()+nextKey ) % 100;
+
+    uint8_t opType = READ_OP;
+
+    if( pc < P_READ ){
+      opType = READ_OP;
+    } else if ( pc < P_INSERT ) {
+      opType = INSERT_OP;
+    } else {
+      opType = DELETE_OP;
+    }
+
+    if( totalReqCount < INSERT_WARM_N_REQUEST ) {
+      opType = INSERT_OP;
+    } else if( totalReqCount < READ_WARM_N_REQUEST ) {
+      opType = READ_OP;
+    }
+    
+    lastOp.key = nextKey;
+    lastOp.opType = opType;
+    
+    lastReqLauchedTime = mace::getmtime();
+    if(LOG_LEVEL >= LOG_LEVEL_2 ){
+      maceout << "Client("<< msg.clientId<<") Next Key: " << nextKey << Log::endl;
+    }
+    if( CACHED_KEY > 0 ){
+      uint32_t nodeId = 0;  
+      int min_key = 0;
+      int max_key = 0;
+      for( mace::map<uint32_t, CacheNodeInfo>::iterator iter=cachedNodeInfos.begin(); iter != cachedNodeInfos.end(); iter++ ){
+        if( (iter->second).min_key <= nextKey && nextKey <= (iter->second).max_key ) {
+          if( nodeId == 0 ){
+            nodeId = iter->first;
+            min_key = (iter->second).min_key;
+            max_key = (iter->second).max_key;
+          } else if( min_key <= (iter->second).min_key && (iter->second).max_key <= max_key ) {
+            nodeId = iter->first;
+            min_key = (iter->second).min_key;
+            max_key = (iter->second).max_key;
+          }
+        }
+      }
+      if( nodeId > 0 ){
+        if( opType == READ_OP ){
+          downcall_route( serverAddr, CacheSearchRequest(clientId, nextKey, nodeId) );
+        } else if( opType == INSERT_OP ){
+          downcall_route( serverAddr, CacheInsertRequest(clientId, nextKey, nodeId) );
+        } else {
+          downcall_route( serverAddr, CacheDeleteRequest(clientId, nextKey, nodeId) );
+        }
+        return;
+      }
+    }
+
+    if( opType == READ_OP ){
+      downcall_route( serverAddr, SearchRequest(clientId, nextKey) );
+    } else if( opType == INSERT_OP ){
+      downcall_route( serverAddr, InsertRequest(clientId, nextKey) );
+    } else {
+      downcall_route( serverAddr, DeleteRequest(clientId, nextKey) );
+    }
+  }
+
+  
+  upcall [Client<msg.clientId>] deliver(const MaceKey& src, const MaceKey& dest, const ConnectionSetup& msg) {
+    ADD_SELECTORS("BTreeClient");
+    serverAddr = msg.proxyAddr;
+    maceout<< "Client("<< msg.clientId<<")'s new serverAddr=" << serverAddr << Log::endl;
+    
+    sleep(1);
+    async_launchRequest(msg.clientId);
+  }
+}
+
+
+routines {
+
+[__null] mace::string generateContextName( const mace::string& contextTypeName, const uint32_t& contextId ) {
+  std::ostringstream oss;
+  oss<< contextTypeName << "[" << contextId << "]";
+  return oss.str();
+}
+
+}
+
+
+

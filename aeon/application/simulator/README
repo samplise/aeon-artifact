@@ -1,0 +1,157 @@
+When using the model checker, disable reverse dns lookups by editing lib/Util.cc.
+
+To add new tests to the Model Checker, you'll need to define a MCTest
+derivative class for each one.  This interface (defined in
+application/modelchecker/LoadTest.h) has a method for you to give the test a
+name, and to define a method for constructing a test.  Example tests can be
+found in application/Modelchecker/ServiceTests.cc.  You then need to register
+your tests manually by editing modelchecker.cc, or using compiler tricks as is
+done in ServiceTests.cc.  Once done, you can run your new test by constructing
+an appropriate parameter file, and using one of our methods for testing.
+
+Overview of methods:
+
+modelchecker: The actual model checking binary.  It can be run by hand, though
+it is often easier to use one of the wrapper scripts.
+
+run-modelchecker.pl: automates the process of invoking the model checker,
+generating event graphs on error, generating replay logs, and finding the last
+nail.
+
+mdb: The Mace debugger.  It can handle replay logs, invoke the service from a
+prefix, or allow you to explore it manually.  The command list can be found
+within mdb by typing 'h', and help is also available by email
+(mace-dev@kcubes.com).
+
+massageLogs.pl: This is actually not part of the model checker, but rather a
+helper script for debugging live runs.  Gather all the logs into one place with
+trace=med on all services and Log::autoAddAll() set, then use massageLogs.pl to
+generate an output file which can be replayed in the mace debugger.
+
+state-dump.sh: Used by mdb to visualise states.  Edit state-dump.sh to take the
+dump of a single state and generate your visual.  Here it uses the
+visualizeDot.pl script to create dot files for tree-like relationships between
+nodes.
+
+visualizeDot.pl: Used by state-dump.sh to generate a dot file of node
+relationships, which can then be graphed using 'dot' or the like.
+
+
+Detailed run-modelchecker.pl:
+run-modelchecker will create a set of files in your current directory (for this
+reason, I generally create a directory for each invocation of run-modelchecker,
+and name the directory by the bug name once found).
+
+1. mc.log: the output of run-modelchecker, also seen on the standard output.
+
+2. stats.log: the statistics from the model checking search (if statistics
+collection is turned on).
+
+(if an error is found)
+
+3. errorN.path: for N between 1 and K where K is the number of error paths
+found.  This is the random number sequence file for replaying the execution.
+It has some extra state for handilng gusto toggle depths.
+
+4. error.log: the log of the replayed execution for error1.path
+
+5. error.graph: the event-graph from error.log
+
+(if the bug was a liveness bug)
+
+6. liveN.path: a set of paths which all led to live states.  N represents the
+depth at which the path matches the error path.
+
+7. live.log: the replay-log from the largest N liveN.path.
+
+8. live.graph: the event-graph from live.log.
+
+9. lastnail_stats.log: the stats output from the last nail search
+
+After running run-modelchecker.pl, it is common to then run mdb on the
+error.log.
+
+
+Sample params.default:
+
+#Definitely set this one!
+MACE_PRINT_HOSTNAME_ONLY = 1
+
+#For more verbosity use higher numbers.  But the default is very verbose on replay.
+# MACE_LOG_LEVEL = 1
+
+#Control network and node errors
+USE_UDP_REORDER = 1
+USE_UDP_ERRORS = 1
+USE_NET_ERRORS=1  # specifically TCP errors
+SIM_NODE_FAILURE=1
+
+#Whether the search should use best-first or not -- turning on is less tested, but can be faster at the expense of more memory
+USE_BEST_FIRST = 0 
+
+MACE_PORT=10201 #Just some random port number
+max_num_steps=20000 #How many steps before the path is considered dead
+
+#Controlls how often status is printed out -- the path number is masked with this number, and if it's 0 prints path status
+#search_print_mask=0
+#search_print_mask=15
+#search_print_mask=255
+search_print_mask=4095
+
+#When set to 1, prints the serch prefix to a file (prefixN.path) for each path found which leads to a live state
+PRINT_SEARCH_PREFIX=0
+
+#Controls search features.  Recommended to leave these on.
+USE_RANDOM_WALKS=1
+USE_GUSTO=1
+USE_STATE_HASHES=1
+
+NUM_RANDOM_PATHS=60 # The number of paths to attempt at a prefix length before declaring a prefix dead.
+
+#When set, the model checker will stop after exploring this number of paths.
+#MAX_PATHS=20
+#MAX_PATHS=200
+#MAX_PATHS=50000
+#MAX_PATHS=1000000
+
+#The divergence monitor will signal errors when transitions take
+#longer than divergence_timeout.  A kind of deadlock detector.
+RUN_DIVERGENCE_MONITOR = 1
+divergence_assert = 1 # causes a divergence to end the execution, as opposed to allowing it to continue to see if the transition will complete.
+divergence_timeout = 30 # how long is considered too long to run a single transition
+
+#Which test to run
+CHECKED_SERVICE=RandTree
+
+num_nodes=4 #number of nodes to create
+queue_size=100000 #commonly used to pass into the SimulatedTCP service for buffer size (in # messages) before dropping them.
+
+#You can also set service-specific parameters here:
+
+#MaceTransport
+#messageCount = 16
+#messageSize = 1600
+#useRTS = 1
+#CHECKED_SERVICE=MaceTransport
+
+#Trace options
+#TRACE_ALL=1
+#TRACE_SUBST=ERROR
+#TRACE_SUBST=::forward::(demux) ::deliver::(demux) ::requestFlushedNotification ::expire ::maceInit ::route (downcall) (upcall) (routine) (timer) Propert Quantification SimulatorUDPService logThread monitor __Simulator__ SimulateEventEnd SimulateEventBegin NumberGen getReadyNodes SimNetwork SimScheduler SimApplication SimTransportApp
+#TRACE_SIMULATOR=1
+#TRACE_STATE=1
+
+#Parameters for using the replay run -- the name of the file to provide the sequence
+#RANDOM_REPLAY_FILE=- # a '-' means it will read the file from standard input.  mdb uses this for live-replays.
+#RANDOM_REPLAY_FILE=error1.path
+#RANDOM_REPLAY_FILE=error2.path
+
+#LAST_NAIL_REPLAY_FILE=error1.path # the path to search around.  run-modelchecker uses this internally
+
+#Parameters for using the state space search: Search depth and an optional sequence to start with.
+SEARCH_DEPTH=5  # controls the bounded search depth increment.  Is both the starting depth and the depth increment
+#RANDOM_UTIL_PREFIX_FILE=prefix1.path  # start the search after executing the path in prefix1.path
+#RANDOM_UTIL_PREFIX_SEARCH=1 2 1 2 1 0 1 3 1 0 2 2 2 0 0  # Can also specify the path here.  Advanced use only
+#RANDOM_UTIL_START_SEARCH=1 1 3 0 0 1 1 1 2 0 2 1 0 0 0   # Can be used to skip ahead in the search.  Advanced use only
+
+#There are a variety of other configuration options for advanced users.  See the code for these.

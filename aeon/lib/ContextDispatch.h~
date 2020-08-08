@@ -1,0 +1,74 @@
+#ifndef __CONTEXT_DISPATCH_h
+#define __CONTEXT_DISPATCH_h
+
+#include "ContextBaseClass.h"
+#include "Message.h"
+#include "ThreadPool.h"
+/**
+ * \file ContextDispatch.h
+ * \brief declares the ContextEventTP class
+ */
+
+namespace mace{
+
+/**
+ * thread pool for execution in the context
+ *
+ * uses ThreadPool class to manage the threads
+ * */
+class ContextEventTP {
+  typedef mace::ThreadPool<ContextEventTP, mace::ContextEvent*> ThreadPoolType;
+  private:
+    ContextBaseClass* context;
+    ThreadPoolType *tpptr;
+		pthread_t contextCommitThread;
+
+		pthread_mutex_t commitQueueMutex = PTHREAD_MUTEX_INITIALIZER;
+		mace::Event* committingEvent;
+
+    bool runDeliverCondition(ThreadPoolType* tp, uint threadId);
+    void runDeliverSetup(ThreadPoolType* tp, uint threadId);
+    void runDeliverProcessUnlocked(ThreadPoolType* tp, uint threadId);
+    void runDeliverProcessFinish(ThreadPoolType* tp, uint threadId);
+
+  public:
+    /**
+     * constructor
+     *
+     * @param context the corresponding context object
+     * @param minThreadSize the minimum size of thread pool
+     * @param maxThreadSize the max size of the thread pool
+     * */
+    ContextEventTP(ContextBaseClass* context, uint32_t minThreadSize, uint32_t maxThreadSize  );
+    /// destructor
+    ~ContextEventTP();
+
+    /// signal the thread in the pool
+    void signal(){
+      if (tpptr != NULL) {
+        tpptr->signalSingle();
+      }
+    }
+
+    /// signal and wait for the thread to terminate
+    void haltAndWait();
+    /// lock 
+    void lock(){
+      ASSERT(pthread_mutex_lock(&context->_context_ticketbooth) == 0);
+    } // lock
+ 
+    /// unlock 
+    void unlock(){
+      ASSERT(pthread_mutex_unlock(&context->_context_ticketbooth) == 0);
+    } // unlock
+
+		void* startCommitThread(void* arg);
+		void runCommit();
+		void commitEventProcess();
+		void commitEventFinish();
+		bool hasUncommittedEvents();
+		void signalCommitThread();
+};
+
+}
+#endif

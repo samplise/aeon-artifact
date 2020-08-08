@@ -1,0 +1,26 @@
+Setup Environment (for cloud machines)
+1. Install pssh latest version from http://code.google.com/p/parallel-ssh/
+2. Extract it. No need to install it.
+3. set $PATH environment to the pssh python script directory
+4. Set up ssh authentication key so that there's no need to type password every time.
+5. Copy params.default, job.input, job.spec, runworker.sh from this directory to your home directory ${HOME}
+6. Compile the Mace application 'heartbeat' and 'unit_app', copy the executables to the home directory.
+
+Setup Environment (for Boilergrid)
+1. Set up ssh authentication key to avoid typing password
+2. copy createjobs.sh and template.job to your Boilergrid home directory
+
+Modify Configuration Files
+1. parameters.default
+2. job.spec
+service: This file specifies what services this configuration is applicable.
+node: Also, it declares what contexts are mapped to one node. The actual node that is assigned the context is decided on runtime.
+monitor: You can provide a monitor which does not involve in the computation, but can gather the information sent from the nodes. To use this feature, you have to start a monitor process in your console.
+
+3. job.input
+This is the sample input file. In the service, it is given a Mace parameter 'input', where the input file is copied to the remote machine from job manager. The service is responsible for reading from such file and the format of the input is service-specific. 
+
+Running Job Manager (or so called membership service)
+1. run './heartbeat' from the home directory.
+2. Without any parameters, the program asks for whether the nodes should be located on cloud or boilergrid. To avoid typing, add parameter -pool (cloud|condor)
+3. By default, the job manager does not actively maintain the process pool size by spawning new process remotely. To do so, add parameter -norelaunch 0

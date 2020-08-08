@@ -1,0 +1,15 @@
+/**
+chuangw: test case 1 is simply composed of a maceInit() transition,  nothing else.
+
+Purpose: make sure the runtime execute properly in the minimalist fashion.
+Also, make sure no extra redundant code is generated.
+*/
+service TestCase1;
+trace=high;
+ 
+
+ 
+transitions {
+  downcall (state == init)maceInit()  {
+  }
+}

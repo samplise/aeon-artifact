@@ -1,0 +1,111 @@
+//#include <random>
+
+service EManagerDAGop;
+provides Null;
+
+typedefs {
+}
+services {
+
+}
+
+constants {
+  
+}
+
+
+constructor_parameters {
+    uint32_t N_CLIENTS = 8;
+
+    uint32_t NODE_IDENTIFIER = 100000;
+    
+    uint32_t OUTPUT_COUNT = 100;
+}
+ 
+state_variables {
+  context Node<uint32_t nId>{
+    uint32_t nodeId;
+    uint32_t childNodeId;
+  }
+
+  context Client<uint32_t cId> {
+    uint32_t clientId;
+    
+    uint64_t reqCount;
+    uint64_t last_request_time;
+    uint64_t total_latency;
+  }
+
+}
+
+messages {
+}
+ 
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("EManagerDAGop");
+    maceout <<"Start eManager measurement!!" << Log::endl;
+    for(uint32_t i=1; i<=N_CLIENTS; i++) {
+      mace::string clientCtxName = generateContextName("Client", i);
+      createNewOwnership("global", clientCtxName);
+
+      uint32_t rootNodeId = NODE_IDENTIFIER * i;
+      mace::string nodeCtxName = generateContextName("Node", rootNodeId);
+      createNewOwnership("global", nodeCtxName);
+
+      async_initClient(i, rootNodeId);
+    }
+    
+  }
+
+  async [Client<cId>] initClient(const uint32_t& cId, const uint32_t& rootNodeId) {
+    ADD_SELECTORS("EManagerDAGop");
+    clientId = cId;
+    maceout<< "Initialize Client "<< cId << Log::endl;
+
+    reqCount = 0;
+    total_latency = 0;
+
+    last_request_time = mace::getmtime();
+    async_createNewNode(rootNodeId, cId);
+  }
+
+  async [Client<cId>] createReply(const uint32_t& cId, const uint32_t& newNodeId) {
+    ADD_SELECTORS("EManagerDAGop");
+    
+    reqCount ++;
+    total_latency += mace::getmtime() - last_request_time;
+
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      double avg = total_latency / OUTPUT_COUNT;
+      maceout << "Cient("<< clientId <<"): reqCount=" << reqCount << " avg=" << avg << " count="<< 100 << Log::endl;
+      total_latency = 0;
+    }
+
+    last_request_time = mace::getmtime();
+    async_createNewNode(newNodeId, cId);
+  }
+
+  async [Node<nId>] createNewNode(const uint32_t& nId, const uint32_t& cId) {
+    ADD_SELECTORS("EManagerDAGop");
+    
+    uint32_t nextNodeId = nId + 1;
+
+    mace::string pNodeCtxName = generateContextName("Node", nId);
+    mace::string cNodeCtxName = generateContextName("Node", nextNodeId);
+    createNewOwnership(pNodeCtxName, cNodeCtxName);
+    async_createReply(cId, nextNodeId);
+  }
+}
+
+routines {
+
+  [__null] mace::string generateContextName(const mace::string& ctxName, const uint32_t& ctxId ) {
+    std::ostringstream oss;
+    oss<< ctxName << "[" << ctxId << "]";
+    return oss.str();
+  }
+ 
+
+}
+

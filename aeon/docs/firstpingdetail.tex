@@ -1,0 +1,363 @@
+% 
+% firstpingdetail.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\section{Mace Specification Overview: Ping in Detail}
+\label{sec:firstping-detail}
+
+This section explains the various parts of Ping service
+implementation.
+
+\subsection{Header Files}
+\label{sec:header-files}
+
+All code between the start of a \mac file and the first recognized
+Mace keyword is copied verbatim as C++ code into the generated header
+file in your service implementation.  Thus, you should include
+whatever standard library header files you need at the top of your
+\mac file.
+
+You do not, however, need to include header files for mace services or
+handlers that you reference.  The Mace compiler will generate include
+statements for all the service classes and handlers used by your
+service, so it is not necessary for you to include these yourself.
+For instance, even though \filename{FirstPing.mac} needs to reference the
+generated \filename{PingServiceClass.h} and
+\filename{PingDataHandler.h} files, we can omit the
+\symbolkw{\#include} directives for these files because the compiler
+will generate them for us.
+
+
+\subsection{Service}
+\label{sec:service}
+
+The beginning of our example includes a ``Service'' statement.
+
+\begin{programlisting}
+service FirstPing;
+\end{programlisting}
+
+The service statement specifies the short name of the service.  The long name
+is generated from the short name by appending ``Service'' to it, to make
+\classname{PingService}.  The build system provided with Mace requires the
+service line to match the filename.  As a shortcut, this statement may be
+abbreviated as:
+
+\begin{programlisting}
+service;
+\end{programlisting}
+
+This abbreviated form will continue to work if the filename is changed.  Future
+versions of Mace will feature a different syntax for the service name.
+
+\subsection{Provides}
+\label{sec:provides}
+
+The beginning of our example includes a ``Provides'' statement.
+
+\begin{programlisting}
+provides Ping;
+\end{programlisting}
+
+The provides statement specifies the service class of our Ping
+service.  This line causes the Mace compiler to read the
+\classname{PingServiceClass} interface file (which we also wrote), and
+generate C++ code for the Ping service so that it inherits from
+\classname{PingServiceClass}.
+
+The syntax of this statement is simple: the keyword
+\symbolkw{provides}, the name of the service class (with the suffix
+\classname{ServiceClass} omitted), and a semicolon.  Omitting this
+line causes your service to only provide the ``Null'' service class,
+which is defined just as the initialization and exit functions.
+
+
+\subsection{Services}
+\label{sec:services}
+
+After indicating the interface of the Ping service, we next specify the set of
+services we use.  In the case of Ping, we mainly need a service which can
+route messages for us over the network to a destination address.  This
+functionality exists as part of the \classname{RouteServiceClass} interface,
+and there is an included TcpTransport service which implements it.
+
+To tell Mace we want to use this service, we put it in the services block:
+
+\begin{programlisting}
+services {
+  Route router = TcpTransport();
+} // services
+\end{programlisting}
+
+This creates a variable named \variablename{router}, a reference to an
+object providing the \classname{Route} service class (defined in
+\classname{RouteServiceClass}).  We also specify that, by default,
+this should be constructed as a new TCP service.
+
+
+\subsection{The Route Service Class (briefly)}
+\label{sec:route-service-overview}
+
+The \classname{Route} service class defines the \function{route}
+method for sending data:
+
+\begin{programlisting}
+bool route(const MaceKey& dest, const std::string& msg, registration_uid_t regId);
+\end{programlisting}
+
+This method is called with a destination address and a buffer of data
+to send, as well as a registration id.  Delivery of data is made to
+the appropriately registered \classname{ReceiveDataHandler} using its
+\function{deliver} method with a \variablename{commType} of
+\literal{COMM\_TYPE\_UNICAST}:
+
+\begin{programlisting}
+void deliver(const MaceKey& source, const MaceKey& dest, const std::string& msg, 
+             registration_uid_t regId);
+\end{programlisting}
+
+% XXX
+% mention how we handle errors
+We have now covered the basics necessary to get going.  The TcpTransport
+service, which provides this interface, handles the management and
+connection of sockets as well as properly catching errors for you,
+isolating you from this burden (you can register a
+\classname{NetworkErrorHandler} to receive error notifications if
+necessary).  To send a message to a peer, just call \function{route}.
+When the message gets to the remote destination, the TCP service calls
+\function{deliver} on the registered data handler with the same
+message buffer.
+
+
+\subsection{Under The Covers}
+\label{sec:route-working-details}
+
+When you specify that you will use a \classname{Route} service class
+in \filename{FirstPing.mac}, the compiler automatically makes the Ping
+service a \classname{ReceiveDataHandler}, and when a Ping service is
+initialized, it handles initializing the RouteServiceClass instance it
+will use, constructing one if necessary, and then registering itself
+with that RouteServiceClass instance.  The \variablename{router}
+variable, defined in the services block, \emph{actually} refers to the
+registration id obtained from that registration, not to the service
+instance.  To utilize Ping's ``router'', instead of calling methods
+directly on it, you call the methods of it through helper functions
+with the same parameter list but a modified name.  For example, to
+call \function{route}, you actually call \function{downcall\_route}.
+The ``downcall\_'' refers to the fact that the router is a service you
+are using (and therefore lower in the service stack).  We saw the use of
+``downcall\_'' both in Ping's transitions for sending data and in the
+\symbolkw{method\_remappings} block, described below.
+%Then, by passing in the \variablename{router} variable as the
+%registration id parameter the generated code handles making the route
+%call on the appropriate service.  Upcalls are callback on handlers
+%registered with your service, and we shall see their use a little
+%later.
+
+
+\subsection{Constants}
+\label{sec:constants}
+
+Next we define a constant variable which the Ping service will use to
+specify the maximum time to wait for a response.
+
+\begin{programlisting}
+constants {
+  uint64_t PING_TIMEOUT = 2 * 1000 * 1000; // 2 seconds in micros
+} // constants
+\end{programlisting}
+
+Defining constants is as easy as creating a block for them, and then defining
+them using normal syntax.  Note that you do not use the C++ keyword
+\symbolkw{const} when specifying service constants.  Now you can use these
+constant variables anywhere else---like in transition code, array sizes and
+template parameters.
+
+\subsection{Messages}
+\label{sec:firstmessages}
+
+Now that we have discussed how the calls are mapped to handle
+messages, we will discuss how you actually define messages.  Ping
+defines two messages, one for the request sent to the peer, and one
+for the response.
+
+\begin{programlisting}
+messages {
+  Ping { }
+  PingReply {
+    uint64_t t;
+  }
+} // messages
+\end{programlisting}
+
+The first message, ``Ping'', has no data fields associated with it.
+The \function{deliver} method already tells us who sent the data, so
+there is no need to include the sender as a part of the message.  The
+second message, ``PingReply'', has one field---an unsigned 64-bit
+integer named ``t''.
+
+\subsection{State Variables}
+\label{sec:state-variables}
+
+The state variables\footnote{Mace services are modeled as finite automata.
+Thus, the variables defined in the \symbolkw{state\_variables} block record
+persistent state information about the service.} are like member variables in
+a class.  They are specific to the running instance of a Ping service, and
+they are accessible anywhere within the service specification.  For the most
+part they are defined like normal C++ variables.
+
+\begin{programlisting}
+state_variables {
+  MaceKey target;
+  uint64_t timeSent;
+  timer sendtimer;
+} // state_variables
+\end{programlisting}
+
+For the Ping service, we define three variables, one for the
+destination address of the ping, one for the time we sent the ping,
+and one for the timer we use to cancel the ping if it takes too long.
+
+\subsection{Transitions}
+\label{sec:transitions}
+
+The \symbolkw{transitions} block contain methods that the service
+executes in response to events.  Each method is preceded by a keyword
+specifying the transition type and an optional state expression
+%   (state
+    %expressions are discussed in a later section)
+.  There are three types
+of transition methods:
+
+\begin{description}
+
+\item[\symbolkw{upcall}] This method will be called by one of the
+  service instances listed in the \symbolkw{services} block that your
+  service uses.  Upcalls are the way lower-layer services signal
+  events to higher-layer services (such as delivering a message).
+  Upcall transitions must be defined by a handler of a service that
+  your service uses.
+
+\item[\symbolkw{downcall}] This method represents an API call that can
+  be made on your service from either applications or services that
+  \emph{use} your service.  Downcall transitions must be defined by a
+  service class that your service provides.
+
+\item[\symbolkw{scheduler}] This method will be called by the central
+  Mace runtime library scheduler in response to a timer event.
+  Scheduler methods are the same as the names of the declared timers.
+  Each timer calls its transition when it expires.
+
+\end{description}
+
+The Ping service defines four transitions: two for delivering messages
+(one for each message type defined in the \symbolkw{messages} block),
+one to handle the monitor API call, and one to handle the sendtimer.
+Each transition is described below.
+
+
+\begin{programlisting}
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Ping& msg) {
+    downcall_route(src, PingReply(curtime));
+  } // deliver Ping
+\end{programlisting}
+
+The first transition, an upcall, is called on our service by our
+\classname{RouteServiceClass} \variablename{router} when it receives a
+\typename{Ping} message.  (The prototype for \function{deliver} is defined in
+\classname{ReceiveDataHandler}, which is listed as one of the
+\symbolkw{handlers} for \classname{RouteServiceClass}.)  When our Ping service
+receives a \symbolkw{Ping} message, then we want to send a
+\symbolkw{PingReply} message in response.  We do this by making a
+\function{downcall\_route} call on our \variablename{RouteServiceClass}
+(recall that the object (\variablename{router}) on which the method is being
+invoked, normally passed as the final argument, is automatically inferred).
+We pass in the destination for the message, \variablename{src}, the host that
+sent us the \typename{Ping} message; and we pass the message we want to route,
+a \typename{PingReply}, which is constructed with the current time (in
+microseconds), which is available throughout Mace services using the variable
+``curtime''.
+
+
+\begin{programlisting}
+  upcall (src == target) deliver(const MaceKey& src, const MaceKey& dest, const PingReply& msg) {
+    sendtimer.cancel();
+    upcall_hostResponseReceived(src, timeSent, curtime, msg.t);
+  } // deliver PingReply
+\end{programlisting}
+
+The second transition, another deliver upcall, defines what action we take
+when we receive a \typename{PingReply} message.  This transition has been
+guarded by a state expression, which in this case verifies that the source of
+the \typename{PingReply} message is the same as the \variablename{target}
+being pinged.  If ping replies are received from erroneous destinations, no
+action will be taken.  In this transition we first cancel our timer, because
+we have received a response.  Then we make an upcall to the application or
+service using us, to report that we received a response.  Recall that we
+defined \function{hostResponseReceived} in \classname{PingDataHandler}.
+Notice that you access message fields exactly as you would class member
+fields, such as ``msg.t''.
+
+
+\begin{programlisting}
+  downcall monitor(const MaceKey& host) {
+    timeSent = curtime;
+    target = host;
+    downcall_route(target, Ping());
+    sendtimer.schedule(PING_TIMEOUT);
+  } // monitor
+\end{programlisting}
+
+The third transition, a downcall, overrides the default method
+implementation for \function{monitor} specified in
+\classname{PingServiceClass}.  When an application or service requests
+that we monitor a host, we do the following: 1) store the current
+time, so that we can report it when we make a success or failure
+upcall; 2) store the target, so that we can report it on failure and use
+it to protect the delivery of erroneous ping replies; 3)
+send a new \typename{Ping} message to the target, using our
+\classname{RouteServiceClass} \variablename{router}; and 4) schedule
+our timer to expire after \variablename{PING\_TIMEOUT} microseconds.
+
+
+\begin{programlisting}
+  scheduler sendtimer() {
+    upcall_hostResponseMissed(target, timeSent);
+  }
+\end{programlisting}
+
+The final transition, of type scheduler, will fire if the timer expires.
+Because we schedule the timer when we send a \typename{Ping} message in
+\function{monitor}, and cancel it when we receive a \typename{PingReply}
+response in \function{deliver}, the timer will only ever fire if we do not
+receive a response within \variablename{PING\_TIMEOUT} microseconds.  If the
+timer does fire, then we make an upcall on the application or service using us
+to report that we missed an expected response.  We defined
+\function{hostResponseMissed} as the other method in
+\classname{PingDataHandler}.

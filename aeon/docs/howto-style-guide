@@ -1,0 +1,71 @@
+This document describes the conventions that should be observed when
+editing the Mace-HOWTO.
+
+
+* Latex Commands
+
+mace_HOWTO.tex defines many new commands and environments that should
+be used for controlling the formatting of text.  The new commands and
+environments convey semantic information, and should be used
+exclusively instead of the latex formatting equivalents.  For example,
+instead of writing \texttt{/path/to/file}, write
+\filename{/path/to/file}.  The only exception is the latex command
+\emph, which should still be used to for emphasizing text (use in
+place of \textit).  Additionally, the deprecated formatting style of
+including the modifier inside braces (such as {\tt }) should never be
+used.
+
+There are two new environments: screen and programlisting.  One of
+these commands should both be used in the place of the verbatim
+environment.  \begin{programlisting} ... \end{programlisting} works
+exactly like a verbatim block.  A screen block also preserves white
+space and renders text in fixed-width font, but it allows other
+commands to be used within it, such as:
+
+\begin{screen}
+\command{./foo bar}
+...
+\end{screen}
+
+Note that certain characters (such as braces {}) have to be escaped in
+screen blocks.
+
+User defined commands (such as
+\newcommand{\mac}{\filename{.(m|mac|mace)}}) are still supported.
+However, please do not define new formatting commands.  If you need a
+new formatting command, please send email to jwanderson@cs.ucsd.edu.
+
+NB: as mentioned in the spacing section below, you _must_ leave a
+blank line before starting a \begin{programlisting} block!
+
+
+* Section Labels
+
+All \section{Title} commands must be followed by a
+\label{sec:sectionname} on the next line.  Labels should be provided
+for any subsection that should be its own page when the howto is in a
+multi-page html format.  Subsections that are not labeled will be
+combined on a single page.
+
+
+* Section references
+
+Use the latex command \S instead of the work "Section" or "Appendix"
+when referencing other sections.  For instance: "In
+\S~\ref{sec:foo}, we describe...".
+
+
+* Math environments
+
+Math environments are not currently supported.  Please avoid using any
+math environments, including those escaped in with $.
+
+
+* Spacing
+
+Please insert a blank line before starting a block with \begin.  If
+you want to start a new paragraph after the block, then add another
+blank line after ending the block with \end.  Additionally, do not
+include any text or commands (other than a comment) on the same line
+as a \begin or \end command.
+

@@ -1,0 +1,22 @@
+//CK: Suggest putting comments in this file to indicate what each message is for, and who sends it.
+messages {
+  InsertRequest {
+    uint32_t clientId;
+    int key;
+  }
+
+  DeleteRequest {
+    uint32_t clientId;
+    int key;
+  }
+
+  QueryRequest {
+    uint32_t clientId;
+    int key;
+  }
+
+  Reply {
+    uint32_t clientId;
+  }
+  
+}

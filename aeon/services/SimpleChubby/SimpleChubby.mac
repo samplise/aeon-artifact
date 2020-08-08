@@ -1,0 +1,136 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "mdeque.h"
+#include "m_map.h"
+#include "MaceTypes.h"
+
+service SimpleChubby;
+provides Chubby;
+
+trace = med;
+
+services {
+	PaxosConsensus consensus = auto(shared, [], []); // = Paxos();
+}
+
+state_variables {
+	mace::deque<MaceKey> acceptors;
+	int WORKERS_NUM;
+	
+	context Worker<uint64_t x> {
+		uint64_t id;
+		uint64_t cur_key;
+		uint64_t cur_round;
+		mace::map<uint64_t, uint64_t> key_round_map;
+
+		int MAX_KEY;
+
+		uint64_t last_time;
+		uint64_t start_time;
+		uint64_t proposal_count;
+ 	}
+
+}
+
+constants {
+	
+}
+
+messages {
+}
+
+auto_types {
+	
+}
+
+transitions {
+	  downcall (state == init) maceInit() {
+			WORKERS_NUM = params::get<int>("WORKERS_NUM");
+			int max_key = params::get<int>("MAX_KEY");
+
+			NodeSet nodes = params::get<NodeSet>("ACCEPTORS");
+			NodeSet::iterator iter = nodes.begin();
+			if(iter != nodes.end()){
+				acceptors.push_back(*iter);
+				iter ++;
+			}
+			for(int i=0; i<WORKERS_NUM; i++){
+				uint64_t id = (uint64_t)i;
+				async_create_worker(id, max_key);	
+			}
+		}
+
+		async [Worker<arg_id>] create_worker(const uint64_t& arg_id, const int& max_key){
+			//ADD_SELECTORS("bsang");
+			ADD_SELECTORS("performance");
+			maceout<<"Create worker "<<arg_id<<Log::endl;
+			id = arg_id;
+			MAX_KEY = max_key;
+			proposal_count = 0;
+			last_time = mace::getmtime();
+			start_time = last_time;
+			async_propose(arg_id);
+		}
+
+		async [Worker<arg_id>] propose(uint64_t arg_id){
+			cur_key = getRandNum(MAX_KEY);
+			mace::map<uint64_t, uint64_t>::iterator iter = key_round_map.find(cur_key);
+			if(iter == key_round_map.end()){
+				cur_round = 1;	
+			}else{
+				cur_round = iter->second + 1;	
+			}
+			key_round_map[cur_key] = cur_round;
+			downcall_client_propose(arg_id, cur_key, cur_round, "value");
+			
+		}
+
+		upcall [Worker<clientID>] propose_accepted(const uint64_t& clientID, const uint64_t& pro_key, const uint64_t& pro_round, const std::string& pro_value){
+			ADD_SELECTORS("performance");
+			mace::map<uint64_t, uint64_t>::iterator iter = key_round_map.find(pro_key);
+			if(iter != key_round_map.end() && iter->second < pro_round){
+				key_round_map[pro_key] = pro_round;
+			}
+
+			proposal_count ++;
+			if(proposal_count%50 == 0){
+					uint64_t cur_time = mace::getmtime();
+					uint64_t cost_time = cur_time - last_time;
+					uint64_t avg_time = (cur_time - start_time)/proposal_count;
+					maceout<<"Worker("<<clientID<<") Round("<<proposal_count<<") cost time="<<cost_time<<" avg_time="<<avg_time<<Log::endl;
+					last_time = cur_time;
+			}
+
+			async_propose(clientID);		
+		}
+
+		upcall [Worker<clientID>] propose_refused(const uint64_t& clientID, const uint64_t& pro_key, const uint64_t& pro_round, const std::string& pro_value){
+			mace::map<uint64_t, uint64_t>::iterator iter = key_round_map.find(pro_key);
+			if(iter != key_round_map.end() && iter->second < pro_round){
+				key_round_map[pro_key] = pro_round;
+			}
+			
+			proposal_count ++;
+			if(proposal_count%50 == 0){
+					uint64_t cur_time = mace::getmtime();
+					uint64_t cost_time = cur_time - last_time;
+					uint64_t avg_time = (cur_time - start_time)/proposal_count;
+					maceout<<"Worker("<<clientID<<") Round("<<proposal_count<<") cost time="<<cost_time<<" avg_time="<<avg_time<<Log::endl;
+					last_time = cur_time;
+			}
+			async_propose(clientID);		
+		}
+
+
+																																						
+}
+
+routines {
+	[__null] int getRandNum(int max){
+		srand(mace::getmtime());
+		int num = rand()%max;
+		return num;
+	}	 
+		
+}

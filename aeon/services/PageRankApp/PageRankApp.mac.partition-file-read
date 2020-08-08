@@ -1,0 +1,364 @@
+
+#include <stdlib.h>
+
+#include <fstream>
+#include <sstream>
+
+service PageRankApp;
+provides Null;
+
+typedefs {
+}
+services {
+
+}
+
+constants {
+  
+}
+
+constructor_parameters {
+    double INACTIVE_THRESHOLD = 0.5;
+    std::string graph_file_name = "input-graph";
+    std::string partition_file_name = "input-graph-part";
+    uint32_t N_PARTITION = 4;
+    uint64_t N_LINE_OUTPUT = 10000;
+}
+
+messages {
+
+}
+
+auto_types {
+  
+}
+ 
+state_variables {
+  context GraphPartition<uint32_t pId> {
+    uint32_t partitionId;
+
+    mace::map< uint64_t, double > vertex_values;
+    mace::map< uint64_t, mace::set<uint64_t> > edges;
+    mace::set< uint64_t > p_vertexes;
+    mace::set< uint64_t > active_vertexes;
+    
+    mace::map< uint32_t, mace::set<uint64_t> > vertex_required_by_neighbor;
+        
+    uint64_t curr_round;
+    
+    mace::set< uint32_t > active_neighbors;
+    mace::set< uint32_t > updated_neighbors;
+    
+    bool computation_ready_flag;
+  }
+
+  context Barrier {
+    uint64_t curr_round;
+    mace::set<uint32_t> ready_partitions;
+    mace::set<uint32_t> active_partitions;
+
+    uint64_t start_timestamp;
+  }
+}
+
+
+ 
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("PageRankApp");
+    maceout << "Start PageRankApp!" << Log::endl;
+
+    createNewOwnership("globalContext", "Barrier");
+    async_initBarrier();
+    
+    for( uint32_t pid=0; pid<N_PARTITION; pid++ ){
+      maceout << "Start to handle Partition " << pid << Log::endl;
+      mace::string partition_ctx_name = generateContextName("GraphPartition", pid);
+      createNewOwnership("globalContext", partition_ctx_name);
+
+      async_initGraphPartition( pid );
+    }
+  }
+
+  async [Barrier] initBarrier() {
+    ADD_SELECTORS("PageRankApp");
+    maceout << "Initialize barrier!" << Log::endl;
+    curr_round = 1;
+
+    for( uint32_t i=0; i<N_PARTITION; i++ ){
+      active_partitions.insert( i );
+    }
+    ready_partitions.clear();
+  }
+
+  async [Barrier] toSync( const uint32_t& pId, const uint64_t& round, const double& active_ratio ){
+    ADD_SELECTORS("PageRankApp");
+    maceout << "Partition("<< pId <<") is ready to start round " << round << Log::endl;
+    ASSERT( curr_round == round );
+    /*
+    if( curr_round == 5 && pId == 0 ) {
+      colocateContexts( "GraphPartition[0]", "GraphPartition[1]");
+    }
+    */
+
+    if( active_ratio == 0.0 ) {
+      maceout << "Partition("<< pId <<") has no active vertexes after round " << round << Log::endl;
+      active_partitions.erase(pId);
+    } else {
+      if( ready_partitions.count(pId) == 0 ) {
+        ready_partitions.insert(pId);
+      }
+    }
+
+    if( ready_partitions.size() == active_partitions.size()) {
+      if( curr_round > 1 ) {
+        uint64_t round_period = mace::getmtime() - start_timestamp;
+        maceout << "Round " << curr_round - 1 << " period_time=" << round_period << Log::endl;
+      }
+
+      start_timestamp = mace::getmtime();
+      // maceout << "To start computation of round " << curr_round << Log::endl;
+
+      for( mace::set<uint32_t>::iterator iter = ready_partitions.begin(); iter != ready_partitions.end(); iter++ ) {
+        async_startNextRoundComputation( *iter, curr_round, active_partitions );
+      }
+
+      curr_round ++;
+      ready_partitions.clear();
+    } 
+
+  }
+
+  async [GraphPartition<pId>] initGraphPartition(const uint32_t& pId) {
+    ADD_SELECTORS("PageRankApp");
+    maceout<< "To initialize GraphPartition " << pId << Log::endl;
+    partitionId = pId;
+    
+    curr_round = 1;
+    
+    std::ifstream partition_file( partition_file_name.c_str(), std::ifstream::in );
+    maceout << "GraphPartition("<< pId <<") read partition from " << partition_file_name << Log::endl;
+
+    std::string line;
+    uint64_t line_number = 0;
+    mace::map<uint64_t, uint32_t> vertex_map;
+    while( std::getline(partition_file, line) ) {
+      std::stringstream ss(line);
+      int pid = 0;
+      ss >> pid;
+
+      pid = pid % N_PARTITION;
+      vertex_map[line_number] = pid;
+      if( pid == (int)pId ){
+        vertex_values[line_number] = 1.0;
+        active_vertexes.insert( line_number );
+        p_vertexes.insert( line_number );
+      }
+
+      line_number ++;
+    }
+    partition_file.close();
+
+    maceout << "GraphPartition("<< pId <<") read graph from " << graph_file_name << Log::endl;
+    
+    std::ifstream graph_file( graph_file_name.c_str(), std::ifstream::in );
+
+    line_number = 0;
+    while( std::getline(graph_file, line) ) {
+      line_number ++;
+      if( line_number % N_LINE_OUTPUT == 0 ) {
+        maceout << "GraphPartition("<< pId <<") have read "<< line_number <<" lines from graph " << graph_file_name << Log::endl;
+      }
+      std::vector<std::string> strs = split_string(line, "\t");
+
+      if( strs.size() == 2 ){
+        std::stringstream ss1(strs[0]);
+        std::stringstream ss2(strs[1]);
+
+        int from_v, to_v;
+        ss1 >> from_v;
+        ss2 >> to_v;
+
+        uint32_t from_p_id = vertex_map[from_v];
+        uint32_t to_p_id = vertex_map[to_v];
+
+        if( from_p_id == pId ) {
+          if( edges[from_v].count(to_v) == 0 ) {
+            edges[from_v].insert(to_v);
+          }
+
+          if( to_p_id != pId && active_neighbors.count( to_p_id ) == 0 ) {
+            active_neighbors.insert( to_p_id );
+          }
+        } else if( to_p_id == pId ) {
+          if( vertex_required_by_neighbor[ from_p_id ].count(to_v) == 0 ){
+            vertex_required_by_neighbor[ from_p_id ].insert(to_v);
+          }
+        }
+      }
+    }
+
+    graph_file.close();
+
+    maceout << "GraphPartition("<< pId <<") has read its partition!" << Log::endl;
+    
+    async_toSync(pId, curr_round, true);
+  }
+
+  async [GraphPartition<pId>] sendVertexVals( const uint32_t& pId, const uint32_t& src_pid, const uint64_t& round, 
+      const mace::map<uint64_t, double>& updated_vertex_values ) {
+
+    ADD_SELECTORS("PageRankApp");
+    ASSERT( curr_round == round );
+
+    if( updated_vertex_values.size() == 0 ) {
+      active_neighbors.erase( src_pid );
+    } else {
+      for( mace::map<uint64_t, double>::const_iterator iter=updated_vertex_values.begin(); iter!=updated_vertex_values.end(); iter++ ) {
+        vertex_values[ iter->first ] = iter->second;
+      }
+    
+      if( updated_neighbors.count( src_pid ) == 0 ) {
+        updated_neighbors.insert( src_pid );
+      }
+    }    
+
+    if( updated_neighbors.size() == active_neighbors.size() && active_vertexes.size() != 0 && computation_ready_flag ) {
+      // maceout << "In sendVertexVals: start computation on Partition("<< pId <<") for round " << curr_round << Log::endl;
+      async_startComputation(pId);      
+    }
+  }
+
+  async [GraphPartition<pId>] startComputation( const uint32_t& pId ) {
+    ADD_SELECTORS("PageRankApp");
+    maceout << "Start computation on Partition("<< pId <<") for round " << curr_round << Log::endl;
+
+    computePageRank( vertex_values, edges, active_vertexes );
+
+    curr_round ++;
+
+    updated_neighbors.clear();
+    
+    double active_ratio = (double)active_vertexes.size()/(double)p_vertexes.size();
+    async_toSync( pId, curr_round, active_ratio );
+
+    computation_ready_flag = false;
+  }
+
+  async [GraphPartition<pId>] startNextRoundComputation( const uint32_t& pId, const uint64_t& round, 
+      const mace::set<uint32_t>& active_partitions) {
+
+    ADD_SELECTORS("PageRankApp");
+    // maceout << "GraphPartition("<< pId <<") start computation for round("<< round <<") with active_partitions("<< active_partitions <<")!" 
+    //  << Log::endl;
+    if( curr_round != round ) {
+      maceout << "GraphPartition("<< pId <<") round=" << curr_round << ", global round=" << round << Log::endl;
+      ASSERT(false);
+    }
+
+    mace::set<uint32_t> new_active_neighbors;
+    for( mace::set<uint32_t>::iterator iter=active_neighbors.begin(); iter!=active_neighbors.end(); iter++ ) {
+      if( active_partitions.count(*iter) > 0 ) {
+        new_active_neighbors.insert(*iter);
+      }
+    }
+    active_neighbors = new_active_neighbors;
+
+    mace::vector<uint32_t> no_comm_neighbors;
+    for( mace::map< uint32_t, mace::set<uint64_t> >::iterator iter=vertex_required_by_neighbor.begin(); iter!=vertex_required_by_neighbor.end();
+        iter++ ) {
+      if( active_partitions.count(iter->first) == 0 ) {
+        continue;
+      }
+
+      mace::map< uint64_t, double > required_vertex_values;
+
+      mace::set<uint64_t>& vset = iter->second;
+      for( mace::set<uint64_t>::iterator sIter=vset.begin(); sIter!=vset.end(); sIter++ ) {
+        if( active_vertexes.count(*sIter) == 0 ) {
+          continue;
+        }
+        required_vertex_values[ *sIter ] = vertex_values[ *sIter ];
+      }
+      async_sendVertexVals( iter->first, pId, curr_round, required_vertex_values );
+
+      if( required_vertex_values.size() == 0 ) {
+        no_comm_neighbors.push_back(iter->first);
+      }
+    }
+
+    for( uint32_t i=0; i<no_comm_neighbors.size(); i++ ) {
+      vertex_required_by_neighbor.erase( no_comm_neighbors[i] );
+      maceout << "Partition("<< pId <<") have no active vertexes for Partition("<< no_comm_neighbors[i] <<")!" << Log::endl;
+    }
+    
+    computation_ready_flag = true;
+
+    if( updated_neighbors.size() == active_neighbors.size() && active_vertexes.size() != 0 ) {
+      // maceout << "In startNextRoundComputation: start computation on Partition("<< pId <<") for round " << curr_round << Log::endl;
+      async_startComputation(pId);      
+    }
+
+  }
+}
+
+routines {
+
+  [__null] void computePageRank( mace::map<uint64_t, double>& vertex_values, 
+    mace::map<uint64_t, mace::set<uint64_t> >& edges, mace::set<uint64_t>& active_vertexes ) {
+      
+    mace::map<uint64_t, double> new_vertex_values;
+    for( mace::set<uint64_t>::iterator iter1=active_vertexes.begin(); iter1!=active_vertexes.end(); iter1++ ) {
+      double new_val = 0;
+
+      const mace::set<uint64_t>& nvs = edges[*iter1];
+      for( mace::set<uint64_t>::const_iterator iter2=nvs.begin(); iter2!=nvs.end(); iter2++ ) {
+        ASSERT( vertex_values.find(*iter2) != vertex_values.end() );
+        new_val += vertex_values[*iter2];
+      }
+      new_vertex_values[*iter1] = new_val;
+    }
+
+    mace::set<uint64_t> new_inactive_vertexes;
+    for( mace::map<uint64_t, double>::iterator iter=new_vertex_values.begin(); iter!=new_vertex_values.end(); iter++ ) {
+      if( abs(iter->second - vertex_values[iter->first]) < INACTIVE_THRESHOLD ) {
+        // new_inactive_vertexes.insert(iter->first);
+      }
+      vertex_values[iter->first] = iter->second;
+    }
+
+    for( mace::set<uint64_t>::iterator iter=new_inactive_vertexes.begin(); iter!=new_inactive_vertexes.end(); iter++ ) {
+      active_vertexes.erase(*iter);
+    }
+
+    return;
+  }
+
+  [__null] std::vector<std::string> split_string(const std::string& str, const std::string& tok){
+    std::vector<std::string> strs;
+
+    std::string to_split_string = str;
+    int len = tok.size();
+    while(true) {
+        size_t pos = to_split_string.find(tok);
+        if( pos == std::string::npos ){
+            break;
+        }
+
+        std::string str1 = to_split_string.substr(0, pos);
+        to_split_string = to_split_string.substr(pos+len);
+
+        strs.push_back(str1);
+    }
+
+    strs.push_back(to_split_string);
+    return strs;
+  }
+
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+}
+

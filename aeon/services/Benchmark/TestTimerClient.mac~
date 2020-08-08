@@ -1,0 +1,47 @@
+service TestTimerClient;
+
+provides Null, MigrationTest;
+
+time = MaceTime;
+
+constructor_parameters {
+  NodeSet SERVER_NODES = NodeSet(); /* Should be only one node */
+  uint64_t TIMER1_PERIOD     =  2000000; // 2 sec
+  uint64_t TIMER2_PERIOD     =  2000000; // 2 sec
+}
+
+services {
+  Transport t;
+}
+
+messages {
+  Test1 __attribute((number(0))) { }
+  Test2 { }
+}
+
+state_variables {
+  timer timer1 __attribute((recur(TIMER1_PERIOD)));
+  timer timer2 __attribute((recur(TIMER2_PERIOD)));
+  context __Dummy{}
+======= >>>>>>> other
+}
+
+
+transitions {
+  downcall maceInit() {
+    ASSERT(SERVER_NODES.size() == 1 );
+
+    timer1.schedule(TIMER1_PERIOD);
+    timer2.schedule(TIMER2_PERIOD);
+  }
+
+  scheduler timer1() {
+    std::cout << curtime << " timer1 expired." << std::endl;
+    downcall_route( *(SERVER_NODES.begin()), Test1() );
+  }
+
+  scheduler timer2() {
+    std::cout << curtime << " timer2 expired." << std::endl;
+    downcall_route( *(SERVER_NODES.begin()), Test2() );
+  }
+}

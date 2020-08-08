@@ -1,0 +1,346 @@
+//#include <random>
+
+#include "m_map.h"
+#include "marray.h"
+#include "MaceTypes.h" 
+#include "RandomUtil.h"
+
+service ElasticTagAppServer;
+
+provides Null;
+
+services {
+  Transport t;
+}
+
+constants {
+  uint16_t DIRECTION_UP = 1;
+  uint16_t DIRECTION_DOWN = 2;
+  uint16_t DIRECTION_LEFT = 3;
+  uint16_t DIRECTION_RIGHT = 4;
+  
+  uint16_t ROOM_SIZE = 100;
+}
+
+
+constructor_parameters {
+    uint32_t N_ROOMS = 32;
+     
+    uint16_t ENANBLE_MIGRATION = 1;
+
+    // migration
+    uint32_t MIN_N_SERVERS = 4;
+    uint32_t MID_N_SERVERS = 8;
+    uint32_t MAX_N_SERVERS = 16;
+
+    uint32_t MIGRATION_STAGE1_THRESHOLD = 4;
+    uint32_t MIGRATION_STAGE2_THRESHOLD = 8;
+
+    uint32_t OUTPUT_COUNT = 100;
+
+    uint64_t OUTER_LOOP = 100;
+    uint64_t INNER_LOOP = 10000;
+}
+
+typedefs {
+  typedef mace::map<Coordinate, int> portalMap;
+}
+
+#minclude "ElasticTagAppMessages.mi"
+
+auto_types {
+  Coordinate __attribute((comparable(equals=default; lessthan=default))) {
+    int16_t x;
+    int16_t y;
+  }
+
+  PlayerInfo __attribute((comparable(equals=default; lessthan=default))) {
+    Coordinate coord;
+    uint16_t playerDirection;
+  }
+}
+ 
+state_variables {
+  context Building {
+    mace::set<uint32_t> roomIds;
+
+    uint32_t nextPlayerId;
+    uint32_t nextRoomId;
+  }
+
+  context Room<uint32_t x> {
+    uint32_t roomId;
+    
+    mace::map<uint32_t, PlayerInfo> playerInfos;
+    mace::array<mace::array<int, ROOM_SIZE>, ROOM_SIZE> roomMap;
+
+    uint64_t reqCount;
+  }
+
+  context Controller {
+    mace::map<uint32_t, uint32_t> room_server_map;
+    uint32_t current_n_servers;
+    
+    mace::map<MaceKey, uint32_t> clientNumberMap;
+  }
+}
+
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("ElasticTagAppServer");
+    maceout << "Start TapAppServer!" << Log::endl;
+    srand( mace::getmtime() );
+    
+    createNewOwnership("globalContext", "Building");
+    createNewOwnership("globalContext", "Controller");
+
+    async_initBuilding();
+    async_initController();
+  }
+
+  async [Controller] initController() {
+    ADD_SELECTORS("ElasticTagAppServer");
+    maceout << "To initialize Controller!" << Log::endl;
+
+    for( uint32_t i=1; i<=N_ROOMS; i++ ){
+      room_server_map[i] = (i-1) % MIN_N_SERVERS + 1;
+    }
+
+    current_n_servers = MIN_N_SERVERS;
+  }
+
+  async [Building] initBuilding() {
+    ADD_SELECTORS("ElasticTagAppServer");
+    maceout << "To initialize Building!" << Log::endl;
+    
+    for( uint32_t i=1; i<=N_ROOMS; i++ ) {
+      roomIds.insert(i);
+
+      mace::string room_ctx_name = generateContextName("Room", i);
+      createNewOwnership("Building", room_ctx_name);
+      async_initRoom(i);
+    }
+
+    nextPlayerId = 1;
+    nextRoomId = 1;
+  }
+
+  
+  async [Room<rid>] initRoom( const uint32_t& rid ){
+    ADD_SELECTORS("ElasticTagAppServer");
+    maceout << "Initialize Room["<< rid <<"]!" << Log::endl;
+        
+    for (uint32_t i = 0; i < ROOM_SIZE; i++) {
+      for (uint32_t j = 0; j < ROOM_SIZE; j++) {
+        roomMap[i][j] = -1;
+      }
+    }
+
+    roomId = rid;
+    reqCount = 0;
+  }
+
+  upcall [Building] deliver(const MaceKey& src, const MaceKey& dest, const PlayerInitRequest& msg) {
+    ADD_SELECTORS("ElasticTagAppServer");
+
+    uint32_t newPlayerId = nextPlayerId ++;
+
+    maceout << "Assign player("<< newPlayerId <<") to client("<< msg.clientId<<") from " << src << Log::endl;
+    
+    uint32_t nRoom = nextRoomId;
+    nextRoomId = nextRoomId % N_ROOMS + 1;
+    
+    broadcast_initPlayerInRoom( nRoom, newPlayerId, msg.clientId, src );
+  }
+
+  broadcast [Room<nRoom>] initPlayerInRoom( const uint32_t nRoom, const uint32_t nPlayer, const uint32_t clientId, const MaceKey& src) {
+    ADD_SELECTORS("ElasticTagAppServer");
+    maceout << "To initialze Player("<< nPlayer<<") in Room["<< nRoom <<"]!" << Log::endl;
+
+    Coordinate cd;
+    while( true ){
+      cd.x = RandomUtil::randInt(ROOM_SIZE);
+      cd.y = RandomUtil::randInt(ROOM_SIZE);
+
+      if( cd.x == 0 && cd.y == 0 ){
+        continue;
+      }
+
+      if( roomMap[cd.x][cd.y] >= 0 ){
+        continue;
+      }
+
+      roomMap[cd.x][cd.y] = nPlayer;
+      break;
+    }
+
+    uint16_t direction = RandomUtil::randInt(4) + 1;
+    PlayerInfo playerInfo(cd, direction);
+    playerInfos[ nPlayer ] = playerInfo;
+    
+    downcall_route( src, PlayerInitReply(clientId, nPlayer, nRoom) );
+  }
+
+  upcall [Room<msg.roomId>] deliver(const MaceKey& src, const MaceKey& dest, const MoveRequest& msg) {
+    ADD_SELECTORS("ElasticTagAppServer");
+    
+    ASSERT( playerInfos.find(msg.playerId) != playerInfos.end() );
+
+    PlayerInfo playerInfo = playerInfos[msg.playerId];
+    
+    Coordinate newCoord;
+    newCoord.x = playerInfo.coord.x;
+    newCoord.y = playerInfo.coord.y;
+    
+    switch (playerInfo.playerDirection) {
+      case DIRECTION_UP:
+        newCoord.y++;
+        break;
+      case DIRECTION_DOWN:
+        newCoord.y--;
+        break;
+      case DIRECTION_LEFT:
+        newCoord.x--;
+        break;
+      case DIRECTION_RIGHT:
+        newCoord.x++;
+        break;
+      default:
+        ABORT("Player direction invalid!");
+    }
+
+    if( newCoord.x<0 || newCoord.x >= ROOM_SIZE || newCoord.y<0 || newCoord.y>=ROOM_SIZE || roomMap[newCoord.x][newCoord.y]!=-1 ) {
+      uint16_t new_direction = playerInfo.playerDirection + 1;
+      if( new_direction>4 ) new_direction = 1;
+      playerInfos[msg.playerId].playerDirection = new_direction;
+      downcall_route( src, MoveReply(msg.clientId) );
+    } else {
+      roomMap[newCoord.x][newCoord.y] = msg.playerId;
+      roomMap[playerInfo.coord.x][playerInfo.coord.y] = -1;
+
+      playerInfos[msg.playerId].coord = newCoord;
+      downcall_route( src, MoveReply(msg.clientId) );
+    }
+    
+    doComputation();
+
+    reqCount ++;
+    if( reqCount % OUTPUT_COUNT == 0 ){
+      maceout << "Room["<< msg.roomId <<"] reqCount=" << reqCount << Log::endl;
+    }
+  }
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const ConnectionRequest& msg ) {
+    ADD_SELECTORS("ElasticTagAppServer");
+    
+    std::ostringstream oss;
+    oss << src <<"["<<msg.clientId<<"]";
+
+    MaceAddr commAddr = getExternalCommContextAddr( src, oss.str() );
+    maceout << "commAddr=" << commAddr << Log::endl;
+    MaceKey commKey( ipv4, commAddr );
+    downcall_route( src, ConnectionSetup(commKey, msg.clientId) );
+    maceout<< "Assign external communication node("<< commKey <<") to client("<< msg.clientId <<") from " << src << Log::endl;
+  }
+
+
+
+  upcall [Controller] deliver(const MaceKey& src, const MaceKey& dest, const ClientNumberReport& msg) {
+  
+    ADD_SELECTORS("ElasticTagAppServer");
+    clientNumberMap[src] = msg.client_number;
+    uint32_t active_client_number = 0;
+    mace::map<MaceKey, uint32_t>::const_iterator iter = clientNumberMap.begin();
+    for(; iter != clientNumberMap.end(); iter++) {
+      active_client_number += iter->second;
+    }
+    maceout<< "Node("<< src <<")'s new active clients="<< msg.client_number <<" total="<< active_client_number << Log::endl;
+    if( ENANBLE_MIGRATION == 1 ) {
+      if( current_n_servers == MIN_N_SERVERS && active_client_number >= MIGRATION_STAGE1_THRESHOLD ) {
+        maceout<< "Scaleup #1. From "<< current_n_servers <<" to "<< MID_N_SERVERS <<" Active clients=" << active_client_number << Log::endl;
+        
+        scale_up(1, room_server_map, MID_N_SERVERS);
+        current_n_servers = MID_N_SERVERS;
+        maceout<< "Server placement: " << room_server_map << Log::endl;
+      } else if( current_n_servers == MID_N_SERVERS && active_client_number >= MIGRATION_STAGE2_THRESHOLD ) {
+        maceout<< "Scaleup #2. From "<< current_n_servers <<" to "<< MAX_N_SERVERS <<" Active clients=" << active_client_number << Log::endl;
+        
+        scale_up(2, room_server_map, MAX_N_SERVERS);
+        current_n_servers = MAX_N_SERVERS;
+        maceout<< "Server placement: " << room_server_map << Log::endl;
+      } else if( current_n_servers == MAX_N_SERVERS && active_client_number < MIGRATION_STAGE2_THRESHOLD ) {
+        maceout<< "Scale down #2. From "<< current_n_servers <<" to "<< MID_N_SERVERS <<" Active clients=" << active_client_number << Log::endl;
+        
+        scale_down(2, room_server_map, MID_N_SERVERS);
+        current_n_servers = MID_N_SERVERS;
+        maceout<< "Server placement: " << room_server_map << Log::endl;
+      } else if( current_n_servers == MID_N_SERVERS && active_client_number < MIGRATION_STAGE1_THRESHOLD ) {
+        maceout<< "Scale down #1. From "<< current_n_servers <<" to "<< MIN_N_SERVERS <<" Active clients=" << active_client_number << Log::endl;
+        
+        scale_down(1, room_server_map, MIN_N_SERVERS);
+        current_n_servers = MIN_N_SERVERS;
+        maceout<< "Server placement: " << room_server_map << Log::endl;
+      }
+    }
+  
+  }
+}
+
+routines {
+
+  [__null] mace::string generateContextName( const mace::string& ctxName, const uint32_t& id) {
+    std::ostringstream oss;
+    oss << ctxName <<"["<<id<<"]";
+    return oss.str();
+  }
+
+  [__null] void scale_up( const uint32_t& round, mace::map<uint32_t, uint32_t>& r_server_map, const uint32_t& curr_n_server ) {
+    ADD_SELECTORS("ElasticTagAppServer");
+    mace::map<uint32_t, uint32_t> r_server_map_copy = r_server_map;
+
+    for( uint32_t i=1; i<=N_ROOMS; i++ ){
+      uint32_t sId = (i-1) % curr_n_server +1;
+
+      if( sId != r_server_map_copy[i] ) {
+        r_server_map[i] = sId;
+        migrateRoom(i, round, "scaleup");
+      }
+    }
+  }
+
+  [__null] void scale_down( const uint32_t& round, mace::map<uint32_t, uint32_t>& r_server_map, const uint32_t& curr_n_server ) {
+    ADD_SELECTORS("ElasticTagAppServer");
+    mace::map<uint32_t, uint32_t> r_server_map_copy = r_server_map;
+
+    for( uint32_t i=1; i<=N_ROOMS; i++ ){
+      uint32_t sId = (i-1) % curr_n_server +1;
+
+      if( sId != r_server_map_copy[i] ) {
+        r_server_map[i] = sId;
+        migrateRoom(i, round, "scaledown");
+      }
+    }
+  }
+  
+  [__null] void migrateRoom( const uint32_t& rid, const uint32_t& round, const mace::string& scale_str ) {
+    ADD_SELECTORS("ElasticTagAppServer");
+    std::ostringstream oss;
+    oss << "migrate_"<< scale_str << "_R" << rid <<"_R" << round;
+    maceout << "To migrate " << oss.str() << Log::endl;
+    migrateContext( oss.str() );  
+  }
+
+  [__null] void doComputation() {
+    uint64_t m = 0;
+    
+    for( uint32_t i=0; i<OUTER_LOOP; i++ ){
+      m = RandomUtil::randInt(i);
+      for( uint32_t j=0; j<INNER_LOOP; j++ ){
+        m ++;
+      }
+    }
+
+  }
+
+}
+

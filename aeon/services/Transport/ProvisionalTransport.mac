@@ -1,0 +1,325 @@
+/* 
+ * ProvisionalTransport.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, James W. Anderson, Charles Killian
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+#include "Accumulator.h"
+
+using mace::string;
+
+service ProvisionalTransport;
+
+provides ProvisionalTransport;
+
+trace = off;
+
+services {
+  BufferedTransport router = auto(shared, [], []);
+}
+
+constants {
+  size_t BLOCK_SIZE = 32768;
+
+// the compiler does not allow this, we should fix that 
+//   std::string TRANSPORT_RECV_CANCELED = "TRANSPORT_RECV_CANCELED";
+//   std::string TRANSPORT_RECV_CANCELED_SELECTOR = "Accumulator::TRANSPORT_RECV_CANCELED";
+}
+
+constructor_parameters {
+  uint32_t maxQueueSize = UINT_MAX;
+  uint32_t queueThresholdArg = UINT_MAX;
+}
+
+typedefs {
+  typedef mace::map<message_id_t, OutgoingMessageData> OutgoingMessageQueue;
+  typedef mace::map<MaceKey, OutgoingConnection> OutgoingConnectionMap;
+  typedef mace::map<message_id_t, string> IncomingMessageMap;
+  typedef mace::map<MaceKey, IncomingMessageMap> IncomingConnectionMap;
+  typedef mace::map<message_id_t, MaceKey> MessageDestinationMap;
+}
+
+auto_types {
+  OutgoingMessageData {
+    std::string data;
+    registration_uid_t rid;
+    uint32_t offset = 0;
+  };
+
+  OutgoingConnection {
+    OutgoingMessageQueue q;
+    message_id_t canceled = 0;
+    registration_uid_t canceledRid = 0;
+    uint32_t buffered = 0;
+    bool sendable = true;
+  };
+}
+
+state_variables {
+  OutgoingConnectionMap out;
+  IncomingConnectionMap in;
+  MessageDestinationMap destinations;
+  uint32_t threshold = UINT_MAX;
+}
+
+messages {
+  Data {
+    message_id_t id;
+    string data;
+  };
+
+  Commit {
+    message_id_t id;
+    string data;
+    registration_uid_t rid;
+  };
+
+  Abort {
+    message_id_t id;
+    registration_uid_t rid;
+  };
+
+}
+
+transitions {
+  downcall maceInit() {
+    threshold = ((queueThresholdArg == UINT_MAX) ? maxQueueSize / 2 : queueThresholdArg);
+    if (threshold == 0) {
+      threshold = 1;
+    }
+  }
+
+  downcall provisionalRoute(const MaceKey& dest, const std::string& s,
+			    registration_uid_t rid) {
+    OutgoingConnection& c = out[dest];
+    if (!c.sendable) {
+      return 0;
+    }
+    message_id_t id = curtime;
+    OutgoingMessageData& d = c.q[id];
+    destinations[id] = dest;
+    d.data = s;
+    d.rid = rid;
+    c.buffered += s.size();
+    if (c.buffered > maxQueueSize) {
+      c.sendable = false;
+    }
+    
+    if (c.q.size() == 1) {
+      sendData(dest);
+    }
+    return id;
+  } // provisionalRoute
+
+  downcall route(const MaceKey& dest, const std::string& s, registration_uid_t rid) {
+    if (provisionalRoute(dest, s, rid) != 0) {
+      return true;
+    }
+    else {
+      return false;
+    }
+  } // route
+
+  downcall cancelFront(const MaceKey& dest) {
+    OutgoingConnectionMap::iterator i = out.find(dest);
+    if (i != out.end()) {
+      OutgoingConnection& c = i->second;
+      if (!c.q.empty()) {
+	OutgoingMessageQueue::iterator k = c.q.begin();
+	message_id_t id = k->first;
+	cancel(dest, k->second, id, c);
+	return id;
+      }
+    }
+    return 0;
+  } // cancelFront
+
+  downcall cancel(message_id_t id) {
+    MessageDestinationMap::const_iterator i = destinations.find(id);
+    if (i != destinations.end()) {
+      const MaceKey& dest = i->second;
+      OutgoingConnection& c = out[dest];
+      OutgoingMessageQueue::const_iterator k = c.q.find(id);
+      if (k != c.q.end()) {
+	return cancel(dest, k->second, id, c);
+      }
+    }
+    return 0;
+  } // cancel
+
+  downcall canSend(const MaceKey& dest) {
+    OutgoingConnectionMap::const_iterator i = out.find(dest);
+    if (i == out.end()) {
+      return true;
+    }
+    return i->second.sendable;
+  } // canSend
+
+  downcall availableBufferSize(const MaceKey& dest) {
+    OutgoingConnectionMap::const_iterator i = out.find(dest);
+    if (i == out.end()) {
+      return maxQueueSize;
+    }
+    else if (!i->second.sendable) {
+      return 0;
+    }
+    return maxQueueSize - i->second.buffered;
+  } // availableBufferSize
+
+  downcall incomingBufferedDataSize(const MaceKey& src) {
+    IncomingMessageMap& m = in[src];
+    size_t r = 0;
+    for (IncomingMessageMap::const_iterator i = m.begin(); i != m.end(); i++) {
+      r += i->second.size();
+    }
+    return r;
+  } // incomingBufferedDataSize
+
+  downcall messageStatus(message_id_t id, uint32_t& size, uint32_t& sent) {
+    MessageDestinationMap::const_iterator i = destinations.find(id);
+    if (i != destinations.end()) {
+      const OutgoingConnectionMap::const_iterator ci = out.find(i->second);
+      if (ci != out.end()) {
+	const OutgoingConnection& c = ci->second;
+	OutgoingMessageQueue::const_iterator k = c.q.find(id);
+	if (k != c.q.end()) {
+	  const OutgoingMessageData& m = k->second;
+	  size = m.data.size();
+	  sent = m.offset;
+	  return;
+	}
+      }
+    }
+    size = 0;
+    sent = 1;
+  } // messageStatus
+
+  upcall error(const MaceKey& src, TransportError::type ec, const std::string& message) {
+    out.erase(src);
+    in.erase(src);
+  } // error
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Data& m) {
+    in[src][m.id].append(m.data);
+  } // deliver Data
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Commit& m) {
+    IncomingMessageMap& mm = in[src];
+    string& d = mm[m.id];
+    d.append(m.data);
+    upcall_deliver(src, dest, d, m.rid);
+    mm.erase(m.id);
+  } // deliver Commit
+
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Abort& m) {
+    static Accumulator* rcaccum = Accumulator::Instance(Accumulator::TRANSPORT_RECV_CANCELED);
+    IncomingMessageMap& mm = in[src];
+    IncomingMessageMap::iterator i = mm.find(m.id);
+    if (i != mm.end()) {
+      size_t s = i->second.size();
+      rcaccum->accumulate(s);
+      upcall_messageCanceled(src, s, m.rid);
+      mm.erase(m.id);
+    }
+  } // deliver Abort
+
+  upcall clearToSend(const MaceKey& dest) {
+    sendData(dest);
+  } // clearToSend
+
+} // transitions
+
+routines {
+  void sendData(const MaceKey& dest) {
+    OutgoingConnection& c = out[dest];
+
+    if (c.canceled) {
+      if (downcall_routeRTS(dest, Abort(c.canceled, c.canceledRid))) {
+	c.canceled = 0;
+	c.canceledRid = 0;
+      }
+      else {
+	return;
+      }
+    }
+
+    bool accepted = true;
+    while (!c.q.empty() && accepted) {
+      OutgoingMessageQueue::iterator i = c.q.begin();
+      message_id_t id = i->first;
+      OutgoingMessageData& d = i->second;
+      bool messageComplete = false;
+      do {
+	size_t len = std::min(BLOCK_SIZE, d.data.size() - d.offset);
+	if (d.offset + len == d.data.size()) {
+	  accepted = downcall_routeRTS(dest, Commit(id, d.data.substr(d.offset, len), d.rid));
+	  if (accepted) {
+	    out[dest].q.erase(id);
+	    destinations.erase(id);
+	    defer_upcall_messageSent(id, d.rid);
+	    messageComplete = true;
+	  }
+	}
+	else {
+	  accepted = downcall_routeRTS(dest, Data(id, d.data.substr(d.offset, len)));
+	  if (accepted) {
+	    d.offset += len;
+	  }
+	}
+
+	if (accepted) {
+	  c.buffered -= len;
+	  updateSendable(c);
+	}
+      } while (accepted && !messageComplete);
+    }
+  } // sendData
+
+  void updateSendable(OutgoingConnection& c) {
+    if (!c.sendable && (c.buffered < std::min(threshold, maxQueueSize))) {
+      c.sendable = true;
+    }
+  }
+
+  size_t cancel(const MaceKey& dest, const OutgoingMessageData& m, message_id_t id,
+	      OutgoingConnection& c) {
+
+    if ((c.q.begin()->first == id) && (m.offset > 0)) {
+      ASSERT(c.canceled == 0);
+      if (!downcall_routeRTS(dest, Abort(id, m.rid))) {
+	c.canceled = id;
+	c.canceledRid = m.rid;
+      }
+    }
+    size_t unsent = m.data.size() - m.offset;
+    c.buffered -= unsent;
+    updateSendable(c);
+    c.q.erase(id);
+    destinations.erase(id);
+    return unsent;
+  } // cancel
+} // routines

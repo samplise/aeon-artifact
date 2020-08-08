@@ -1,0 +1,249 @@
+/* 
+ * GameOfLifeStencil.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2012, Bo Sang
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * aaaaaaaa
+ * ----END-OF-LEGAL-STUFF---- 
+*/
+
+#include "mlist.h"
+#include "marray.h"
+#include "mdeque.h"
+#include "mvector.h"
+#include "m_map.h"
+
+#include <sys/time.h>
+#include <time.h>
+
+service GenericGameOfLife;
+provides GenericStencil;
+
+
+trace = med;
+
+constants {
+}
+
+services {
+    Transport tcp = TcpTransport();
+}
+
+states {
+}
+/*
+method_remappings {
+	uses {
+		upcall_val_updated( const mace::deque<Postion>& <- const mace::deque<std::string>& ,  
+				const mace::deque<double>& <- const mace::deque<std::string>& ,  
+				const mace::deque<double>& <- const mace::deque<std::string>& ,  
+				const Identifier& <- const std::string&);
+	}
+}
+*/
+
+constructor_parameters {
+  registration_uid_t UPCALL_REGID = 2;
+}
+
+auto_types {
+	Index __attribute((comparable(equals=default; lessthan=default))) {
+		std::string idx;
+		uint64_t round;
+		int flag;
+	}
+
+	LessIndex __attribute((comparable(equals=default; lessthan=default))) {
+		std::string lidx;
+		int flag;
+	}
+
+	Barrier {
+  	std::string _identifier;
+
+	  mace::deque<std::string> _required_vars;					
+		mace::map<Index, std::string> _vals_map;
+		mace::deque<std::string> _vars;
+
+		mace::map<std::string, Index> _vars_idxes_map;
+		int _count;
+	}
+}
+
+typedefs {
+	typedef mace::deque<std::string> StringQueue;  		
+}
+
+state_variables {
+	context Stencil_Server {
+		mace::map<Index, std::string> _ele_values;
+		mace::map<LessIndex, uint64_t> _rounds_map;
+		mace::map<Index, StringQueue> _waiting_ids;
+
+		mace::map<std::string, Barrier> _id_bar_map;
+	}
+}
+
+messages {
+				
+}
+
+transitions {
+    downcall maceInit(){
+      // stub
+    }
+
+    downcall [__null] update_value( mace::deque<std::string> const& idxes, mace::deque<uint64_t> const& rounds, 
+	        mace::deque<std::string> const& vals, int flag){
+			int i;
+			for(i=0; i<(int)idxes.size(); i++){
+				Index Idx;
+		  	Idx.idx = idxes[i];
+				Idx.round = rounds[i];
+				Idx.flag = flag;
+				async_update_val(Idx, vals[i]);
+			}
+				
+	}
+
+	downcall [__null] add_barrier( mace::deque<std::string> const& required_vars, mace::deque<int> const& flags, mace::deque<uint64_t> const& rounds, 
+            mace::deque<std::string> const& vars, std::string const& identifier){
+		Barrier bar;
+
+		bar._required_vars = required_vars;
+    bar._vars = vars;
+		int i;
+		for(i=0; i<(int)required_vars.size(); i++){
+		    Index Idx;
+        Idx.idx = required_vars[i];
+        Idx.round = rounds[i];
+        Idx.flag = flags[i];
+
+				(bar._vals_map)[Idx] = "";
+				(bar._vars_idxes_map)[required_vars[i]] = Idx;
+		}
+		
+		bar._count = 0;
+		bar._identifier = identifier;
+		async_add_bar(bar);	
+	}
+
+	async [Stencil_Server] add_bar( Barrier barrier){
+		_id_bar_map[barrier._identifier] = barrier;
+
+		mace::map<Index, std::string>& vals_map = barrier._vals_map;
+				
+		mace::map<Index, std::string>::iterator iter = vals_map.begin();
+		for(; iter!=vals_map.end(); iter++){
+			mace::map<Index, std::string>::iterator val_iter = _ele_values.find(iter->first);
+			if(val_iter != _ele_values.end()){
+			    iter->second = val_iter->second;
+					barrier._count++;
+			}else{
+				mace::map< Index, mace::deque<std::string> >::iterator wid_iter = _waiting_ids.find(iter->first);
+				if(wid_iter == _waiting_ids.end()){
+					mace::deque<mace::string> idq;
+					idq.push_back(barrier._identifier);
+					_waiting_ids[iter->first] = idq;
+				}else{
+					(wid_iter->second).push_back(barrier._identifier);
+				}
+			}
+		}
+
+		if(barrier._count == (int)barrier._required_vars.size()){
+		    invoke_value_updated(barrier);	
+		}
+	}
+
+	async [Stencil_Server] update_val( Index idx, std::string val ){
+		LessIndex Lidx;
+		Lidx.lidx = idx.idx;
+		Lidx.flag = idx.flag;
+
+		mace::map<LessIndex, uint64_t>::iterator rmap_iter = _rounds_map.find(Lidx);
+		if(rmap_iter!=_rounds_map.end()){
+			Index old_idx;
+			old_idx.idx = idx.idx;
+			old_idx.flag = idx.flag;
+			old_idx.round = rmap_iter->second;
+
+			_ele_values.erase(old_idx);
+		}
+		_rounds_map[Lidx] = idx.round;
+				
+		_ele_values[idx] = val;
+		mace::map<Index, StringQueue>::iterator q_iter =  _waiting_ids.find(idx);
+		if(q_iter != _waiting_ids.end()){
+			mace::deque<std::string> idq = q_iter->second;
+
+			while(!idq.empty()){
+			  std::string id = idq.front();
+				idq.pop_front();
+				mace::map<std::string, Barrier>::iterator id_iter = _id_bar_map.find(id);
+				if(id_iter!=_id_bar_map.end()){
+					(id_iter->second)._vals_map[idx] = val;
+					(id_iter->second)._count ++;
+					if( (id_iter->second)._count >= (int)(id_iter->second)._required_vars.size()){
+						invoke_value_updated(id_iter->second);	
+					}
+				}
+			}
+			_waiting_ids.erase(q_iter);
+		}
+
+	}
+			
+}
+
+routines {
+		[__null] void invoke_value_updated(Barrier barrier){
+		  mace::deque<std::string>& required_vars = barrier._required_vars;
+			mace::map<std::string, Index>& vars_idxes_map = barrier._vars_idxes_map;
+			mace::deque<std::string> vals;
+			mace::deque<int> flags;
+			
+			mace::map<Index, std::string>& vals_map = barrier._vals_map;
+			mace::map<Index, std::string>::iterator iter;
+			
+			int i;
+			for(i=0; i<(int)required_vars.size(); i++) {
+				Index idx = vars_idxes_map[required_vars[i]];
+				iter = vals_map.find(idx);
+				if(iter != vals_map.end()){
+					vals.push_back(iter->second);
+					flags.push_back(idx.flag);
+				}else{
+					maceout<<"Fail to collect value of some elements"<<Log::endl;	
+				}
+			}
+
+			//upcall_val_updated(required_vars, vals, barrier._vars, barrier._identifier);
+			upcall_val_updated(required_vars, vals, barrier._vars, flags, barrier._identifier, UPCALL_REGID);
+		}
+}
+
+

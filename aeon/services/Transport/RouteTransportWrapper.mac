@@ -1,0 +1,80 @@
+/* 
+ * RouteTransportWrapper.mac : part of the Mace toolkit for building distributed systems
+ * 
+ * Copyright (c) 2011, James W. Anderson, Charles Killian
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in the
+ *      documentation and/or other materials provided with the distribution.
+ *    * Neither the names of the contributors, nor their associated universities 
+ *      or organizations may be used to endorse or promote products derived from
+ *      this software without specific prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * ----END-OF-LEGAL-STUFF---- */
+
+service RouteTransportWrapper;
+
+provides Route;
+
+trace=med;
+
+services 
+{
+  Transport trans = auto(shared, [], [TcpTransport]); //TcpTransport();
+}
+
+messages 
+{
+  Data {
+    MaceKey source;
+    MaceKey dest;
+    registration_uid_t regId;
+    mace::string data;
+  }
+}
+
+transitions 
+{
+  downcall maceInit() {
+  }
+  downcall route(const MaceKey& dest, const std::string& msg, registration_uid_t regId) {
+    MaceKey nextHop = dest;
+    if(upcall_forward(__local_address, dest, nextHop, msg, regId)) {
+      return downcall_route(nextHop, Data(__local_address, dest, regId, msg));
+    }
+    return true;
+  }
+  upcall deliver(const MaceKey& src, const MaceKey& dest, const Data& msg) {
+    MaceKey nextHop = __local_address;
+    if(upcall_forward(msg.source, msg.dest, nextHop, msg.data, msg.regId)) {
+      if(nextHop == __local_address) {
+        upcall_deliver(msg.source, msg.dest, msg.data, msg.regId);
+      } else {
+        downcall_route(nextHop, msg);
+      }
+    }
+  }
+  upcall error(const MaceKey& nodeId, TransportError::type error_code, const std::string& m, registration_uid_t registrationUid) {
+    upcallAllVoid(error, nodeId, error_code, m);
+  }
+  upcall messageError(const MaceKey& dest, TransportError::type error_code, const Data& msgData, registration_uid_t regId) {
+    upcall_messageError(msgData.dest, error_code, msgData.data, msgData.regId);
+  }
+}

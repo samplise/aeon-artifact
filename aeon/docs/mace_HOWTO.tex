@@ -1,0 +1,131 @@
+% 
+% mace_HOWTO.tex : part of the Mace toolkit for building distributed systems
+% 
+% Copyright (c) 2011, Charles Killian, Dejan Kostic, Ryan Braud, James W. Anderson, John Fisher-Ogden, Calvin Hubble, Duy Nguyen, Justin Burke, David Oppenheimer, Amin Vahdat, Adolfo Rodriguez, Sooraj Bhat
+% All rights reserved.
+% 
+% Redistribution and use in source and binary forms, with or without
+% modification, are permitted provided that the following conditions are met:
+% 
+%    * Redistributions of source code must retain the above copyright
+%      notice, this list of conditions and the following disclaimer.
+%    * Redistributions in binary form must reproduce the above copyright
+%      notice, this list of conditions and the following disclaimer in the
+%      documentation and/or other materials provided with the distribution.
+%    * Neither the names of the contributors, nor their associated universities 
+%      or organizations may be used to endorse or promote products derived from
+%      this software without specific prior written permission.
+% 
+% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+% AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+% IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+% DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+% FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+% DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+% SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+% CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+% OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+% USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+% 
+% ----END-OF-LEGAL-STUFF----
+\documentclass[10pt]{article}
+
+\setlength{\textwidth}{6.50in}
+\setlength{\topmargin}{0.0in}
+\setlength{\textheight}{9.0in}
+\setlength{\headheight}{0.0in}
+\setlength{\headsep}{0.0in}
+\setlength{\oddsidemargin}{0in}
+\setlength{\parindent}{1em}
+%% \setlength{\parskip}{1.5ex plus0.5ex minus 0.5ex}
+
+\usepackage{ifthen}
+\usepackage{times}
+\usepackage{url}
+\usepackage{xspace}
+\usepackage{verbatim}
+\usepackage{fancyvrb}
+\usepackage{alltt}
+\usepackage{epsfig}
+\usepackage[lineno5]{lgrind}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% hyperref package
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\ifx\pdfoutput\undefined %%% for ps2pdf
+\usepackage[ps2pdf,
+bookmarks=true,
+linkbordercolor={0 0 1}]{hyperref}
+\else %%% we are using pdftex
+\usepackage[pdftex,
+bookmarks=true,
+%% hypertexnames=false,
+breaklinks=true,
+linkbordercolor={0 0 1}]{hyperref}
+\fi %%% endif for hyperref
+
+\newcommand{\mac}{\filename{.(m|mac|mace)}}
+\newcommand{\authorlist}{James W. Anderson, Charles Killian, and Amin Vahdat}
+
+\newcommand{\filename}{\texttt}
+\newcommand{\directory}{\texttt}
+\newcommand{\classname}{\textit}
+\newcommand{\typename}{\textit}
+\newcommand{\literal}{\textit}
+\newcommand{\variablename}{\texttt}
+\newcommand{\function}{\texttt}
+\newcommand{\command}{\textbf}
+\newcommand{\replaceable}{\textit}
+\newcommand{\symbolkw}{\texttt}
+
+\newenvironment{screen}{\begin{alltt}}{\end{alltt}}
+\DefineVerbatimEnvironment{programlisting}{Verbatim}{frame=lines,fontsize=\scriptsize,
+  numbers=right,numbersep=1mm,framesep=2mm}
+
+\title{Mace + Distributed Systems HOWTO}
+
+\author{James W. Anderson\\\emph{jwanderson@cs.ucsd.edu} \and
+  Charles Killian\\\emph{ckillian@cs.ucsd.edu} \and
+  Amin Vahdat\\\emph{vahdat@cs.ucsd.edu}}
+
+\begin{document}
+
+\maketitle
+
+\bigskip
+\begin{quote}
+Copyright \copyright 2005, \authorlist.
+
+All rights reserved.
+
+Terms of redistribution are described in \S~\ref{sec:copyright}, but 
+follow a BSD-Style license.
+\end{quote}
+\bigskip
+
+\begin{abstract}
+\noindent
+Mace is a programming language and toolkit for building robust and
+high-performance distributed systems.  The Mace programming language
+provides constructs to specify services, protocols, and distributed
+systems as a composition of services, messages, and C++ code.  The
+Mace toolkit provides implementations for many classes of services,
+including routing, overlay routing, multicast, aggregation, HTTP, and
+distributed hash tables.  The Mace toolkit also includes libraries for
+encryption, string processing, file I/O, serialization, and XML-RPC.
+\end{abstract}
+
+\tableofcontents
+
+\input{preamble}
+\input{intro}
+\input{installing}
+\input{simple-lg}
+\input{firstpingdetail-lg}
+\input{ping-lg}
+\input{pingdetail-lg}
+\input{real-lg}
+\input{advanced-lg}
+\input{faq-lg}
+\input{appendix-lg}
+
+\end{document}

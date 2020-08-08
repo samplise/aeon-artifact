@@ -1,0 +1,18 @@
+//CK: Suggest putting comments in this file to indicate what each message is for, and who sends it.
+messages {
+  RequestReply {
+    uint32_t clientId;
+  }
+
+  AddOwnershipRequest {
+    uint32_t nodeId;
+    uint32_t targetNodeId;
+    bool isNewNode;
+    uint32_t clientId;
+  }
+
+  AddOwnershipRequest2 {
+    uint32_t nodeId;
+    uint32_t clientId;
+  }
+}

@@ -1,0 +1,237 @@
+
+#include <stdlib.h>
+#include "Util.h"
+
+service TPCWMinApp;
+provides Null;
+
+typedefs {
+}
+services {
+
+}
+
+constants {
+  
+}
+
+constructor_parameters {
+  uint32_t N_CLIENT = 3;
+  uint64_t OUTPUT_COUNT = 10;
+  uint32_t N_ITEM_PER_CLIENT = 5;
+
+  uint32_t N_ITEM = 10;
+  uint32_t N_CART = 3;
+
+  uint64_t INIT_STOCK = 1000000;
+
+  uint32_t N_ROUND = 3;
+  uint32_t ROUND_PERIOD = 300;
+}
+
+messages {
+
+}
+
+auto_types {
+  
+}
+ 
+state_variables {
+  context Client<uint32_t clindId> {
+    uint64_t totalReqCount;
+    uint64_t totalReqLatency;
+    uint64_t lastReqLauchedTime;
+
+    uint32_t curRound;
+  }
+
+  context Controller {
+    uint32_t curRound;
+  }
+
+  context Cart<uint32_t cartId> {
+    mace::vector<uint32_t> itemIds;
+  }
+
+  context Item<uint32_t itemId> {
+    uint64_t quantity;
+  }
+}
+
+
+ 
+transitions {
+  downcall maceInit()  {
+    ADD_SELECTORS("TPCWMinApp");
+    ASSERT( N_CLIENT == N_CART );
+    ASSERT( N_ITEM >= (N_CLIENT * N_ITEM_PER_CLIENT) );
+    maceout << "Start TPCWMinApp!" << Log::endl;
+    async_initController();
+  }
+
+  async [Client<cId>] initClient(const uint32_t& cId ) {
+    ADD_SELECTORS("TPCWMinApp");
+    maceout<< "To initialize Client " << cId << Log::endl;
+           
+    totalReqCount = 0;
+    totalReqLatency = 0;
+    curRound = 0;
+    
+    sleep(1);
+    async_launchRequest(cId);
+  }
+
+  async [Client<cId>] launchRequest( const uint32_t& cId ) {
+    ADD_SELECTORS("TPCWMinApp");
+    maceout << "Client("<< cId <<") launch the first request!" << Log::endl;
+      
+    uint32_t cart_id = cId;
+    
+    lastReqLauchedTime = mace::getmtime();
+    mace::map<uint32_t, uint64_t> items = getRequiredItems(cId, curRound);
+    
+    async_buyItems( cart_id, items, cId );
+  }
+
+  async [Client<cId>] requestReply( const uint32_t& cId, const bool& succ_flag ) {
+    ADD_SELECTORS("TPCWMinApp");
+
+    uint64_t lastReqLatency = mace::getmtime() - lastReqLauchedTime;
+    totalReqCount ++;
+    totalReqLatency += lastReqLatency;
+
+    if( totalReqCount % OUTPUT_COUNT == 0 ) {
+      double avgReqLatency = totalReqLatency / OUTPUT_COUNT;
+
+      maceout << "Client("<< cId <<") totalReqCount=" << totalReqCount << " avgReqLatency=" << avgReqLatency << Log::endl;
+      
+      totalReqLatency = 0;
+
+    }
+
+
+    uint32_t cart_id = cId;
+    
+    lastReqLauchedTime = mace::getmtime();
+    mace::map<uint32_t, uint64_t> items = getRequiredItems(cId, curRound);
+    
+    async_buyItems( cart_id, items, cId );
+  }
+
+  async [Client<cId>] setCurRound( const uint32_t& cId, const uint32_t& cur_round ){
+    curRound = cur_round;
+  }
+
+  async [Controller] initController() {
+    ADD_SELECTORS("TPCWMinApp");
+    maceout<< "Initialize controller!" << Log::endl;
+    curRound = 0;
+
+    for( uint32_t i=1; i<=N_CART; i++ ){
+      mace::string c_ctx_name = Util::generateContextName("Cart", i);
+      createNewOwnership( "Controller", c_ctx_name );
+      for( uint32_t j=1; j<=N_ITEM; j++ ) {
+        mace::string i_ctx_name = Util::generateContextName("Item", j);
+        createNewOwnership( c_ctx_name, i_ctx_name );
+      }
+    }
+
+    for( uint32_t i=1; i<=N_CLIENT; i++ ){
+      mace::string c_ctx_name = Util::generateContextName("Client", i);
+      createNewOwnership( "Controller", c_ctx_name );
+    }
+
+    for( uint32_t i=1; i<=N_CART; i++ ){
+      initCart(i);
+    }
+
+    for( uint32_t i=1; i<=N_ITEM; i++ ){
+      async_initItem(i);
+    }
+
+    for( uint32_t i=1; i<=N_CLIENT; i++ ){
+      async_initClient(i);
+    }
+    // async_changeRound();
+  }
+
+  async [Controller] changeRound() {
+    if( curRound >= N_ROUND ) {
+      return;
+    }
+
+    sleep( ROUND_PERIOD );
+    curRound ++;
+    for( uint32_t i=1; i<=N_CLIENT; i++ ){
+      async_setCurRound(i, curRound );
+    }
+    async_changeRound();
+  }
+
+  async [Item<item_id>] initItem( const uint32_t& item_id ) {
+    ADD_SELECTORS("TPCWMinApp");
+    maceout << "Initialize Item("<< item_id <<")!" << Log::endl;
+    quantity = INIT_STOCK;
+  }
+
+  async [Cart<cart_id>] buyItems( const uint32_t& cart_id, const mace::map<uint32_t, uint64_t>& items, const uint32_t& cId ) {
+    ADD_SELECTORS("TPCWMinApp");
+
+    mace::map<uint32_t, uint64_t>::const_iterator iter;
+    for( iter = items.begin(); iter != items.end(); iter++ ){
+      if( !checkItemStock(iter->first, iter->second) ) {
+        async_requestReply( cId, false );
+        return;
+      }
+    }
+
+    for( iter = items.begin(); iter != items.end(); iter++ ){
+      broadcast_aconfirmBuyItem( iter->first, iter->second );
+    }
+    async_requestReply( cId, true );
+  }
+
+  broadcast [Item<item_id>] aconfirmBuyItem( const uint32_t& item_id, const uint64_t& count ) {
+    quantity -= count;
+  }
+
+}
+
+routines {
+
+  [Cart<cart_id>] void initCart( const uint32_t& cart_id ) {
+    ADD_SELECTORS("TPCWMinApp");
+    maceout << "Initialize Cart("<< cart_id <<")!" << Log::endl;
+  }
+
+  [Item<item_id>] bool checkItemStock( const uint32_t& item_id, const uint64_t& count ) {
+    if( quantity >= count ) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  [Item<item_id>] void confirmBuyItem( const uint32_t& item_id, const uint64_t& count ) {
+    ADD_SELECTORS("TPCWMinApp");
+    quantity -= count;
+    if( quantity % OUTPUT_COUNT == 0 ){
+      maceout << "Item("<< item_id <<")'s quantity=" << quantity << Log::endl;
+    }
+  }
+
+  [__null] mace::map<uint32_t, uint64_t> getRequiredItems( const uint32_t& cId, const uint32_t& n_round ){
+    mace::map<uint32_t, uint64_t> items;
+
+    uint32_t n = (cId-1+n_round) % N_CLIENT + 1;
+    uint32_t start = (n-1)*N_ITEM_PER_CLIENT + 1;
+    uint32_t end = start + N_ITEM_PER_CLIENT - 1;
+    for( uint32_t i=start; i<=end; i++ ){
+      items[i] = 1;
+    }
+
+    return items;
+  }
+}
+
